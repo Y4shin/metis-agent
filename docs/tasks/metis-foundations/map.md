@@ -10,16 +10,17 @@ blocked_by: []
 ## Destination
 
 The network and plugin interfaces are real. `contracts/` is authoritative and
-holds an OpenAPI document for ordinary HTTP, an AsyncAPI document for
-WebSocket realtime communication, and shared payload schemas. The plugin
+holds an OpenAPI document covering ordinary HTTP and the server-sent events
+stream, plus shared payload schemas. The plugin
 contract crate defines the manifest and the versioned C ABI. The
 `api-contracts` crate carries generated Rust network types, and the `client`
-crate speaks HTTP and WebSocket to the daemon over Unix domain sockets on
-Linux and macOS and duplex byte-mode named pipes on Windows, with the same
-API reachable over an explicitly enabled TCP/TLS listener. A thin end-to-end
-skeleton runs: the terminal asks the daemon something over the local IPC
-transport and prints the response, proving the transport and realtime
-assumptions before anything is built on top.
+crate speaks HTTP, including the event stream, to the daemon over Unix domain
+sockets on Linux and macOS and duplex byte-mode named pipes on Windows, with
+the same API reachable over an explicitly enabled TCP/TLS listener. A thin
+end-to-end skeleton runs: the terminal asks the daemon something over the local
+IPC transport, subscribes to the daemon channel, and prints the response and
+the event, proving the transport and realtime assumptions before anything is
+built on top.
 
 ## Constraints
 
@@ -64,35 +65,30 @@ assumptions before anything is built on top.
 - The realtime part is designed in this effort, not deferred. The walking
   skeleton implements one request and one event against dummy endpoints to
   prove the transports; the realtime semantics are defined here.
-- HTTP carries the full feature set. Every capability reachable over WebSocket
-  is also reachable over HTTP, and WebSocket is an alternate path chosen per
-  operation or by client preference, never the only path. OpenAPI is the
-  complete functional contract; AsyncAPI references the same payload schemas.
-- The OpenAPI operationId is the canonical operation name on both transports.
-  A WebSocket request is `{correlation_id, operation, payload}` and the reply
-  is `{correlation_id, ok|error, payload}` over the same schemas as HTTP;
-  errors are typed payloads and the HTTP status derives from the error code.
+- HTTP is the only network transport, and the OpenAPI document is the complete
+  functional contract for it. Realtime events are a server-sent events stream
+  declared in the same document. AsyncAPI and WebSockets are dropped.
 - Events carry a daemon-wide monotonic id in a bounded in-memory ring. Resume
-  is by cursor, and an expired cursor or a daemon restart forces a resync over
-  HTTP. The event stream is ephemeral and is not the source of truth.
-- Subscriptions are ordinary operations naming a channel and returning
-  `{cursor, snapshot}`. Channels are `daemon`, `session:<id>`, `task:<id>`, and
-  `workflow_run:<id>`. Subscriptions do not survive a connection, and a resync
-  is a fresh subscribe. There is one delivery queue per connection, so observed
-  order equals event-id order across subscriptions.
+  is by cursor, and an expired cursor or a daemon restart forces a resync. The
+  event stream is ephemeral and is not the source of truth.
+- Channels are `daemon`, `session:<id>`, `task:<id>`, and `workflow_run:<id>`.
+  A stream selects one or more channels through query filters and begins with a
+  snapshot. Streams do not survive a reconnect, so a resync is a fresh stream.
+  There is one delivery queue per stream, so observed order equals event-id
+  order across channels.
 - Cancellation is an explicit, idempotent operation carrying the target
   correlation id; connection loss cancels nothing. A slow consumer is
   disconnected with a typed resync-required notice rather than having events
-  dropped. Protocol major version lives in the URL path prefix (`/v1`) on both
-  transports.
-- Keepalive is protocol-level WebSocket ping/pong with a server idle timeout,
-  not an application-level operation. Correlation ids are client-generated
-  opaque strings, unique per connection, echoed verbatim. The walking skeleton
-  proves the `/v1` prefix, one dummy request on both transports, one `daemon`
-  subscribe returning `{cursor, snapshot}`, and one dummy event.
-- A subscription's HTTP form is a server-sent events response: the snapshot is
-  one SSE event, the cursor is the SSE `id`, resume uses `Last-Event-ID`, and an
-  overflowing consumer gets a resync event before the connection closes.
+  dropped. Protocol major version lives in the URL path prefix (`/v1`) on every
+  request.
+- The stream's cursor is the SSE `id`, resume uses the standard `Last-Event-ID`
+  request header, keepalive is SSE comment lines, the snapshot is the first
+  event, and an overflowing consumer receives a resync event before the stream
+  closes. A stalled stream is closed on the server's idle timeout. Correlation
+  ids are client-generated opaque strings, echoed verbatim.
+- The walking skeleton proves the `/v1` prefix, one dummy HTTP request over the
+  local IPC transport, and one `daemon` channel stream delivering the dummy
+  event.
 - The plugin ABI is a small primitive set, not a C rendering of the Rust trait:
   a versioned entry point returning a function table (instance lifecycle,
   capability listing, one generic `invoke`, `cancel`, `release_buffer`,
@@ -116,12 +112,19 @@ assumptions before anything is built on top.
   and stored by the daemon only as a hash; revocation removes it and restarts.
   A token grants the full exposed surface with no per-client permissions, and
   every paired client can reach every agent. It travels as
-  `Authorization: Bearer` on HTTP and on the WebSocket upgrade. Clients keep it
+  `Authorization: Bearer` on every request, including the event stream. Clients
+  keep it
   in the platform keychain when possible, else in an owner-only file, and pin
   the server's public key fingerprint (SPKI). Pairing is reachable on both local
   IPC and the remote listener, gated by the preshared key, and closes by
   removing that key and restarting. Connection handshakes carry the protocol
   version, surface name, and client version.
+- Windows local IPC uses tokio named pipes in both the listener and the
+  connector, with a target-gated `windows-sys` for the security descriptor and
+  token queries and no `interprocess` dependency. The pipe descriptor is
+  `D:P(D;;GA;;;NU)(A;;GA;;;<daemon-user-SID>)(A;;GA;;;SY)`, mirroring Unix mode
+  0700, with the residual that any same-user process can connect. The endpoint
+  override is validated to start with the local pipe prefix.
 - `plugin-contract` holds the primitives, the payload types, the authoring
   trait, and both adapters, with the authoring side feature-gated;
   `metis-plugin-sdk` re-exports them and owns the async executor, helpers, core
@@ -147,6 +150,17 @@ assumptions before anything is built on top.
 
 - None recorded yet. New fog is added here when a task surfaces a question that
   is in scope but not yet sharp enough to be a task.
+- Windows pipe verification, from the `windows-pipe-security` findings: the exact
+  error a remote client observes, whether a low-integrity same-user process is
+  denied, and the Windows runner needed for the descriptor and pipe-mode
+  assertions.
+- Spec-first or code-first for the HTTP contract: whether `contracts/openapi.yaml`
+  stays authoritative with generated server and client code, or the daemon's Rust
+  types become the source and the documents are exported from them. Whether
+  generated Rust server code works well enough is being verified by a spike.
+- Generated code is committed to the repository with a CI drift check that
+  regenerates and fails on a diff. A Java toolchain in CI is acceptable if
+  spec-first codegen is chosen. These hold whichever side owns the contract.
 
 ## Out of scope
 

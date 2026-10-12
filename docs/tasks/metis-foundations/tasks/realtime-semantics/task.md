@@ -53,7 +53,7 @@ Already settled and not to be reopened:
 
 ## Decisions recorded
 
-**D1, capability parity and transport choice.** The HTTP/OpenAPI surface
+**D1, capability parity and transport choice (superseded by D15).** The HTTP/OpenAPI surface
 carries the full feature set: every capability reachable over WebSocket is
 also reachable over HTTP. WebSocket is an alternate path for the same
 operation, chosen per operation and possibly by client preference, never the
@@ -63,7 +63,7 @@ parallel ones; the daemon serves the same operation regardless of transport;
 and anything expressible only as a stream needs an HTTP form as well, such as
 chunked responses or server-sent events.
 
-**D2, operation addressing and framing.** The OpenAPI operationId is the
+**D2, operation addressing and framing (superseded by D15).** The OpenAPI operationId is the
 canonical operation name. A WebSocket request frame is
 `{correlation_id, operation, payload}` and the reply is
 `{correlation_id, ok|error, payload}`, using the same payload schemas as HTTP.
@@ -82,7 +82,7 @@ truth. After a daemon restart the ring is empty, every cursor has expired, and
 clients resync state over HTTP. Long-running work that survives a restart is
 represented by daemon state, which the client refetches.
 
-**D5, subscriptions.** `subscribe` and `unsubscribe` are ordinary operations
+**D5, subscriptions (form superseded by D15).** `subscribe` and `unsubscribe` are ordinary operations
 over the D2 framing, naming a channel and an optional filter. Channels are
 `daemon` for lifecycle and configuration events, `session:<id>`, `task:<id>`,
 and `workflow_run:<id>`, with plugin channels later. The subscribe reply carries
@@ -114,7 +114,7 @@ additive and never change the path.
 snapshot and the cursor at which it is valid, so there is no dedicated snapshot
 endpoint. The snapshot contents per channel are defined in the contract.
 
-**D11, liveness.** Protocol-level WebSocket ping/pong, with a server ping
+**D11, liveness (superseded by D15).** Protocol-level WebSocket ping/pong, with a server ping
 interval and an idle timeout, and a client missed-pong threshold after which it
 closes and reconnects with jittered exponential backoff and its stored cursor.
 There is no application-level ping operation, because keepalive is not a
@@ -125,12 +125,11 @@ capability and needs no HTTP parity. Intervals are configurable in
 connection, echoed verbatim by the server and never assigned or rewritten. HTTP
 may echo it in a response header for tracing. Cancellation references it.
 
-**D13, skeleton scope.** The walking skeleton proves the handshake under the
-`/v1` prefix, one dummy request served over both HTTP and WebSocket by the same
-handler, a `daemon` channel subscribe returning `{cursor, snapshot}`, and one
-dummy event. Resume, expiry, cancellation, and slow-consumer behaviour are
-specified here and covered by contract tests where the ring and the daemon are
-implemented.
+**D13, skeleton scope (form superseded by D15).** The walking skeleton proves
+the `/v1` prefix, one dummy HTTP request over the local IPC transport, and one
+`daemon` channel stream delivering the dummy event. Resume, expiry,
+cancellation, and slow-consumer behaviour are specified here and covered by
+contract tests where the ring and the daemon are implemented.
 
 **D14, HTTP event stream.** A subscription over HTTP is a server-sent events
 response (`text/event-stream`): the snapshot arrives as an SSE event, later
@@ -138,6 +137,22 @@ events as `event` events, the cursor is the SSE `id`, resume uses the standard
 `Last-Event-ID` request header, heartbeats are comment lines, and an
 overflowing consumer receives a typed resync event before the connection
 closes. The same channel, filter, and event schemas serve both transports.
+
+**D15, SSE is the only realtime transport (supersedes D1, D2, D5 in form, D11,
+and D13 in form).** AsyncAPI and WebSockets are dropped: the realtime protocol
+is a server-sent events stream declared in the same OpenAPI document as the rest
+of the API. Unchanged: the daemon-wide event id and ring (D3), ephemerality and
+resync on restart (D4), one delivery queue per stream with observed order equal
+to event-id order (D6), explicit idempotent cancellation (D7), disconnect with a
+resync notice rather than dropped events (D8), the major version in the URL path
+(D9), resync as a fresh stream beginning with a snapshot (D10), client-generated
+correlation ids (D12), and SSE as the stream format (D14). Changed: the parity
+rule is moot because HTTP is the only transport, the WebSocket operation
+envelope is moot, a subscription is a filtered `GET` on the event endpoint
+rather than a subscribe operation, liveness is SSE comment lines plus a server
+idle timeout instead of ping and pong, and the skeleton exercises one HTTP
+request plus one stream instead of one request on two transports.
+`contracts/asyncapi.yaml` is removed.
 - Which of the above the walking skeleton exercises.
 
 ## Recommended starting answer
@@ -192,23 +207,22 @@ polling. Both rejected in favour of server-sent events (D14).
 
 ## Dependent-task implications
 
-- `contract-generators`: the AsyncAPI document references the OpenAPI payload
-schemas rather than defining parallel ones, and the generator research must
-confirm that the chosen tooling can express a `text/event-stream` response and
-shared schema references.
-- `authentication-scheme`: the credential travels in the WebSocket upgrade
-request and the HTTP `Authorization` header. Version negotiation is settled
+- `contract-generators`: its finding that no AsyncAPI to Rust generator exists
+supports dropping AsyncAPI entirely. The chosen tooling must express a
+`text/event-stream` response.
+- `authentication-scheme`: the credential travels in the `Authorization` header
+on every request, including the event stream. Version negotiation is settled
 here.
-- `metis-daemon`: the event bus and ring, one delivery queue per connection,
-per-channel subscribe snapshots, explicit cancellation, and the configurable
-ring size, queue bound, ping interval, idle timeout, and backoff parameters.
+- `metis-daemon`: the event bus and ring, one delivery queue per stream,
+per-channel stream snapshots, explicit cancellation, and the configurable ring
+size, queue bound, keepalive interval, idle timeout, and backoff parameters.
 - `client`: reconnection with backoff, cursor storage and resubscribe, snapshot
-application, cancellation, and both the WebSocket and server-sent-events
-transports behind one API.
+application, cancellation, and the server-sent events stream behind the same
+API.
 - `metis-surfaces`: projections must tolerate a resync-required disconnect and
 a full snapshot refresh.
-- The skeleton's tickets: one dummy request over both transports, one `daemon`
-subscribe returning `{cursor, snapshot}`, and one dummy event.
+- The skeleton's tickets: one dummy HTTP request over the local IPC transport,
+one `daemon` channel stream, and one dummy event.
 
 ## Remaining fog
 
