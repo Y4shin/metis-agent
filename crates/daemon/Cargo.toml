@@ -1,0 +1,15 @@
+[package]
+name = "daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agent-harness.workspace = true
+workflow.workspace = true
+plugin-runtime.workspace = true
+api-contracts.workspace = true

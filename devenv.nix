@@ -13,5 +13,7 @@
 
   packages = [
     pkgs.git
+    # The SvelteKit frontend under apps/ui builds inside this shell too.
+    pkgs.nodejs
   ];
 }

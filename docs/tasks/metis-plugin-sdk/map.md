@@ -1,0 +1,70 @@
+---
+type: map
+title: Metis plugin SDK
+status: stable
+blocked_by: [metis-plugins]
+---
+
+# Metis plugin SDK
+
+## Destination
+
+Authoring a Metis plugin is practical. A Rust plugin authoring SDK sits on top
+of `plugin-contract`: a Rust trait, export adapters that translate an
+implementation into the C ABI, and the serialisation and async scheduling
+helpers a plugin needs, kept out of the runtime's dependency footprint. A set
+of core plugins ships with Metis, exercising the SDK rather than reaching past
+it. A plugin CLI scaffolds a new plugin, builds it for the supported
+platforms, packages it into a bundle, and installs it into the daemon. Other
+languages can still implement the C ABI directly; the SDK is the Rust path,
+not a requirement.
+
+## Constraints
+
+- The SDK wraps the C ABI. It does not change it, and the runtime does not
+  depend on it.
+- SDK functionality is feature-gated or extracted into its own crate so that
+  export helpers, serialisation, or async scheduling do not weigh down the
+  runtime.
+- Keep dependencies small.
+- Core plugins use only the SDK and the host context they are given. They do
+  not read daemon configuration or reach around the plugin interface.
+- The CLI produces the bundle formats that `metis-plugins` accepts; it does
+  not invent a second format.
+
+## Decisions so far
+
+- From `docs/rough-plan.md`, "plugin-contract": extract an optional
+  `plugin-sdk` crate if export helpers, serialisation, or async scheduling
+  bring substantial dependencies; the runtime should only need the
+  underlying contract.
+- From "Native plugin design": Rust authors use the SDK's trait and export
+  adapters, while other languages implement the C ABI directly.
+- From "Async boundary": plugin-owned executors hidden behind the Rust SDK are
+  the initial preferred approach, so the SDK owns the executor model that the
+  runtime does not see.
+- The bootstrap deliberately left `plugin-sdk` uncreated; this effort creates
+  it when the boundary proves useful.
+
+## Fog
+
+- Which core plugins ship first, and what they demonstrate.
+- CLI responsibilities: scaffold, build, package, install, publish, and how
+  much cross-compilation the build step covers.
+- The async executor model the SDK exposes and how it hides from the runtime.
+- Serialisation helpers and their dependency footprint.
+- The plugin version, ABI version, and bundle version policy as seen by
+  authors.
+- How the SDK and CLI are tested against the runtime without a full daemon.
+- Whether the SDK is a crate inside this repository, a separately published
+  crate, or both.
+- Further plugin-adjacent followups that this effort surfaces are charted in
+  later Wayfinder sessions rather than guessed here.
+
+## Out of scope
+
+- The host side of the plugin system: the ABI definition itself, manifest
+  validation, bundle extraction, library loading, the registry, dispatch, and
+  lifetime management, all of which belong to `metis-plugins`.
+- The workflow crate and the agent harness.
+- The daemon composition layer and its configuration resolution.

@@ -8,8 +8,8 @@ devenv shell
 ```
 
 The shell provides the current Rust nightly toolchain (rustc, cargo, clippy,
-rustfmt, rust-analyzer) plus Git. The nightly version is pinned by
-`devenv.lock`, and `channel = "nightly"` is set in `devenv.nix`.
+rustfmt, rust-analyzer) plus Git, Node.js, and npm. The nightly version is
+pinned by `devenv.lock`, and `channel = "nightly"` is set in `devenv.nix`.
 
 Run a one-off command inside the shell with:
 
@@ -17,8 +17,11 @@ Run a one-off command inside the shell with:
 devenv shell -- cargo --version
 ```
 
-The Rust code is a Cargo workspace rooted at the repo root (`Cargo.toml`).
-Crates are added to the workspace `members` as they appear.
+The Rust code is a Cargo workspace rooted at the repo root (`Cargo.toml`),
+with crates under `crates/` listed explicitly in `members`.
+
+The SvelteKit frontend lives in `apps/ui` and uses npm. Run its checks from
+that directory with `npm run check` and `npm run build`.
 
 ## Reproduction
 

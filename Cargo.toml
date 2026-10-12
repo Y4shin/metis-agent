@@ -1,5 +1,38 @@
-# Root Cargo workspace. Crates are added to `members` (or a glob such as
-# `crates/*`) as they appear.
+# Root Cargo workspace. Crates live under `crates/` and are listed explicitly
+# in `members` as they appear. Inter-crate path dependencies encode the
+# dependency direction agreed in `docs/rough-plan.md`.
 [workspace]
 resolver = "3"
-members = []
+members = [
+    "crates/agent-harness",
+    "crates/workflow",
+    "crates/plugin-contract",
+    "crates/plugin-runtime",
+    "crates/api-contracts",
+    "crates/client",
+    "crates/daemon",
+    "crates/terminal",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Y4shin/metis-agent"
+
+[workspace.lints.clippy]
+all = "warn"
+
+# The bootstrap wires inter-crate path dependencies before any crate has
+# content, so `unused_dependencies` is noise until the first real code lands.
+[workspace.lints.cargo]
+unused_dependencies = "allow"
+
+[workspace.dependencies]
+agent-harness = { path = "crates/agent-harness" }
+workflow = { path = "crates/workflow" }
+plugin-contract = { path = "crates/plugin-contract" }
+plugin-runtime = { path = "crates/plugin-runtime" }
+api-contracts = { path = "crates/api-contracts" }
+client = { path = "crates/client" }

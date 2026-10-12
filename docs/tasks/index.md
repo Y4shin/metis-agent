@@ -8,7 +8,12 @@ title: docs/tasks
 
 ## Live
 
-_None yet._
+- metis-agent-core
+- metis-bootstrap
+- metis-foundations
+- metis-plugin-sdk
+- metis-plugins
+- metis-surfaces
 
 ## Archived
 
