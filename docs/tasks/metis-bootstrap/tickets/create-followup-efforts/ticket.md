@@ -62,3 +62,19 @@ Do not delegate this ticket to subagents.
 ## Blocked by
 
 - None (can start immediately).
+
+## Implementation notes
+
+Delivered by the parent session with no subagent delegation, on `main`.
+
+- Five map skeletons exist and are registered in `docs/tasks/index.md`: 
+  `metis-foundations`, `metis-agent-core`, `metis-plugins`, `metis-surfaces`,
+  `metis-plugin-sdk`.
+- Effort-to-effort edges were added beyond the minimum: `metis-plugins` and
+  `metis-surfaces` are blocked by `metis-foundations`, and
+  `metis-plugin-sdk` is blocked by `metis-plugins`. `tw_dependency_levels`
+  resolves them.
+- The fifth effort is the plugin SDK deliverable itself (SDK, core plugins,
+  CLI), not a separate planner map.
+- No decision tasks were written into any of the five maps; each followup
+  charts its own frontier in a later Wayfinder session.

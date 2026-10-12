@@ -62,3 +62,27 @@ Do not delegate this ticket to subagents.
 ## Blocked by
 
 - None (can start immediately).
+
+## Implementation notes
+
+Delivered by the parent session with no subagent delegation, on `main`.
+
+- All nine crates, `contracts/`, `apps/ui`, and the tooling are in place, and
+  every acceptance check was run and passed: `cargo check --workspace`,
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test`, plus `npm run check` and `npm run build` in `apps/ui`.
+- Binaries carry a bare `fn main() {}` rather than a truly empty `src/main.rs`,
+  because a Rust binary needs an entry point to compile. The acceptance
+  criterion was corrected to match.
+- `apps/ui` uses `@sveltejs/adapter-static` with `fallback: 'index.html'`.
+  Strict prerendering rejects the generated dynamic root route, and the shell
+  is a single-page app that reaches the daemon through the Rust client.
+- The workspace lint block allows `cargo::unused_dependencies` because the
+  inter-crate path dependencies are wired before any crate has code that
+  consumes them. Flip it back on once real code lands.
+- `LICENSE` was added: `README.md` already declared AGPL-3.0, but the file did
+  not exist.
+- CI runs the Rust checks through the devenv shell. The frontend checks are
+  not in CI yet.
+- No `rust-toolchain.toml`; devenv remains the single toolchain source until CI
+  builds release binaries.
