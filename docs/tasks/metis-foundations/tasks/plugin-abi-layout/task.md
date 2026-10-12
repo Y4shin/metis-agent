@@ -182,6 +182,45 @@ the cdylib member and the host would load a stale library; and the host needs a
 bounded wait with a timeout, since an unbounded wait on a completion that never
 arrives hangs forever.
 
+### Authoring trait spike (plugin-authoring-trait-spike)
+
+Also conclusive. A trait with several capability methods and a cancellation
+method dispatches through one generic `invoke` addressed by capability name, the
+always-pending async path works end to end, and the trait module imports no ABI
+type. Translation size: about 780 code lines, of which only about 90 know about
+the trait (33-line trait, 51-line plugin, and 6 lines of ABI wiring through a
+`const fn`), so no macro is justified at this size.
+
+Two decisions `plugin-contract` must settle before pinning the authoring surface:
+
+- Cancellation: the spike used a poll flag with an adapter-rebuilt context, which
+  has no waker and rebuilds the per-request context, so a plugin blocked in I/O
+  will not notice cancellation promptly. The alternative is a cancellation future
+  or signal.
+- Inline completion: an async trait method cannot hand back a synchronous result,
+  so the adapter always returned `Pending`. Recovering D11's inline shape means
+  polling the future once under `invoke` and falling back, which changes the cost
+  model.
+
+Contract gaps the trait exposed, to settle in the spec:
+
+- A lifecycle hook is missing. The trait needs `Default` for construction, so
+  construction cannot fail or take configuration, and there is no `started` or
+  `stopped` hook. `emit_event` also had no route through the trait, so the spike
+  emitted zero events where the mechanics spike used it.
+- Descriptor names and dispatch names are separate declarations with no
+  consistency check. Record a single `(name, kind, version, handler)` table per
+  plugin, or a creation-time check that every descriptor has an arm.
+- The error type mirrors the status space minus `ok` and `pending`, and
+  `Cancelled` carries control flow: returning it after a successful cancel
+  suppresses the completion. That rule belongs in the contract.
+- The authoring request and response types are serde types, so the plugin author
+  surface is a serialisation surface and D3's placement of serialisation is
+  load-bearing.
+- The trait forces `Send + Sync + 'static` on the plugin and `+ Send` on every
+  capability future, because the worker hop moves the future. This constrains
+  plugin authors and belongs on the trait documentation.
+
 ## Alternatives considered
 
 - Mirroring the Rust trait in C. Rejected by the user's design principle: the

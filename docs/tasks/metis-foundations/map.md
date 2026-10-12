@@ -106,6 +106,14 @@ built on top.
   the table's first field with an append-only prefix, and cbindgen needs an
   explicit export list. The generated header, the layout assertions, and the C
   compile check all work and are cheap.
+- The authoring trait spike is also conclusive: a trait dispatches through one
+  generic `invoke`, and only about 90 of roughly 780 translation lines know
+  about the trait, so no macro is justified. It leaves two decisions for
+  `plugin-contract` (the cancellation shape, and always-pending versus a
+  first-poll inline attempt) and exposes gaps: no lifecycle hook, `Default`
+  being required for construction, no route for `emit_event`, no consistency
+  check between descriptor names and dispatch names, and an error variant that
+  carries control flow.
 - The remote transport uses rustls on both sides with static linking preferred
   and no dynamically linked system libraries on the daemon. Plaintext TCP is
   allowed with a warning unless reverse-proxy mode names trusted proxies. The
@@ -161,6 +169,12 @@ built on top.
   error a remote client observes, whether a low-integrity same-user process is
   denied, and the Windows runner needed for the descriptor and pipe-mode
   assertions.
+- The contract technology is open. OpenAPI with a JSON and SSE API is measured:
+  229 handwritten lines for client-only generation, with SSE fully handwritten.
+  Research recommends Protobuf with ConnectRPC Rust at medium confidence, which
+  would remove the DTO duplication and the handwritten SSE plumbing but brings
+  pre-1.0 dependencies and a handwritten named pipe. A spike is answering the
+  transport, line-cost, and static-link questions before the choice is made.
 - Spec-first or code-first for the HTTP contract: whether `contracts/openapi.yaml`
   stays authoritative with generated server and client code, or the daemon's Rust
   types become the source and the documents are exported from them. Whether

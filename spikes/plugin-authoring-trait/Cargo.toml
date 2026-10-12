@@ -1,0 +1,34 @@
+# Throwaway spike workspace for the plugin authoring trait prototype.
+#
+# Deliberately NOT a member of the repository root workspace: it has its own
+# `[workspace]` table and its own target directory, and it is never wired into
+# CI. See docs/tasks/metis-foundations/tasks/plugin-authoring-trait-spike/.
+#
+# `spike-abi` and `spike-payload` are the committed primitives from the
+# mechanics spike, depended on by path so this spike does not re-declare the
+# ABI. Nothing under spikes/plugin-abi-mechanics is modified.
+[workspace]
+resolver = "3"
+members = [
+    "crates/authoring",
+    "crates/plugin",
+    "crates/consumer",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+spike-abi = { path = "../plugin-abi-mechanics/crates/abi" }
+spike-payload = { path = "../plugin-abi-mechanics/crates/payload" }
+spike-authoring = { path = "crates/authoring" }
+libloading = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# D7 needs a catchable panic inside every exported adapter, so nothing in this
+# spike is built with panic = "abort".
+[profile.dev]
+panic = "unwind"

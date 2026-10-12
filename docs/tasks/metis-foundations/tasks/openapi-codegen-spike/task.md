@@ -3,7 +3,7 @@ type: task
 subtype: prototype
 title: Does spec-first generated server and client code work well enough?
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 ---
 

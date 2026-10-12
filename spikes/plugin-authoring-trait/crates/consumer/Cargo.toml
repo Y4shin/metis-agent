@@ -1,0 +1,16 @@
+[package]
+name = "spike-trait-consumer"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "spike-trait-consumer"
+path = "src/main.rs"
+
+[dependencies]
+spike-abi.workspace = true
+spike-authoring.workspace = true
+spike-payload.workspace = true
+libloading.workspace = true
+serde_json.workspace = true
