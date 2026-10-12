@@ -86,3 +86,8 @@ Each seam is a command run inside the devenv shell unless noted:
   `cargo test`, and `apps/ui` `npm run check` and `npm run build` all pass.
 - The workspace lint block allows `cargo::unused_dependencies` because the path
   dependencies are wired before any crate has code that consumes them.
+- The branch model was not used. The parent session implemented both tickets
+  directly, so the work landed as ordinary commits on `main` instead of on
+  `task/<slug>` landing branches. The per-ticket close-out in `finalize-task`
+  must therefore be run against `main`, and its `git checkout task/<slug>` step
+  does not apply.
