@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Create the five followup effort maps
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 size: s

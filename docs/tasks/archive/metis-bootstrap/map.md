@@ -1,7 +1,7 @@
 ---
 type: map
 title: Metis bootstrap
-status: stable
+status: deprecated
 blocked_by: []
 ---
 
