@@ -1,15 +1,17 @@
 # Testing
 
-> Status: no test framework exists yet. This file is a template; fill it in
-> once there is code to test.
+> Status: no tests exist yet. The framework is known; the conventions are
+> not.
 
 ## Framework
 
-- To be decided.
+- Rust's built-in test harness (`#[test]`), run by `cargo test`.
 
 ## Run commands
 
-- To be decided.
+Run these inside the devenv shell (`devenv shell`):
+
+- `cargo test` -- the full test suite across the workspace.
 
 ## Mock conventions
 
