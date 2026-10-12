@@ -72,6 +72,10 @@ session.
   wired to match the dependency diagram in `docs/rough-plan.md`.
 - **D9, followup maps.** The five followup maps are written by a manual
   ticket in this effort, not charted directly by this Wayfinder run.
+- **D10, execution deviation.** The parent session implemented both tickets
+directly, so the work landed as ordinary commits on `main` rather than on
+`task/<slug>` landing branches. `finalize-task`'s per-ticket close-out was run
+against `main`. See `arch-spec.md` for the full note.
 
 ## Fog
 
