@@ -1,0 +1,12 @@
+[package]
+name = "spike-abi"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "spike_abi"
+path = "src/lib.rs"
+
+[build-dependencies]
+cc.workspace = true

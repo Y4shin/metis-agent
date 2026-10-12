@@ -133,6 +133,55 @@ strategy: the ABI mechanics spike and the authoring trait spike. Either may be
 abandoned with an inconclusive result if it becomes too complex or long. An
 inconclusive result blocks neither the remaining tasks nor the spec.
 
+## Spike amendments (plugin-abi-mechanics-spike)
+
+The mechanics spike ran to a conclusive result: 39 runtime checks passed, the
+host exited zero, both layout-agreement tests passed, `cbindgen --check` reported
+no diff, and the cdylib exports exactly one symbol. The following amendments are
+taken from it. D0's provisional status covers them.
+
+- **D1**: the host table needs a `user_data` pointer, without which the
+  callbacks cannot work. Passing the host table to `invoke` per call while the
+  instance also retains it works and costs nothing.
+- **D2**: cbindgen needs `[export] include` to list every ABI type, because a
+  crate whose surface is a table of function pointers exports no functions to
+  seed its dependency graph. cbindgen 0.29.4 does not translate
+  `Option<NamedFnAlias>`, which constrains how the structs are authored.
+- **D4**: codec 1 returns `unsupported` while a bad version or non-zero reserved
+  bits returns `invalid_argument`, so the two failures stay distinguishable.
+- **D6**: releasing what you allocated also applies when the payload is ignored.
+  A late completion dropped because of a successful cancel still produced one
+  release.
+- **D7, revised**: `pending` joins the frozen status list, since no member could
+  express D11's deferred outcome. The spike used `Pending = 7`. The alternatives
+  are an out parameter carrying the completion shape, which keeps the status
+  space intact, and overloading `ok` with a null out buffer, which is rejected
+  because it makes "ok with no result" ambiguous. `catch_unwind` is required on
+  host callbacks too: a callback is itself an `extern "C"` frame reached from
+  plugin code, so a panic inside it unwinds into plugin frames.
+- **D8**: `size` must be the table's first field so it is readable before
+  anything else; the fields a host knows form a prefix of the layout, so entries
+  can only ever be appended; and the entry point signature is frozen within a
+  major version, because the symbol name carries only the major. The spike used
+  an argument-free entry point for that reason.
+- **D12, revised**: after a successful cancel the host also retires its own
+  pending entry, because no completion is guaranteed and ignoring late callbacks
+  alone leaks one record per cancelled request. The rules state both halves of
+  the drop path: the plugin may suppress its completion after a successful
+  cancel, and the host must drop a completion that arrives anyway, since cancel
+  and completion race. Only the second half is safe alone.
+- **D13**: the literal sizes are 64-bit specific, so assertions must be written
+  through `size_of::<usize>()` or run per target, and the C side needs at least
+  `-std=c11`. The spike also exports the C-side measurements and compares them
+  with Rust, which catches a stale literal as well as layout drift.
+- **D14**: conclusive. The strategy stands and does not need abandoning.
+
+Two harness findings belong in the spec rather than the decisions: the cdylib
+must be built before the host runs, because `cargo run -p host` does not rebuild
+the cdylib member and the host would load a stale library; and the host needs a
+bounded wait with a timeout, since an unbounded wait on a completion that never
+arrives hangs forever.
+
 ## Alternatives considered
 
 - Mirroring the Rust trait in C. Rejected by the user's design principle: the

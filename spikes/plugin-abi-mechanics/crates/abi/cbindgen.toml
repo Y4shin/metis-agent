@@ -1,0 +1,37 @@
+language = "C"
+include_guard = "METIS_PLUGIN_ABI_H"
+pragma_once = true
+documentation = true
+documentation_style = "doxy"
+style = "both"
+usize_is_size_t = true
+cpp_compat = false
+tab_width = 4
+
+[export]
+include = [
+    "MetisStatus",
+    "MetisBuffer",
+    "MetisTablePrefix",
+    "MetisPluginTableV1",
+    "MetisHostApiV1",
+    "MetisCreateInstanceFn",
+    "MetisDestroyInstanceFn",
+    "MetisListCapabilitiesFn",
+    "MetisInvokeFn",
+    "MetisCancelFn",
+    "MetisReleaseBufferFn",
+    "MetisShutdownFn",
+    "MetisCompleteFn",
+    "MetisProgressFn",
+    "MetisEmitEventFn",
+    "MetisLogFn",
+    "MetisPluginEntryV1Fn",
+]
+
+[enum]
+prefix_with_name = true
+rename_variants = "ScreamingSnakeCase"
+
+[fn]
+rename_args = "None"

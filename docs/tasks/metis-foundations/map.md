@@ -99,6 +99,13 @@ built on top.
 - Two throwaway prototypes validate that ABI strategy: an ABI mechanics spike
   and an authoring trait spike. Either may be abandoned with an inconclusive
   result, which blocks neither the remaining tasks nor the spec.
+- The ABI mechanics spike was conclusive and amended those decisions: the status
+  enum gains `pending`, host callbacks are panic-guarded too, the host retires
+  its own pending entry after a successful cancel and still releases a dropped
+  completion's buffer, the host table carries a `user_data` pointer, `size` is
+  the table's first field with an append-only prefix, and cbindgen needs an
+  explicit export list. The generated header, the layout assertions, and the C
+  compile check all work and are cheap.
 - The remote transport uses rustls on both sides with static linking preferred
   and no dynamically linked system libraries on the daemon. Plaintext TCP is
   allowed with a warning unless reverse-proxy mode names trusted proxies. The

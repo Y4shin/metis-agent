@@ -3,7 +3,7 @@ type: task
 subtype: prototype
 title: Do the plugin ABI primitives actually work when compiled and loaded?
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 ---
 

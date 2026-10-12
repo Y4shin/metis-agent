@@ -1,0 +1,34 @@
+# Throwaway spike workspace for the plugin ABI mechanics prototype.
+#
+# This is deliberately NOT a member of the repository root workspace: it has its
+# own `[workspace]` table, its own lockfile and its own target directory. It is
+# never wired into CI. See docs/tasks/metis-foundations/tasks/
+# plugin-abi-mechanics-spike/task.md.
+[workspace]
+resolver = "3"
+members = [
+    "crates/abi",
+    "crates/payload",
+    "crates/plugin",
+    "crates/host",
+    "crates/header-gen",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+spike-abi = { path = "crates/abi" }
+spike-payload = { path = "crates/payload" }
+libloading = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+cbindgen = "0.29"
+cc = "1"
+
+# D7 needs a catchable panic inside the exported adapter, so nothing in this
+# spike is built with panic = "abort".
+[profile.dev]
+panic = "unwind"

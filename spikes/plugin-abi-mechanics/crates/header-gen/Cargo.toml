@@ -1,0 +1,20 @@
+# Regenerates the committed cbindgen header for spike-abi.
+#
+#   devenv shell -- cargo run --manifest-path spikes/plugin-abi-mechanics/Cargo.toml -p spike-header-gen
+#   devenv shell -- cargo run --manifest-path spikes/plugin-abi-mechanics/Cargo.toml -p spike-header-gen -- --check
+#
+# `--check` writes the regenerated header to stdout and exits 2 when it differs
+# from the committed file, mirroring the D2 "regeneration produces no diff" CI
+# check.
+[package]
+name = "spike-header-gen"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "spike-header-gen"
+path = "src/main.rs"
+
+[dependencies]
+cbindgen.workspace = true
