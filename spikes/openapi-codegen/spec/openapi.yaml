@@ -1,0 +1,86 @@
+openapi: 3.1.0
+info:
+  title: Metis codegen spike API
+  version: 0.0.0
+  description: |
+    Minimal spec owned by the openapi-codegen spike. One ordinary JSON request
+    and one server-sent-events endpoint are enough to answer the task's
+    questions.
+paths:
+  /v1/echo:
+    post:
+      operationId: echo
+      summary: Echo a message back with a server timestamp.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EchoRequest'
+      responses:
+        '200':
+          description: Echoed message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EchoResponse'
+        '400':
+          description: Bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v1/events:
+    get:
+      operationId: streamEvents
+      summary: Server-sent event stream with resumable cursor.
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Cursor of the last event the client saw, for resume.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A stream of events.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/Event'
+components:
+  schemas:
+    EchoRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+    EchoResponse:
+      type: object
+      required: [message, receivedAt]
+      properties:
+        message:
+          type: string
+        receivedAt:
+          type: string
+          format: date-time
+    Event:
+      type: object
+      required: [id, kind, payload]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [heartbeat, message]
+        payload:
+          type: string
+    ApiError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string

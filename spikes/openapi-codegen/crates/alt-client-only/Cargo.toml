@@ -1,0 +1,22 @@
+[package]
+name = "alt-client-only"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+spike-shared = { workspace = true }
+metis-spike-client = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "alt-client-only"
+path = "src/main.rs"

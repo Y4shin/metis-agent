@@ -1,0 +1,19 @@
+[package]
+name = "metis-spike-client"
+version = "0.0.0"
+authors = ["OpenAPI Generator team and contributors"]
+description = "Minimal spec owned by the openapi-codegen spike. One ordinary JSON request and one server-sent-events endpoint are enough to answer the task's questions. "
+# Override this license by providing a License Object in the OpenAPI.
+license = "Unlicense"
+edition = "2021"
+
+[dependencies]
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = "^1.0"
+serde_repr = "^0.1"
+url = "^2.5"
+uuid = { version = "^1.8", features = ["serde", "v4"] }
+reqwest = { version = "^0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+
+[lints]
+workspace = true

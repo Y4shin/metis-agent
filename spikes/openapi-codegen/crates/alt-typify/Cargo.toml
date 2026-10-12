@@ -1,0 +1,22 @@
+[package]
+name = "alt-typify"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+spike-shared = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[[bin]]
+name = "alt-typify"
+path = "src/main.rs"

@@ -1,0 +1,24 @@
+[package]
+name = "spike-wire"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+spike-shared = { workspace = true }
+metis-spike-server = { workspace = true }
+metis-spike-client = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[[bin]]
+name = "spike"
+path = "src/bin/spike.rs"

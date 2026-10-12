@@ -1,0 +1,18 @@
+[package]
+name = "typify-gen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+typify = { version = "0.8", default-features = false }
+schemars = "0.8"
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+
+[[bin]]
+name = "typify-gen"
+path = "src/main.rs"

@@ -1,0 +1,42 @@
+# Throwaway spike workspace for the openapi-codegen prototype.
+#
+# Deliberately NOT a member of the repository root workspace: it has its own
+# `[workspace]` table, its own lockfile and its own target directory. It is
+# never wired into CI. See docs/tasks/metis-foundations/tasks/
+# openapi-codegen-spike/task.md.
+[workspace]
+resolver = "3"
+members = [
+    "generated/server",
+    "generated/client",
+    "crates/shared",
+    "crates/wire",
+    "crates/alt-client-only",
+    "crates/alt-typify",
+    "crates/typify-gen",
+]
+
+# Mirrors the root workspace lint posture so the clippy answer is measured
+# under the same rule set the repository actually uses.
+[workspace.lints.clippy]
+all = "warn"
+
+[workspace.lints.cargo]
+unused_dependencies = "allow"
+
+[workspace.dependencies]
+spike-shared = { path = "crates/shared" }
+metis-spike-server = { path = "generated/server" }
+metis-spike-client = { path = "generated/client" }
+axum = "0.7"
+axum-extra = { version = "0.9", features = ["cookie", "multipart"] }
+async-trait = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
