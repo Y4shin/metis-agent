@@ -9,7 +9,6 @@ title: docs/tasks
 ## Live
 
 - metis-agent-core
-- metis-bootstrap
 - metis-foundations
 - metis-plugin-sdk
 - metis-plugins
@@ -17,4 +16,4 @@ title: docs/tasks
 
 ## Archived
 
-_None yet._
+- metis-bootstrap
