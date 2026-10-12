@@ -56,25 +56,103 @@ assumptions before anything is built on top.
   feature-gated or extracted into `metis-plugin-sdk`.
 - The walk is a walking skeleton first: prove the transports and the contract
   tooling end to end before widening either.
+- Scope is one effort and one spec covering the whole destination: contracts,
+  generated types, client, plugin contract ABI, and the walking skeleton. There
+  are no separate slice specs.
+- Transports in scope: Unix domain sockets for local IPC and TCP/IP for remote
+  access.
+- The realtime part is designed in this effort, not deferred. The walking
+  skeleton implements one request and one event against dummy endpoints to
+  prove the transports; the realtime semantics are defined here.
+- HTTP carries the full feature set. Every capability reachable over WebSocket
+  is also reachable over HTTP, and WebSocket is an alternate path chosen per
+  operation or by client preference, never the only path. OpenAPI is the
+  complete functional contract; AsyncAPI references the same payload schemas.
+- The OpenAPI operationId is the canonical operation name on both transports.
+  A WebSocket request is `{correlation_id, operation, payload}` and the reply
+  is `{correlation_id, ok|error, payload}` over the same schemas as HTTP;
+  errors are typed payloads and the HTTP status derives from the error code.
+- Events carry a daemon-wide monotonic id in a bounded in-memory ring. Resume
+  is by cursor, and an expired cursor or a daemon restart forces a resync over
+  HTTP. The event stream is ephemeral and is not the source of truth.
+- Subscriptions are ordinary operations naming a channel and returning
+  `{cursor, snapshot}`. Channels are `daemon`, `session:<id>`, `task:<id>`, and
+  `workflow_run:<id>`. Subscriptions do not survive a connection, and a resync
+  is a fresh subscribe. There is one delivery queue per connection, so observed
+  order equals event-id order across subscriptions.
+- Cancellation is an explicit, idempotent operation carrying the target
+  correlation id; connection loss cancels nothing. A slow consumer is
+  disconnected with a typed resync-required notice rather than having events
+  dropped. Protocol major version lives in the URL path prefix (`/v1`) on both
+  transports.
+- Keepalive is protocol-level WebSocket ping/pong with a server idle timeout,
+  not an application-level operation. Correlation ids are client-generated
+  opaque strings, unique per connection, echoed verbatim. The walking skeleton
+  proves the `/v1` prefix, one dummy request on both transports, one `daemon`
+  subscribe returning `{cursor, snapshot}`, and one dummy event.
+- A subscription's HTTP form is a server-sent events response: the snapshot is
+  one SSE event, the cursor is the SSE `id`, resume uses `Last-Event-ID`, and an
+  overflowing consumer gets a resync event before the connection closes.
+- The plugin ABI is a small primitive set, not a C rendering of the Rust trait:
+  a versioned entry point returning a function table (instance lifecycle,
+  capability listing, one generic `invoke`, `cancel`, `release_buffer`,
+  `shutdown`) plus host callbacks (`complete`, `progress`, `emit_event`, `log`).
+  Everything else is payload. Within a major version the table is append-only,
+  so a newer host reads an older plugin's shorter table. Capability descriptors
+  name a kind, and V1 kinds are `tool` and `provider`.
+- Two throwaway prototypes validate that ABI strategy: an ABI mechanics spike
+  and an authoring trait spike. Either may be abandoned with an inconclusive
+  result, which blocks neither the remaining tasks nor the spec.
+- The remote transport uses rustls on both sides with static linking preferred
+  and no dynamically linked system libraries on the daemon. Plaintext TCP is
+  allowed with a warning unless reverse-proxy mode names trusted proxies. The
+  bind address has no default. TLS material and configuration are read at
+  startup, and changing either requires a restart. Clients check the OS trust
+  store first and fall back to a fingerprint pin from pairing; no client
+  certificates and no CA-file configuration.
+- Local IPC authenticates with the host ACL: the daemon owns the socket as a
+  configured `uid:gid` with mode 700 or 770 on Unix, and a security descriptor
+  on Windows. Remote clients hold a per-surface opaque token minted at pairing
+  and stored by the daemon only as a hash; revocation removes it and restarts.
+  A token grants the full exposed surface with no per-client permissions, and
+  every paired client can reach every agent. It travels as
+  `Authorization: Bearer` on HTTP and on the WebSocket upgrade. Clients keep it
+  in the platform keychain when possible, else in an owner-only file, and pin
+  the server's public key fingerprint (SPKI). Pairing is reachable on both local
+  IPC and the remote listener, gated by the preshared key, and closes by
+  removing that key and restarting. Connection handshakes carry the protocol
+  version, surface name, and client version.
+- `plugin-contract` holds the primitives, the payload types, the authoring
+  trait, and both adapters, with the authoring side feature-gated;
+  `metis-plugin-sdk` re-exports them and owns the async executor, helpers, core
+  plugins, and CLI. The ABI is the source of truth in `repr(C)` Rust, with a
+  `cbindgen` header committed and checked in CI.
+- The payload envelope is one header byte: four bits of payload format version,
+  one codec bit (JSON or MessagePack), three reserved. Compatibility within an
+  ABI major version is additive, with unknown fields ignored and per-capability
+  versions in the descriptors. Each side releases only what it allocated, and
+  panics are contained at the boundary into an internal-error status.
+- These ABI decisions are provisional by the user's instruction and may be
+  revised during implementation.
+- The endpoint path is the platform default with an environment variable
+  override.
+- This effort owns `plugin-contract`: the manifest types and the versioned C
+  ABI. `metis-plugins` consumes it and owns the host side, and
+  `metis-plugin-sdk` wraps it for Rust authors.
+- The walking skeleton's client side uses the `client` crate directly, as an
+  example or test binary. It does not use `crates/terminal`, which belongs to
+  `metis-daemon`.
 
 ## Fog
 
-- Which OpenAPI and AsyncAPI generators are usable, where generated code is
-  placed, and how regeneration is checked in CI.
-- Whether the plugin C ABI structs are laid out first in `repr(C)` Rust, in a
-  C header, or in a neutral schema that both derive from.
-- Local endpoint discovery and configuration: where the socket or pipe name
-  comes from, and how the client finds it.
-- Windows pipe security descriptor specifics and the exact rejection path for
-  remote clients.
-- Certificate and key handling for the optional TCP/TLS listener.
-- How much of the realtime surface the walking skeleton exercises before the
-  full semantics land.
+- None recorded yet. New fog is added here when a task surfaces a question that
+  is in scope but not yet sharp enough to be a task.
 
 ## Out of scope
 
 - Provider implementations.
-- Full daemon behaviour beyond the thin skeleton endpoint.
+- Full daemon behaviour beyond the thin skeleton endpoint. `crates/daemon` and
+  `crates/terminal` belong to `metis-daemon`.
 - The plugin loader and runtime host, which belong to `metis-plugins`.
 - The plugin authoring SDK, which belongs to `metis-plugin-sdk`.
 - Agent loop, sessions, and workflows, which belong to `metis-agent-core`.

@@ -73,12 +73,15 @@ and fan-in Lua step.
 - Durable checkpoint and resume semantics, and the failure and retry policy,
   including idempotency or reconciliation for external writes.
 - The Lua runtime and sandbox, and the exact tool-injection API.
-- Scheduling, model-provider selection, and storage details, which may be
-  decisions for this effort or for the daemon effort depending on where the
-  boundary lands.
+- Scheduling, model-provider selection, and storage details. This effort owns
+  the interfaces; the implementations belong to `metis-daemon`.
 
 ## Out of scope
 
+- The network contract, generated types, client, and the realtime design are
+  owned by `metis-foundations`. It proves the transports end to end with one
+  dummy request and one dummy event. The real endpoints are implemented in
+  `metis-daemon`, not here.
 - The plugin contract and runtime, including plugin tool adapters.
 - The daemon composition layer: IPC, configuration, and policy.
 - Network contracts, generated types, and the client crate.

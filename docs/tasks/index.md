@@ -9,6 +9,7 @@ title: docs/tasks
 ## Live
 
 - metis-agent-core
+- metis-daemon
 - metis-foundations
 - metis-plugin-sdk
 - metis-plugins

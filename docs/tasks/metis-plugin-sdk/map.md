@@ -10,9 +10,9 @@ blocked_by: [metis-plugins]
 ## Destination
 
 Authoring a Metis plugin is practical. A Rust plugin authoring SDK sits on top
-of `plugin-contract`: a Rust trait, export adapters that translate an
-implementation into the C ABI, and the serialisation and async scheduling
-helpers a plugin needs, kept out of the runtime's dependency footprint. A set
+of `plugin-contract`: it re-exports that crate's authoring trait and export
+adapters, and adds the serialisation and async scheduling helpers a plugin
+needs, kept out of the runtime's dependency footprint. A set
 of core plugins ships with Metis, exercising the SDK rather than reaching past
 it. A plugin CLI scaffolds a new plugin, builds it for the supported
 platforms, packages it into a bundle, and installs it into the daemon. Other
@@ -43,6 +43,9 @@ not a requirement.
 - From "Async boundary": plugin-owned executors hidden behind the Rust SDK are
   the initial preferred approach, so the SDK owns the executor model that the
   runtime does not see.
+- The authoring trait and the export adapters live in `plugin-contract` behind a
+  feature gate. This effort re-exports them and owns the async executor,
+  serialisation helpers, core plugins, and the CLI.
 - The bootstrap deliberately left `plugin-sdk` uncreated; this effort creates
   it when the boundary proves useful.
 
@@ -63,6 +66,10 @@ not a requirement.
 
 ## Out of scope
 
+- The network contract, generated types, client, and the realtime design are
+  owned by `metis-foundations`. It proves the transports end to end with one
+  dummy request and one dummy event. The real endpoints are implemented in
+  `metis-daemon`, not here.
 - The host side of the plugin system: the ABI definition itself, manifest
   validation, bundle extraction, library loading, the registry, dispatch, and
   lifetime management, all of which belong to `metis-plugins`.

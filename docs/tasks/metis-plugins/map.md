@@ -9,13 +9,14 @@ blocked_by: [metis-foundations]
 
 ## Destination
 
-The host side of the plugin system works. `plugin-contract` defines the
-manifest and the versioned C ABI: one exported entry point returning a
-function table, explicit instance creation and destruction, capability
-discovery and initialisation, serialised request and response payloads,
-explicit buffer ownership and release, and host callbacks for completion,
-progress, and plugin-originated events. `plugin-runtime` extracts bundles,
-validates manifests, selects the platform and architecture library, checks ABI
+The host side of the plugin system works. It consumes the manifest and the
+versioned C ABI that `metis-foundations` delivers in `plugin-contract`: one
+exported entry point returning a function table, explicit instance creation
+and destruction, capability discovery and initialisation, serialised request
+and response payloads, explicit buffer ownership and release, and host
+callbacks for completion, progress, and plugin-originated events.
+`plugin-runtime` extracts bundles, validates manifests, selects the platform
+and architecture library, checks ABI
 and manifest compatibility, keeps a registry, delivers per-plugin
 configuration and host context, discovers capabilities, dispatches requests,
 receives events and completion callbacks, and manages request lifecycle,
@@ -44,8 +45,9 @@ end to end.
 
 - From `docs/rough-plan.md`, "plugin-contract": manifest types, versioned C
   ABI, Rust-facing traits and adapters, and request, response,
-  initialisation, tool capability, and event payload contracts. Workflow
-  integration uses the tool contract; plugins do not export workflow steps.
+  initialisation, tool and provider capability, and event payload contracts.
+  Workflow integration uses the tool contract; plugins do not export workflow
+  steps.
 - From "plugin-runtime": bundle extraction, manifest validation, library
   selection and loading, compatibility checks, registry, initialisation,
   configuration delivery, capability discovery, dispatch, events and
@@ -58,6 +60,9 @@ end to end.
   invokes a host completion callback. Pending state is registered first
   because completion may precede the return from start. Cancellation is an
   explicit request whose acknowledgement and race semantics are defined.
+- `plugin-contract` is owned by `metis-foundations`: it designs the manifest,
+  the versioned C ABI, and the generated bindings. This effort consumes it and
+  owns the host side.
 - Plugin-owned executors hidden behind the Rust SDK are the initial preferred
   approach.
 
@@ -68,7 +73,8 @@ end to end.
 - Manifest schema and its representation.
 - Serialised payload choice, initially considering JSON bytes.
 - Exact ABI struct layout, ownership rules, concurrency rules, and error
-  semantics.
+  semantics are owned by `metis-foundations` in `plugin-contract`. This effort
+  owns how the host enforces them while loading and dispatching.
 - Compatibility policy between bundle, ABI, and plugin versions.
 - The async executor model and how the SDK hides it.
 - Completion-before-start handling and cancellation acknowledgement and
@@ -79,6 +85,10 @@ end to end.
 
 ## Out of scope
 
+- The network contract, generated types, client, and the realtime design are
+  owned by `metis-foundations`. It proves the transports end to end with one
+  dummy request and one dummy event. The real endpoints are implemented in
+  `metis-daemon`, not here.
 - The plugin authoring SDK, the core plugin set, and the plugin CLI, which
   belong to `metis-plugin-sdk`.
 - Workflow step implementations. Plugins provide tools, not step types.

@@ -71,6 +71,10 @@ without owning it: closing the UI does not stop daemon work.
 
 ## Out of scope
 
+- The network contract, generated types, client, and the realtime design are
+  owned by `metis-foundations`. It proves the transports end to end with one
+  dummy request and one dummy event. The real endpoints are implemented in
+  `metis-daemon`, not here.
 - The daemon, its IPC listeners, and its policy layer.
 - The Rust `client` crate, the network contracts, and the generated types,
   which belong to `metis-foundations`.
