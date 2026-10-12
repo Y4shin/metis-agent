@@ -1,0 +1,5 @@
+# Root Cargo workspace. Crates are added to `members` (or a glob such as
+# `crates/*`) as they appear.
+[workspace]
+resolver = "3"
+members = []
