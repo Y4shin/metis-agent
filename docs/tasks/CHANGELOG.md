@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-14, Stream resume and expired cursors (stream-resume-and-expiry)
+
+The stream's cursor is now real: `Ring::stream` is fallible at establishment and refuses a cursor the bounded window can no longer serve with `CursorError::Expired`, which crosses the wire as `metis-cursor-error: expired` on a `FailedPrecondition` response and reaches the client as `ClientError::CursorExpired` from the call that opened the stream. A servable cursor replays only the events after it, typed `EVENT` and with no snapshot, so a reconnect carries exactly what the caller missed and nothing twice, while a cursorless stream keeps the landed snapshot shape. A restart expires every cursor, because a fresh ring has no identifier above zero, and the daemon-wide window means a chatty channel can expire a quiet channel's cursor. The resync is the documented cursorless form of the same call with no hidden retry, the proto change is prose only (four comments corrected, no field moved or retyped), and no test pins the wire status code end to end, which is recorded as a residual.
+
 ## 2026-10-13, Event stream with snapshot and identifier (event-stream)
 
 `metis.v1` gained its first server-streaming RPC: `StreamEvents` selects channels and carries a `last_event_id` cursor, and every `Event` carries a daemon-wide monotonic identifier, an `EventKind` (the contract's first enum) and a JSON-text payload. `api-contracts::events` holds the bounded ring and one `stream(...)` assembly shared by the daemon and the in-process test service, so every stream opens with a snapshot, then live events, then heartbeats as ordinary messages, and the client drains it through `Client::stream_events`. Authorization now covers streaming as well as unary calls through the interceptor, and this ticket paid three deferred debts: the stream over TCP, the authenticated stream, and the streaming half of the auth interceptor. Resume and expiry, cancellation, and the slow-consumer policy remain with their own tickets, and the payload encoding is JSON text, which is expensive to change under FILE-mode breaking.
