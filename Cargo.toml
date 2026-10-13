@@ -36,3 +36,12 @@ plugin-contract = { path = "crates/plugin-contract" }
 plugin-runtime = { path = "crates/plugin-runtime" }
 api-contracts = { path = "crates/api-contracts" }
 client = { path = "crates/client" }
+
+# Third-party dependencies shared by the plugin boundary crates. `cc` compiles
+# the C translation unit that re-asserts the ABI layout, `libloading` loads the
+# fixture cdylib in the ABI harness, and the serde pair keeps the fixture's
+# serialisation shapes out of the C ABI surface.
+cc = "1"
+libloading = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

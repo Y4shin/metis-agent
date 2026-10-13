@@ -12,6 +12,8 @@
 use core::ffi::c_void;
 use core::mem::size_of;
 
+mod layout;
+
 /// ABI major version. It is part of the exported symbol name (D8).
 pub const METIS_ABI_MAJOR: u32 = 1;
 /// ABI minor version. It travels in the function table (D8).
