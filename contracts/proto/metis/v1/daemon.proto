@@ -1,6 +1,6 @@
 // The daemon's wire contract, first version.
 //
-// One ordinary RPC for now. Later tickets append an event stream and its
+// Two ordinary RPCs for now. Later tickets append an event stream and its
 // messages to the same service and package. Changing or removing what is here
 // already breaks clients, and `buf breaking` in FILE mode is the gate that
 // catches it.
@@ -13,6 +13,11 @@ package metis.v1;
 service DaemonService {
   // Echo a message back, with the time the daemon received it.
   rpc Echo(EchoRequest) returns (EchoResponse);
+
+  // Pair a surface with the daemon's preshared key, and answer with the
+  // surface's own token. The key travels in the request body and nowhere
+  // else, and the token is answered once: the daemon keeps only its hash.
+  rpc Pair(PairRequest) returns (PairResponse);
 }
 
 message EchoRequest {
@@ -26,4 +31,18 @@ message EchoResponse {
 
   // When the daemon received the request, as an RFC 3339 string.
   string received_at = 2;
+}
+
+message PairRequest {
+  // The daemon's preshared key, in the form the daemon's configuration
+  // resolves: a literal, an environment reference, a keystore reference, or a
+  // secret-file reference. This is the one place a secret travels in a message
+  // body; the credential it answers with never does.
+  string preshared_key = 1;
+}
+
+message PairResponse {
+  // The surface's token, returned once. The daemon stores only its hash, so
+  // this response is the only time the token exists in the daemon's memory.
+  string token = 1;
 }
