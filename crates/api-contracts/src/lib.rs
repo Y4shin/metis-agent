@@ -13,7 +13,11 @@
 //! `transport` is the one handwritten transport in the repository: the serve
 //! loop, the Unix and TCP listener front-ends, and the connector shapes the
 //! skeleton, the `client` crate, and the daemon effort share.
+//!
+//! `identity` is the declaration a client carries as request metadata on every
+//! call and the version gate the daemon applies to it.
 
 pub mod connect;
+pub mod identity;
 pub mod proto;
 pub mod transport;

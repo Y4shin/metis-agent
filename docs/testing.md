@@ -66,6 +66,35 @@ is no default bind address, so remote access cannot be enabled by accident:
   anything else is a typed `ConfigError` naming the variable and the value
   rather than a silent disable.
 
+Local access control and the identity declaration, documented in
+`crates/api-contracts` and `crates/client`. The access control is the operating
+system's, so a local client carries no credential; the declaration says which
+surface did what and is not authentication:
+
+- The socket ACL is unit-tested in `crates/api-contracts/src/transport.rs`
+  (`cargo test -p api-contracts`): `ensure_socket_dir` creates a fresh socket
+  directory with mode 700 owned by the daemon's user, applies the group and mode
+  770 when `METIS_SOCKET_GROUP` names a group that user belongs to, and refuses
+  a pre-existing directory that is a symlink, is not a directory, is not owned
+  by that user, or is wider than the rule allows, without chmodding it.
+  `serve_uds` leaves the same mode on the socket file it binds. An unknown group
+  name is a typed `ConfigError` rather than a silent fallback to the primary
+  group.
+- The endpoint rule is unit-tested in `crates/client/src/lib.rs`
+  (`cargo test -p client --lib`): `$XDG_RUNTIME_DIR/metis/daemon.sock` when that
+  variable is set, else `$TMPDIR/metis/daemon.sock`, else the typed
+  `EndpointError::NoPrivateBase`. There is no `/tmp` fallback, because a shared
+  directory cannot carry the ACL, and `METIS_ENDPOINT` still wins over both.
+- `cargo test -p client --test acl` points `METIS_ENDPOINT` at a directory the
+  daemon must create, asserts the directory and the socket are private, and
+  asserts a shared directory is refused and left as it was.
+- `cargo test -p client --test identity` asserts the daemon records what a
+  wrapper call declares (`metis-protocol-version`, `metis-surface`,
+  `metis-client-version`, carried as request metadata on every call), and that a
+  client declaring another, or no, protocol version is refused with an
+  `InvalidArgument` error whose `metis-supported-versions` response header names
+  what the daemon speaks.
+
 Plugin ABI, documented in `crates/plugin-contract/src/abi` and
 `crates/plugin-fixture`:
 
