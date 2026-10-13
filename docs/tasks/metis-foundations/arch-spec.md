@@ -61,9 +61,10 @@ surfaces below are the measured ones. Builds the contract pipeline end to end:
 one `.proto`, pinned BSR generation into committed Rust, the regeneration
 command, and the CI gates.
 
-Two file locations below are superseded by `contract-gate-hardening`, which
-moves the buf configuration to the repository root: read that pending section
-before copying a path out of this one.
+The buf configuration this ticket first landed under `contracts/` now lives at
+the repository root: `contract-gate-hardening` moved it there, and the paths
+below are the current ones. `buf lint`, `buf breaking`, and `buf generate` all
+run from the repository root and read the root `buf.yaml`.
 
 ### Exports
 
@@ -75,37 +76,39 @@ before copying a path out of this one.
   `received_at` is an RFC 3339 string, mirroring the spike contract. A later
   ticket (`event-stream`) appends `StreamEvents` and its messages; this ticket
   reserves the shape without declaring them.
-- `contracts/buf.yaml`: module root `proto`, `lint` STANDARD with no exception
-  yet (the `RPC_RESPONSE_STANDARD_NAME` exception arrives with the streaming
-  `Event` message, and is recorded then), `breaking` FILE. As landed, this
-  file's `breaking` block governs nothing in CI: the `buf breaking` step runs
-  from the repository root, where buf reads its built-in defaults, because from
-  `contracts/` the `.git#branch=main` target cannot resolve at all (measured:
-  exit 1, "does not appear to be a git repository"). The gate's category
-  happens to agree with the declared one only because buf's default is FILE.
-  `contract-gate-hardening` moves this configuration to a root `buf.yaml` and
-  deletes this file.
-- `contracts/buf.gen.yaml`: `version: v2`, `clean: true`, two BSR remote plugins
-  pinned by tag:
+- Root `buf.yaml`, moved there by `contract-gate-hardening` from the
+  `contracts/buf.yaml` this ticket landed (the old file is gone): module at
+  `contracts/proto`, so `buf lint` covers the contract alone, `lint` STANDARD
+  with no exception yet (the `RPC_RESPONSE_STANDARD_NAME` exception arrives with
+  the streaming `Event` message, and is recorded then), `breaking` FILE. Every
+  buf command runs from the repository root and reads this one file, so the
+  declared `breaking` category is the one the gate applies. `buf breaking`
+  requires `--against-config buf.yaml` from the root: without it the working
+  side resolves the module at `contracts/proto` while the branch side resolves
+  whole-tree paths, and the command exits 100 with spurious deleted-file
+  reports (measured).
+- Root `buf.gen.yaml`, the same template `contract-gate-hardening` moved from
+  `contracts/buf.gen.yaml` with the same pins, options, and output trees:
+  `version: v2`, `clean: true`, two BSR remote plugins pinned by tag:
   - `remote: buf.build/anthropics/buffa:v0.9.2`, out
-    `../crates/api-contracts/generated/buffa`, opts `views=true`, `json=true`,
+    `crates/api-contracts/generated/buffa`, opts `views=true`, `json=true`,
     `file_per_package=true`
   - `remote: buf.build/connectrpc/rust:v0.9.0`, out
-    `../crates/api-contracts/generated/connect`, opts
+    `crates/api-contracts/generated/connect`, opts
     `buffa_module=crate::proto`, `file_per_package` (bare option, the plugin
     rejects `=true`; measured)
 
-  As landed, generation runs from the repository root against this template
-  file. `contract-gate-hardening` moves the file to the root with the same
-  pins, options, and output trees, so later chains should take the location
-  from that pending section.
+  Generation runs from the repository root, where the template and the module
+  both live, and reproduces the committed trees byte for byte.
 - Committed generated trees:
   `crates/api-contracts/generated/buffa/metis.v1.rs` (messages and views) and
   `crates/api-contracts/generated/connect/metis.v1.rs` (service trait, register
   helper, generated client).
 - `crates/api-contracts/src/lib.rs`: `pub mod connect; pub mod proto;` plus
-  crate docs. `src/proto.rs` declares the nested `metis::v1` module tree and
-  mounts the buffa tree with `include!` and
+  crate docs, which name the root `buf.gen.yaml` as the plugin template (the
+  doc comment used to name `contracts/buf.gen.yaml`; `contract-gate-hardening`
+  updated it, comment only). `src/proto.rs` declares the nested `metis::v1`
+  module tree and mounts the buffa tree with `include!` and
   `#![allow(clippy::derivable_impls)]`. `src/connect.rs` does the same for the
   connect tree with `#![allow(clippy::match_single_binding)]`. The mount point
   is `crate::proto`, which is exactly what `buffa_module` names. Both allows are
@@ -131,21 +134,24 @@ before copying a path out of this one.
   `normalize_comments=true` as the precedent every later generated tree
   inherits.
 - Generation and the drift check resolve the two pinned plugins from the BSR
-  over the network on every run, so the gates depend on the network being
+  over the network on every run, so that step depends on the network being
   reachable and on anonymous rate limits: `resource_exhausted: too many
   requests` was reproduced here and can fail a pull request for a non-code
-  reason. CI pins `BUF_TOKEN` from `secrets.BUF_TOKEN` for the two BSR-backed
-  steps (`contract-gate-hardening`).
+  reason. `contract-gate-hardening` gives the one plugin-resolving CI step
+  `BUF_TOKEN` from `secrets.BUF_TOKEN`, and unsets the variable when the secret
+  is empty. `buf lint` and `buf breaking` resolve no plugins, so they carry no
+  token.
 - `contracts/README.md` documenting the one developer-facing regeneration
   command and what the CI gates assert.
 - CI (`.github/workflows/ci.yml`) additions, all in the existing
   `devenv shell --` style: `actions/checkout` gains `fetch-depth: 0` (needed by
-  `buf breaking`), then `buf lint` (from `contracts/`, the one buf command that
-  reads the declared configuration),
-  `buf breaking --against '.git#branch=main'` from the repository root (buf's
-  built-in defaults, see this ticket's `buf.yaml` entry), and
-  `bash scripts/regenerate-contracts.sh --check`. The two BSR-backed steps take
-  `BUF_TOKEN` from `secrets.BUF_TOKEN`.
+  `buf breaking`), then `buf lint`,
+  `buf breaking --against '.git#branch=main' --against-config buf.yaml`, and
+  `bash scripts/regenerate-contracts.sh --check`, all from the repository root.
+  `contract-gate-hardening` added the `--against-config` flag and gave the
+  regeneration check step `BUF_TOKEN` from `secrets.BUF_TOKEN`, unset when the
+  secret is empty; the other two buf steps resolve no plugins and carry no
+  token.
 - `devenv.nix`: add `pkgs.buf` so `buf` is on the shell path (pinned by
   `devenv.lock`).
 
@@ -188,9 +194,11 @@ Each seam is a public boundary the worker tests; nothing deeper.
    `local-transport-rpc-skeleton`.
 3. **Script seam.** `bash scripts/regenerate-contracts.sh --check` exits 0 on a
    clean tree and non-zero after a hand edit to a generated file.
-4. **Gate seam.** `buf lint` and `buf breaking --against '.git#branch=main'`
-   exit 0 on the committed contract, and the CI job runs both. The breaking
-   gate only has a comparison input once `main` itself carries the contract,
+4. **Gate seam.** `buf lint` and
+   `buf breaking --against '.git#branch=main' --against-config buf.yaml`, both
+   run from the repository root, exit 0 on the committed contract, and the CI
+   job runs both. The breaking gate only has a comparison input once `main`
+   itself carries the contract,
    which the landing merge established: on a working branch whose base predates
    the proto, every change to the declared contract is an addition on the
    comparison's input side, so the gate cannot fail retroactively there
@@ -215,12 +223,12 @@ seams 1 and 2; the two scripts and the two buf commands for seams 3 and 4.
   This applies to `local-transport-rpc-skeleton` and to the daemon effort.
 - `buf breaking` in FILE mode is the compatibility gate for later contract
   additions: adding RPCs and messages is allowed, changing or removing the echo
-  surface is not. The mode that governs CI is the one in the root `buf.yaml`
-  once `contract-gate-hardening` lands; until then it is buf's built-in
-  default, which happens to be FILE. A later contract ticket may not weaken the
-  breaking gate by editing the configuration surface alone, because the same
-  file feeds `buf lint`. Regeneration keeps going through
-  `scripts/regenerate-contracts.sh` after the move.
+  surface is not. The mode that governs CI is the `breaking` block of the root
+  `buf.yaml`, which the gate reads on both sides of the comparison because it
+  runs with `--against-config buf.yaml`. A later contract ticket may not weaken
+  the breaking gate by editing the configuration surface alone, because the
+  same file feeds `buf lint`. Regeneration keeps going through
+  `scripts/regenerate-contracts.sh`.
 
 ---
 
@@ -427,43 +435,75 @@ compile-time assertions for seam 6; the script for seam 7.
 
 ---
 
-## Pending ticket: `contract-gate-hardening`
+## Landed ticket: `contract-gate-hardening`
 
-Hardens the contract gates `contract-pipeline` landed: one configuration that
-every buf command reads, and authentication for the two BSR-backed gates. It
-supersedes the `contracts/buf.yaml` and `contracts/buf.gen.yaml` locations in
-the `contract-pipeline` section above.
+Landed on `task/contract-gate-hardening` as the merge commit `3612e0f`, parents
+`08a5be8` (the landing branch, which already carried the first attempt's two
+checkpoints behind the preservation merge) and `81c6207` (the working branch);
+the landing tree is byte-identical to `81c6207` and the working branch was
+deleted after the merge. Hardens the contract gates `contract-pipeline` landed:
+one configuration that every buf command reads, and authentication for the one
+plugin-resolving gate. It moved the `contracts/buf.yaml` and
+`contracts/buf.gen.yaml` locations named in the section above to the repository
+root.
 
 ### Exports
 
-- A root `buf.yaml` declaring the module at `contracts/proto`, `lint` STANDARD
-  with still no exception, and `breaking` FILE. `contracts/buf.yaml` is deleted.
-- A root `buf.gen.yaml` carrying the same `version: v2`, `clean: true`, two BSR
-  plugin pins, options, and output trees that `contracts/buf.gen.yaml` carries
-  today, so the committed trees under `crates/api-contracts/generated/` are
-  reproduced byte for byte.
+- Root `buf.yaml` declaring the module at `contracts/proto`, `lint` STANDARD
+  with still no exception, and `breaking` FILE; `contracts/buf.yaml` is gone.
+  `buf ls-files` from the repository root lists exactly
+  `contracts/proto/metis/v1/daemon.proto`, so the module comes from the root
+  file and lint covers the contract alone.
+- Root `buf.gen.yaml` carrying the same `version: v2`, `clean: true`, two BSR
+  plugin pins, options, and output trees that `contracts/buf.gen.yaml` carried,
+  so the committed trees under `crates/api-contracts/generated/` are reproduced
+  byte for byte.
 - `buf lint`, `buf breaking`, and generation all run from the repository root
-  and read that one configuration; `buf lint` stops reading a directory-local
+  and read that one configuration; `buf lint` no longer reads a directory-local
   configuration surface.
-- CI supplies `BUF_TOKEN` from `secrets.BUF_TOKEN` to the steps that resolve
-  plugins (generation and the drift check). An absent or empty secret must leave
-  both gates working unauthenticated, and the form buf needs is measured rather
-  than assumed, because an empty variable may not equal an unset one.
+- `buf breaking --against '.git#branch=main' --against-config buf.yaml`: the
+  flag is required, not optional. Without it the working side resolves the
+  module at `contracts/proto` while the branch side resolves whole-tree paths,
+  and the command exits 100 with spurious
+  `Previously present file "contracts/proto/metis/v1/daemon.proto" was deleted`
+  reports (measured; with the flag the same command exits 0). CI,
+  `contracts/README.md`, and `docs/testing.md` all carry the flag, and a later
+  contract ticket that copies the command line keeps it.
+- CI supplies `BUF_TOKEN` from `secrets.BUF_TOKEN` to exactly one step, the
+  plugin-resolving `Contract regeneration check`, and runs
+  `if [ -z "${BUF_TOKEN:-}" ]; then unset BUF_TOKEN; fi` before it, so buf is
+  either given a real token or no variable at all. Measured on buf 1.73.0: both
+  an unset and an empty `BUF_TOKEN` reach the BSR anonymously, a non-empty token
+  the BSR cannot verify is refused before any request is sent, and `buf lint`
+  and `buf breaking` resolve no plugins and pass even under a token buf refuses.
 - `contracts/README.md` and `docs/testing.md` updated to the new locations, with
-  the documented developer command unchanged or shorter.
+  the documented developer command unchanged.
 - `scripts/regenerate-contracts.sh` keeps its behaviour, including the
   `normalize_comments=true` rustfmt post-step, and still exits 0 with `--check`
-  on a clean tree.
+  on a clean tree; it now `cd`s to the repository root and rewrites the scratch
+  template path, and nothing else changed.
+- `crates/api-contracts/src/lib.rs`: the crate doc comment that pointed
+  generated code at `contracts/buf.gen.yaml` now names the root `buf.gen.yaml`
+  (comment only, no API change).
+- The ticket's acceptance probe lives at `scripts/probe-contract-gates.sh`, one
+  section per seam below, restoring every file it touches through a `trap` and
+  reporting a rate-limited probe as skipped rather than as a pass. It was
+  written inside the ticket's transient `.work/` channel and moved to `scripts/`
+  at finalization, so the evidence survives without putting scaffolding in the
+  ticket's uncertainty channel. `docs/testing.md` documents it as an on-demand
+  probe; it is not wired into CI.
 
 ### Existing abstractions to use
 
 - `contracts/buf.yaml`, `contracts/buf.gen.yaml`, and
-  `scripts/regenerate-contracts.sh` as landed: this ticket moves configuration,
-  it does not rewrite the pipeline.
+  `scripts/regenerate-contracts.sh` as landed: this ticket moved configuration,
+  it did not rewrite the pipeline. The two plugin pins, their options, the
+  output tree layout, `clean: true`, and the rustfmt post-step are unchanged,
+  and no second generation path was added.
 - `docs/testing.md` owns the run commands; `contracts/README.md` owns the
-  developer-facing regeneration command.
-- CI keeps its existing `devenv shell --` style steps and adds the token only to
-  the steps that resolve plugins.
+  developer-facing regeneration command. Both were updated in place.
+- CI kept its existing `devenv shell --` style steps and added the token to the
+  one step that resolves plugins.
 
 ### Do NOT reimplement
 
@@ -478,24 +518,32 @@ the `contract-pipeline` section above.
 
 1. **Configuration seam.** One deliberate edit to the root `breaking` block
    changes the verdict of `buf breaking` run from the repository root, which
-   proves the gate reads that file. `buf lint` reads the same file.
-2. **Token seam.** The steps that resolve plugins receive `BUF_TOKEN` from
-   `secrets.BUF_TOKEN`, and both BSR-backed gates still work when the secret is
-   absent or empty.
+   proves the gate reads that file. `buf lint` reads the same file. Exercised by
+   `scripts/probe-contract-gates.sh`, which restores the edit.
+2. **Token seam.** The one step that resolves plugins receives `BUF_TOKEN` from
+   `secrets.BUF_TOKEN`, and the gate still works when the secret is absent or
+   empty, because the empty form is unset before buf runs.
 3. **Reproduction seam.** `bash scripts/regenerate-contracts.sh --check` exits 0
    on a clean tree from the new root layout.
 
 Test types: the two buf commands and the deliberate-edit probe for seams 1 and
-2; the script for seam 3. No new Rust test.
+2; the script for seam 3. No new Rust test. All of it lives in
+`scripts/probe-contract-gates.sh`, which runs on demand: `docs/testing.md`
+documents it, CI does not run it, and the network-only probes are skipped under
+anonymous BSR rate limiting, so a rate-limited run exercises the drift logic
+only through the offline stub-backed twin and the clean-tree passes.
 
 ### Interface contract
 
-- After this ticket the repository has exactly one buf configuration surface, at
-  the root, and every buf command reads it. A later contract ticket that changes
-  lint or breaking policy edits that one file, so a declared policy and the
-  verdict of the gate cannot drift apart again.
+- The repository has exactly one buf configuration surface, at the root, and
+  every buf command reads it. A later contract ticket that changes lint or
+  breaking policy edits that one file, so a declared policy and the verdict of
+  the gate cannot drift apart again.
+- Any later ticket that runs `buf breaking` from the root must pass
+  `--against-config buf.yaml`. Without it the two sides of the comparison
+  resolve different path roots and the command fails on an unchanged contract.
 - The Rust gates, the `plugin-abi-core` header drift check, and the ABI harness
-  are unaffected: this ticket changes where buf reads its configuration and how
+  are unaffected: this ticket changed where buf reads its configuration and how
   CI authenticates, not what is generated.
 
 ---
@@ -503,7 +551,7 @@ Test types: the two buf commands and the deliberate-edit probe for seams 1 and
 ## Downstream interface contracts (outline)
 
 These tickets are not pending yet. Their sections are added when they reach the
-frontier; the commitments below are what the two landed tickets must already
+frontier; the commitments below are what the landed tickets must already
 support.
 
 - `local-transport-rpc-skeleton`: `crates/api-contracts` gains a handwritten
@@ -541,10 +589,11 @@ support.
   `tw_dependency_levels` returned, and `plugin-abi-core` landed on
   `contract-pipeline`'s landing branch.
 - `contract-gate-hardening` is `blocked_by` `contract-pipeline` and edits the
-  pipeline that ticket landed, so it lands on the same chain.
+  pipeline that ticket landed, so it landed on the same chain (merge `3612e0f`),
+  on top of the two level-0 tickets.
 - Both tickets touch the workspace root (`Cargo.toml`, `devenv.nix`,
-  `.github/workflows/ci.yml`) and `crates/`, which is why they cannot run in
-  parallel and why the second chain lands on the first chain's landing branch.
+  `.github/workflows/ci.yml`) and `crates/`, which is why they could not run in
+  parallel and why the later chains landed on the first chain's landing branch.
 - `contract-pipeline` adds the first committed generated tree in the repository,
   so the fmt and clippy allowances it establishes, and the
   `normalize_comments=true` rustfmt post-step, are the precedent every later
@@ -552,6 +601,11 @@ support.
 - `plugin-abi-core` is the first place the repository compiles C. The `cc`
   build-dependency plus `-std=c11` is the measured minimum; the C compiler is
   already in the devenv toolchain.
+- `contract-gate-hardening` moved the buf configuration rather than adding a
+  second one, so the plugin pins, the lint policy, the committed generated
+  trees, and the verdict for an unchanged contract are all unchanged. Its seams
+  are command-level, so the acceptance evidence lives in
+  `scripts/probe-contract-gates.sh` rather than in a new Rust test.
 - The plugin fixture adds a workspace member that exists only to prove the
   boundary. That is deliberate and is the shape the effort spec's plugin ABI
   seam describes. The harness is the owner of the host-callback panic probe and
