@@ -1996,6 +1996,170 @@ workspace gates for the build seam, run with `DATABASE_URL` unset.
 
 ---
 
+## Pending ticket: `pairing-and-tokens`
+
+Blocked by `local-identity-and-acl` and `state-store`, both landed. The
+credential lifecycle: a surface pairs once with a preshared key carried in the
+request body, receives its own token, keeps it in the platform keychain when it
+can, and is revoked on its own. First ticket to append to the wire contract since
+the skeleton.
+
+### Exports
+
+- `contracts/proto/metis/v1/daemon.proto`: `rpc Pair(PairRequest) returns
+  (PairResponse);` appended to `DaemonService`, with
+  `PairRequest { string preshared_key = 1; }` and
+  `PairResponse { string token = 1; }`, the token returned once and never again.
+  Regenerated through `scripts/regenerate-contracts.sh`, which brings `buf lint`,
+  `buf breaking` and the drift check along.
+- `crates/api-contracts/src/keychain.rs`: the platform keychain through its
+  command line tool, because the daemon reads a preshared key from one and the
+  client writes its token to one, and `api-contracts` is the only crate both
+  depend on. `available() -> Option<KeychainTool>`, `lookup(account)`,
+  `store(account, secret)`, `remove(account)`, and a non-exhaustive
+  `KeychainError`. The tool is `secret-tool` on Linux and `security` on macOS,
+  probed on `PATH`; the service name is `metis-daemon` and the account is the
+  surface name.
+- `crates/daemon/src/secret.rs`: `SecretRef::{Literal, Env, Keystore, File}`
+  parsed from one string with explicit `literal:`, `env:`, `keystore:` and
+  `file:` prefixes, a bare value treated as a literal, and
+  `resolve() -> Result<Secret, SecretError>`; `SecretError::{Unresolved,
+  Unreadable, TooPermissive { path, mode }}`. A secret file readable by group or
+  others is refused, and `keystore:` goes through `api_contracts::keychain`.
+- `crates/daemon/src/auth.rs`:
+  - `AUTH_ERROR_HEADER = "metis-auth-error"`;
+    `AuthError::{MissingCredential, RejectedCredential { cause }}` with
+    `RejectionCause::{Invalid, Revoked}`, `Display`, and
+    `refusal_headers(&AuthError) -> HeaderMap` beside the identity module's
+    equivalent.
+  - `authorize(store, &HeaderMap) -> Result<Granted, AuthError>`: reads the
+    surface from the identity declaration, takes `Authorization: Bearer`, parses
+    the token with `Token::parse`, hashes it with `Token::hash`, and maps the
+    store's `Verify` (`UnknownSurface` to `Revoked`, `Mismatch` to `Invalid`).
+  - `enum AuthPolicy { LocalAcl, TokenRequired }` and `AuthInterceptor`,
+    implementing `connectrpc::Interceptor`: it exempts the `Pair` procedure path,
+    leaves `LocalAcl` a pass-through, and under `TokenRequired` calls `authorize`
+    in both `intercept_unary` and `intercept_streaming`, so authorization happens
+    for unary and streaming calls alike and a handler cannot forget it.
+  - `pair(store, preshared, &str) -> Result<Token, PairError>`: compares the body
+    key against the resolved secret in constant time, mints, inserts, and returns
+    the token text once. `PairError::{WrongPresharedKey, AlreadyPaired, Store}`.
+- `crates/daemon/src/service.rs`: `Service { store, preshared }` implementing the
+  generated `DaemonService` (`pair` mints, `echo` is the served example), and
+  `router(store, preshared, AuthPolicy) -> Router` which registers the service
+  with `AuthInterceptor` through `ConnectRpcService::with_interceptor`. Each
+  listener mounts its own: the local socket `LocalAcl`, the TCP listener
+  `TokenRequired`. That is how a local call needs no token while a remote call
+  does, with no peer-address sniffing.
+- `crates/client/src/credential.rs`: `Backend::{Keychain, File(PathBuf)}`;
+  `store(surface, token)`, `load(surface)`, `remove(surface)`, each returning or
+  reporting the backend that answered. The keychain is tried first through
+  `api_contracts::keychain`, and the fallback file is
+  `$XDG_DATA_HOME/metis/client/<surface>.token` at mode 600.
+- `crates/client/src/lib.rs`: `Client::pair(&self, preshared_key: &str) ->
+  Result<Backend, ClientError>` calls `Pair`, keeps the returned token through
+  the credential store, and reports the backend that took it; a stored token for
+  the declared surface is attached as a default `Authorization: Bearer` header at
+  construction, so remote calls carry it and no caller names a credential.
+  `ClientError::{CredentialMissing, CredentialRejected { cause }}` are populated
+  from the auth header, never from message text.
+- Configuration and docs: `METIS_PRESHARED_KEY` (a `SecretRef`) recorded in
+  `docs/dev-env.md` with the token file and the keychain rule, and the run
+  commands in `docs/testing.md`.
+
+### Existing abstractions to use
+
+- The landed store: `daemon::state::Store`, `daemon::token::{mint, Token,
+  TokenHash}`, including the pinned rule that the digest is SHA-256 over the
+  token's canonical lowercase hex text
+  (`a8ae6e6ee929abea3afcfc5258c8ccd6f85273e0d4626d26c7279f3250f77c8e`), which
+  this ticket must not re-derive differently.
+- `connectrpc::Interceptor`, `Next`, `NextStream`, `UnaryRequest`, `StreamRequest`
+  and `ConnectRpcService::with_interceptor` as the middleware the framework
+  already provides, rather than a hand-rolled tower layer.
+- The landed metadata and refusal channels: `identity::{from_headers,
+  refusal_headers}` and the `metis-supported-versions` header are the shape
+  `metis-auth-error` copies; `PROTOCOL_SURFACE_HEADER` is where the surface comes
+  from.
+- `transport::{serve_uds, ensure_private_dir, restrict_file}` for the tests'
+  socket, the token file's mode and its directory.
+- `ConfigError` and the other non-exhaustive error enums; the RAII environment and
+  temporary-directory helpers in the existing tests; `crates/client/tests/identity.rs`
+  as the integration pattern over a real socket.
+
+### Do NOT reimplement
+
+- Do not put the credential, the preshared key or the token in a URL, a query
+  string, a log line, or a message body on the wire. The preshared key is the one
+  exception, and only inside `PairRequest`.
+- Do not store a token, or the preshared key, in the database: only the hash,
+  through the landed store.
+- Do not add per-client permissions or scopes: one token grants the whole exposed
+  surface.
+- Do not add TLS, a certificate, a pin or a proxy trust rule (ADR 0004).
+- Do not build a second credential store, a second token format, or a second
+  hashing rule.
+- Do not add a keyring crate when the platform's command line tool can be probed,
+  and do not silently fall back from a keychain that exists but fails: fall back
+  only when no tool is on `PATH`.
+- Do not hand-roll middleware when `connectrpc::Interceptor` exists, and do not
+  enforce authorization inside handlers.
+
+### Seams
+
+1. **Secret-reference seam.** Each of the four forms resolves; a file readable by
+   group or others is `TooPermissive`; an unset variable, a missing file and an
+   unreachable keystore are typed errors; a bare value is a literal.
+   Unit-tested with a temporary file and the RAII environment helper.
+2. **Pairing seam.** Over a real socket, `Pair` with the resolved key returns a
+   token once, and the store holds only its hash; the same call with a wrong key
+   is `WrongPresharedKey`; pairing an already-paired surface is `AlreadyPaired`
+   and leaves the first row intact.
+3. **Authorization seam.** Under `TokenRequired`, a call with no `Authorization`
+   header is `CredentialMissing`, an unknown surface is `CredentialRejected {
+   Revoked }`, a wrong token is `CredentialRejected { Invalid }`, and a valid
+   token is served; each refusal is produced by the interceptor, so the handler
+   is proven not to have run. Under `LocalAcl`, the same call is served with no
+   credential at all.
+4. **Revocation seam.** With two surfaces paired, deleting one row and re-serving
+   leaves that surface rejected and the other working.
+5. **Credential-storage seam.** With no keychain tool on `PATH`, the file backend
+   is used, reports itself, and writes mode 600; with a stub tool earlier on
+   `PATH`, the keychain backend is used for store and load.
+6. **Digest-contract seam.** The token `Pair` returns verifies against the row the
+   store wrote, using the landed hash rule, so a change to that rule fails here
+   rather than at a client.
+7. **Contract seam.** The proto edit regenerates cleanly, `buf lint` and
+   `buf breaking` stay green, and the generated tree is committed.
+
+Test types: unit tests in `daemon` for seams 1 and 6 and in `client` for the
+credential store's file backend; integration tests in `crates/daemon/tests/` over
+a real socket, with `client` as a dev-dependency, for seams 2 to 5; the contract
+gates for seam 7.
+
+### Interface contract
+
+- `remote-pairing` reuses `Pair`, the auth interceptor, the secret references and
+  the client credential store over the remote transport; it adds no second
+  credential path. It also owns whether a remote listener runs `TokenRequired`
+  from the start (this ticket's `router` takes the policy, so the daemon effort
+  or that ticket decides the wiring).
+- `event-stream` inherits authorization through `intercept_streaming`, so its
+  `StreamEvents` handler does not call the check itself; the obligation is the
+  interceptor's, which is why this ticket removes that residual from
+  `local-identity-and-acl`.
+- `reverse-proxy-mode` and the daemon effort consume `SecretRef` for their own
+  settings; `api_contracts::keychain` is the one place the platform tool is
+  called.
+- Recorded residuals: the `Pair` exemption is by procedure path, so a future
+  pre-auth RPC must be added to that list deliberately; there is no token rotation
+  or expiry; `client::skeleton` remains a second `DaemonService` implementation
+  used by the identity and transport tests, and the daemon effort replaces it; the
+  daemon binary does not mount either service yet, so the two listeners exist only
+  in tests and in the daemon effort's future wiring.
+
+---
+
 ## Downstream interface contracts (outline)
 
 The tickets still pending in this effort are `pairing-and-tokens` (unblocked by
