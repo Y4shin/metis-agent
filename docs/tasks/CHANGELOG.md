@@ -5,6 +5,11 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Local transport and the echo RPC skeleton (local-transport-rpc-skeleton)
+
+Made the first real path between two processes: one handwritten transport module in `api-contracts` that serves any Connect service over a Unix domain socket (and over any async bidirectional stream), plus a UI-independent `client` wrapper that calls the echo RPC without the caller naming a transport, and a runnable example proving it end to end. The endpoint is a platform default with a `METIS_ENDPOINT` override, and the socket tests clean up after themselves. Nothing in the generated trees changed.
+
+
 ## 2026-10-13, Contract gates read one configuration and authenticate to the BSR (contract-gate-hardening)
 
 Moved the buf configuration to the repository root, so `buf lint`, `buf breaking`, and generation read one `buf.yaml` and the declared policy is the one that runs; `--against-config buf.yaml` keeps both sides of the breaking comparison scoped to `contracts/proto`. CI supplies `BUF_TOKEN` from `secrets.BUF_TOKEN` to the single plugin-resolving step and unsets it when the secret is empty, and the gate configuration gained an on-demand acceptance probe at `scripts/probe-contract-gates.sh`. Measured: anonymous resolution is rate limited, an unset or empty token reaches the BSR anonymously, and a non-empty unverifiable token is refused before any request.

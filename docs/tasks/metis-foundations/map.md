@@ -195,6 +195,15 @@ streaming assumptions before anything is built on top.
   every out-of-surface public constant in its `exclude` list, because it emits
   the crate's public constants regardless of that list. `plugin-compatibility`
   and `plugin-authoring-trait` extend this layout additively.
+- The local transport skeleton is real: one handwritten transport module in
+  `api-contracts` (`serve_stream` generic over any async bidirectional stream,
+  `serve_uds`, `uds_transport`, `local_authority`), shared by the skeleton, the
+  `client` wrapper, and the daemon effort, with a UI-independent `client` that
+  names no transport. `serve_stream` takes `impl Into<Arc<Router>>` rather than a
+  bare `Router`, because `connectrpc::Router` is not `Clone` in 0.9.1: an accept
+  loop clones an `Arc` per accepted stream while a direct caller can still pass a
+  bare router. The endpoint is a platform default with a `METIS_ENDPOINT`
+  override, resolved through one function both the wrapper and the example call.
 - The contract gates read one configuration at the repository root, and CI
   authenticates the plugin-resolving step with `BUF_TOKEN` from
   `secrets.BUF_TOKEN`, unsetting it when the secret is empty. Measured on buf
@@ -229,6 +238,17 @@ streaming assumptions before anything is built on top.
   done, a pull request can still go red on rate limiting and needs a re-run.
 - How the client distinguishes a deliberate slow-consumer stream drop from a
   transport failure, so the resync decision is not guesswork.
+- The local endpoint default and the local access-control requirement conflict:
+  the skeleton defaults to `/tmp/metis-daemon.sock`, while
+  `local-identity-and-acl` requires the daemon to own the socket's directory as a
+  configured `uid:gid` with mode 700 or 770. `/tmp` is shared and world-writable
+  (sticky), so it cannot carry that ownership. Which default replaces it, for
+  example a per-user runtime directory, and whether the ACL tests must set
+  `METIS_ENDPOINT`, is that ticket's decision.
+- The endpoint override's variable name is a private constant in `client`, so the
+  daemon effort would restate the literal `METIS_ENDPOINT` unless the constant is
+  exported. Related: `serve_uds` has no shutdown path that unlinks its socket, so
+  a stopped listener leaves the socket file behind.
 
 ## Out of scope
 
