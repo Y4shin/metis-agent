@@ -24,7 +24,9 @@ name = "abi-harness"
 path = "src/bin/abi-harness.rs"
 
 [dependencies]
-plugin-contract.workspace = true
+# The fixture is an author, so it turns the authoring feature on; the runtime
+# keeps it off and sees the primitives and the payload envelope alone.
+plugin-contract = { workspace = true, features = ["authoring"] }
 libloading.workspace = true
 serde.workspace = true
 serde_json.workspace = true

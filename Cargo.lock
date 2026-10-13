@@ -497,6 +497,8 @@ name = "plugin-contract"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
