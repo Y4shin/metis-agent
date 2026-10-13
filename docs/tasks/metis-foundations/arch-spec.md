@@ -17,6 +17,8 @@ spec-reconciler when they become pending.
 - Effort destination, decisions, fog: `docs/tasks/metis-foundations/map.md`
 - Effort spec: `docs/tasks/metis-foundations/spec.md`
 - Contract decisions: `docs/adr/0001-protobuf-connect-instead-of-openapi.md`
+- State decisions: `docs/adr/0003-daemon-state-in-sqlite.md`
+- Remote transport decisions: `docs/adr/0004-no-native-tls-reverse-proxy.md`
 - Plugin ABI decisions: `docs/tasks/metis-foundations/tasks/plugin-abi-layout/task.md`
   (D1 to D15 plus the two spike amendment lists)
 - Prior art in tree: `spikes/connectrpc/`, `spikes/plugin-abi-mechanics/`,
@@ -1768,56 +1770,133 @@ existing contract and ABI gates for seam 5.
 
 ---
 
-## Pending ticket: `state-store`
+## Landed ticket: `state-store`
 
-Blocked by nothing, and the foundation `pairing-and-tokens` sits behind it. The
-daemon's persistent state: one SQLite database opened through sqlx, migrated on
-open, with the table token hashes live in. `crates/daemon` gains a library
-target beside its binary, because `docs/rough-plan.md` starts storage as an
-internal module of the daemon crate.
+Landed on `task/state-store` as the merge commit `925371a`, parents `e88b055`
+(the landing branch, created at this ticket's arch spec commit, which is also
+`main`'s tip and carries every earlier landing merge) and `f8331b5` (the working
+branch `ticket/state-store`, eleven `wip:` commits off `main` at `e88b055`,
+deleted after the merge); `e824546` is the docs commit carrying the ticket note
+and the committed deviation report. The merge was clean, and the landing tree
+differs from `f8331b5` only in the ticket note and that report, so the tree the
+verify worker gated is the tree that landed and no gate was re-run at landing.
+The gates were green on `f8331b5` through `devenv shell --` with `DATABASE_URL`
+unset: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test -p daemon` (10 passed), `cargo test -p api-contracts` (23 passed),
+and the whole workspace `cargo test` (99 passed, 0 failed, up from 88).
+
+The daemon's persistent state: one SQLite database opened through sqlx, migrated
+on open, with the table the token hashes live in, so pairing and the later
+session and message work share one store instead of inventing a file format each.
+The decision record is `docs/adr/0003-daemon-state-in-sqlite.md`.
+`crates/daemon` gained a library target beside its binary, because
+`docs/rough-plan.md` starts storage as an internal module of the daemon crate
+rather than as a new crate or a module of `api-contracts`.
+
+The surfaces below are the measured ones. The divergences from the plan are
+folded in: the `Verify` variants, the `&str` surface parameters, the added
+`TokenError::Malformed`, the pinned hash input, the async `Result` signatures on
+every store method, the two new public helpers in `api-contracts::transport`
+with the `SocketAcl` to `PathAcl` rename, the dependency versions, and the
+empty-variable rule in `resolve_db_path`. All of them are additive and inside the
+recorded approval.
 
 ### Exports
 
-- `crates/daemon/Cargo.toml`: a `[lib]` target beside the binary, and `sqlx`
-  with `default-features = false` and the `runtime-tokio`, `sqlite`, `macros`
-  and `migrate` features. `sha2` for hashing and `getrandom` for token bytes join
-  the workspace dependencies; `subtle` is added for the constant-time hash
-  comparison rather than a hand-rolled fold.
+- `crates/daemon/Cargo.toml`: a `[lib]` target beside the binary, because the
+  migration seam reads the file the store created with an independent connection,
+  which also moved `sqlx` into `[dev-dependencies]` beside the normal dependency.
+  `sqlx` 0.9 with `default-features = false` and the `runtime-tokio`, `sqlite`,
+  `macros` and `migrate` features; `sha2` 0.11 for hashing and `getrandom` 0.4
+  for token bytes; `subtle` 2 for the constant-time hash comparison rather than a
+  hand-rolled fold. `subtle`'s MSRV is 1.94 and the devenv shell is on 1.101;
+  `Cargo.lock` grew by 921 lines. `libsqlite3-sys` therefore bundles a C SQLite
+  library into every build. No other crate depends on any of these yet, so
+  `pairing-and-tokens` is the first consumer.
 - `crates/daemon/src/lib.rs`: `pub mod state;` and `pub mod token;`; `main.rs`
   stays a thin binary.
 - `crates/daemon/src/state.rs`:
   - `pub const STATE_DB_ENV: &str = "METIS_STATE_DB";` and
     `resolve_db_path() -> Result<PathBuf, StateError>`: the variable wins, then
     `$XDG_DATA_HOME/metis/metis.db`, then `$HOME/.local/share/metis/metis.db`,
-    then `StateError::NoStateDir`.
-  - `Store::open(path) -> Result<Store, StateError>`: creates the directory at
-    mode 700 and the file at mode 600, opens a pool, and applies the embedded
-    migrations; `Store::open_in_memory()` for tests.
-  - `insert_token(&self, surface, &TokenHash)`, `verify_token(&self, surface,
-    &TokenHash) -> Verify`, `revoke_token(&self, surface)`, `surfaces(&self)`.
+    then `StateError::NoStateDir`. An absent **or empty** variable is treated as
+    unset, so an empty value falls back to the data home instead of naming the
+    current directory, which is the rule the landed `METIS_ENDPOINT` and
+    `METIS_TCP_ADDR` already follow.
+  - `pub async fn Store::open(path) -> Result<Store, StateError>`: creates the
+    directory at mode 700 and the file at mode 600 through the landed helpers
+    (see `transport.rs` below), opens a pool, and applies the embedded
+    migrations. `Store::open_in_memory()` is `async` too, for tests, and its pool
+    is capped at one connection because an in-memory SQLite database is per
+    connection; file-backed stores use the default pool sizing.
+  - Every store method is `async` and returns `Result<_, StateError>`:
+    `insert_token(&self, surface: &str, &TokenHash)`,
+    `verify_token(&self, surface: &str, &TokenHash)` returning
+    `Result<Verify, StateError>`, `revoke_token(&self, surface: &str)` and
+    `surfaces(&self) -> Result<Vec<String>, StateError>`. The surface parameter
+    is a `&str` name, so the store stays decoupled from
+    `api_contracts::identity::Surface` and from the identity module entirely,
+    and the daemon crate does not depend on the identity types. A caller passes
+    the surface name it already reads from the declaration headers.
   - `pub enum StateError` (non-exhaustive): `NoStateDir`, `Io`, `Database`,
-    `SurfaceAlreadyPaired`.
+    `SurfaceAlreadyPaired`. Migration failures reuse `StateError::Database`
+    through `sqlx::Error::Migrate`, so no variant beyond these four was needed.
+  - `pub enum Verify` (non-exhaustive): `Verified`, `UnknownSurface`, `Mismatch`.
+    The three are distinguishable on purpose, so a caller tells a revoked or
+    never-paired surface from a bad token without a second query. The enum
+    carries no hash, so a caller that verifies never holds a value it could
+    replay, and criterion 5's "verification never returns a stored hash"
+    therefore holds structurally rather than by test.
 - `crates/daemon/src/token.rs`: `mint() -> (Token, TokenHash)` where `Token` is
-  32 random bytes hex-encoded and `TokenHash` is its SHA-256; `Token::parse(&str)`;
-  `TokenHash`'s comparison is constant time.
+  32 random bytes hex-encoded and `TokenHash` is its SHA-256;
+  `Token::parse(&str) -> Result<Token, TokenError>` with the new non-exhaustive
+  `TokenError::Malformed`, which implements `Display` and `Error`, so a
+  malformed credential from the wire is a typed refusal rather than a panic;
+  `TokenHash`'s comparison is constant time through `subtle`'s `ct_eq`.
+  - The hashed input is pinned: `Token::hash()` is the SHA-256 of the token's
+    canonical lowercase hex **text**, which is what a client presents, not of the
+    32 decoded bytes, and `Token::parse` normalises case so the digest does not
+    depend on how a client wrote the text. A known-answer test pins it: the
+    digest of
+    `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` is
+    `a8ae6e6ee929abea3afcfc5258c8ccd6f85273e0d4626d26c7279f3250f77c8e`. This is
+    the one wire-visible rule the ticket fixes, and `pairing-and-tokens` must
+    hash the presented text exactly this way: a client that hashes the decoded
+    bytes produces a credential that never verifies, and no test outside this
+    ticket would catch it.
 - `crates/daemon/migrations/0001_tokens.sql`:
   `tokens(surface TEXT PRIMARY KEY, hash BLOB NOT NULL, paired_at TEXT NOT NULL)`,
-  applied by `sqlx::migrate!` so the binary embeds its schema.
-- `crates/api-contracts/src/transport.rs`: the landed `ensure_socket_dir`
-  generalises into a private-directory helper that takes the mode, so the socket
-  directory at 700, the socket file at 700 or 770, and the state directory at 700
-  and file at 600 all use one rule. No signature the caller sees today changes.
-- `docs/dev-env.md` and `docs/testing.md`: the variable, the default path, and
-  the run commands.
+  applied by `sqlx::migrate!` so the binary embeds its schema and CI gained no
+  step.
+- `crates/api-contracts/src/transport.rs`: the landed private-path rule
+  generalises into two new public functions, `ensure_private_dir(dir, mode)` and
+  `restrict_file(path, mode)`, both `io::Result<()>`, and the private `SocketAcl`
+  type became `PathAcl` with a `private(mode)` constructor. `ensure_socket_dir`
+  and `serve_uds` keep their signatures and behaviour, `ConfigError::SocketAcl`
+  keeps its fields, and the `path` in a directory refusal still names the
+  directory. The internal refusal messages were reworded to name the path they
+  refuse, which is visible only through an error's message text that no test
+  asserts. The socket directory at 700, the socket file at 700 or 770, and the
+  state directory at 700 with its file at 600 therefore all use one rule, and the
+  store calls the same code path `serve_uds` uses rather than a copy of it.
+- `docs/dev-env.md` records the variable, the default path and the modes, and
+  `docs/testing.md` records the run commands (`cargo test -p daemon`) plus the
+  no-server, no-`DATABASE_URL` property. The plan named `docs/dev-env.md` and
+  `docs/testing.md`; both were updated in place.
 
 ### Existing abstractions to use
 
 - The landed ACL rule and its refusals (symlink, owner, wider mode) as the
-  pattern the state directory inherits at 700 and 600.
+  pattern the state directory inherits at 700 and 600, reused through
+  `transport::ensure_private_dir` and `transport::restrict_file` rather than
+  copied.
 - The non-exhaustive error convention of `ConfigError`, `IdentityError` and
-  `ClientError`.
+  `ClientError`, carried over to `StateError`, `TokenError` and `Verify`.
 - The RAII environment and self-cleaning temporary-directory helpers in
-  `crates/client/tests/{echo,acl}.rs`, carried into the daemon's tests.
+  `crates/client/tests/{echo,acl}.rs`, reproduced inside the daemon's
+  `tests/path.rs` (`StateEnv`, with its own lock and restore-on-drop), because
+  the client crate's helper is not visible across crates. Same pattern, no new
+  mechanism.
 - `docs/testing.md`'s command-list convention for the new run commands.
 
 ### Do NOT reimplement
@@ -1838,48 +1917,95 @@ internal module of the daemon crate.
 ### Seams
 
 1. **Path seam.** `METIS_STATE_DB` wins; then `$XDG_DATA_HOME`, then
-   `$HOME/.local/share`; with no home directory the result is `NoStateDir`.
-   Unit-tested with the RAII helper.
+   `$HOME/.local/share`; with no home directory the result is `NoStateDir`, and
+   an absent or empty variable is treated as unset. Unit-tested with the RAII
+   helper in `crates/daemon/tests/path.rs`.
 2. **Creation seam.** Opening a fresh path creates the directory at 700 and the
-   file at 600, asserted by reading the modes on Unix, matching how the ACL tests
-   are gated.
-3. **Migration seam.** A fresh database has the `tokens` table, the migration is
-   recorded as applied, and opening the same file twice is idempotent.
+   file at 600, asserted on Unix by `a_fresh_database_is_created_private`, which
+   reads both modes back with `symlink_metadata().mode()`, matching how the ACL
+   tests are gated. Non-Unix creation carries no mode rule (see the residual
+   below).
+3. **Migration seam.** `a_fresh_database_is_migrated_on_open` opens a fresh
+   file, reads the schema through an independent connection, asserts the
+   `tokens` table and `_sqlx_migrations(version = 1, success = 1)`, then re-opens
+   the same file, so the migration is recorded as applied and opening twice is
+   idempotent.
 4. **Token seam.** `mint()` returns 64 hex characters from 32 random bytes and
-   two mints differ; `hash()` is stable and 32 bytes; verification accepts the
-   stored hash and refuses any other; the row holds the hash and never the token.
-5. **Revocation seam.** With two surfaces paired, revoking one leaves the other
-   verifying.
-6. **Duplicate seam.** Inserting a surface that already has a row is
-   `SurfaceAlreadyPaired` and leaves the first row intact.
+   two mints differ; `hash()` is stable and 32 bytes, pinned by the known-answer
+   digest above; verification accepts the stored hash and refuses any other.
+   `a_token_row_stores_the_hash_and_verifies_it` reads the raw row (`surface`, a
+   32-byte `hash`) and asserts the token text is absent from the database file
+   and its `-wal`/`-journal` sidecars, so the row holds the hash and never the
+   token.
+5. **Revocation seam.** With two surfaces paired,
+   `revoking_one_surface_leaves_the_other_verifying` asserts the revoked surface
+   reports `Verify::UnknownSurface` or `Verify::Mismatch` while the other still
+   verifies.
+6. **Duplicate seam.** `an_insert_for_a_paired_surface_is_refused` asserts
+   `StateError::SurfaceAlreadyPaired` and that the first row is intact, and
+   verification cannot return the stored bytes at all because `verify_token`
+   returns only `Verify`.
 7. **Build seam.** The workspace builds and the daemon tests pass with no
    database server, no `DATABASE_URL` and no new CI step.
 
 Test types: `sqlite::memory:` for the store operations, temporary files for the
 path, creation and migration seams, all inside `crates/daemon`; the existing
-workspace gates for the build seam.
+workspace gates for the build seam, run with `DATABASE_URL` unset.
 
 ### Interface contract
 
 - `pairing-and-tokens` consumes `Store`, `mint` and `TokenHash`, adds the `Pair`
-  RPC and the authorization check, and adds no token table of its own.
+  RPC and the authorization check, and adds no token table of its own. It calls
+  `Store::open`, `mint`, `insert_token(surface, &TokenHash)`, `verify_token` and
+  `revoke_token` with the surface name as a `&str`, maps
+  `Verify::UnknownSurface` and `Verify::Mismatch` onto its two rejection causes,
+  and turns a `TokenError::Malformed` from `Token::parse` into a typed refusal
+  rather than an ended connection. The hash rule above is a cross-ticket
+  contract: it must hash the token's canonical lowercase hex text, exactly as
+  the known-answer digest pins it.
 - The daemon effort later adds session, message and workflow tables through new
   migrations in the same directory, and the `agent-harness` `SessionStore`
-  implementation is the daemon's, not this store's.
+  implementation is the daemon's, not this store's. `pairing-and-tokens` and the
+  daemon effort inherit the three-step `resolve_db_path` fallback and its
+  empty-variable rule.
 - The store is the daemon's state boundary: nothing in `api-contracts` or
   `client` reads the database.
-- Recorded residual: no rotation, no pruning, no stale-database unlink, and
-  `sqlx`'s SQLite driver brings a bundled C library into the build.
+- The private-path helpers are shared: `ensure_private_dir` and `restrict_file`
+  are what `windows-named-pipe` and `reverse-proxy-mode` reuse for their own
+  directories and files, and the `PathAcl` rename is internal, so no caller
+  signature and no `ConfigError` field moved.
+
+### Residual, recorded rather than resolved
+
+- `Store::open` narrows a pre-existing widened database file to 600 rather than
+  refusing it, because the symlink, owner and wider-than-mode refusal rule
+  applies to the directory, as it does for the socket directory.
+- No rotation, no pruning and no stale-database unlink, and no test opens a
+  database written by another version.
+- No test asserts that the comparison is constant time, only that it works; the
+  property rests on `subtle`'s `ct_eq`.
+- The in-memory store is capped at one connection, because an in-memory SQLite
+  database is per connection; file-backed stores use the default pool sizing.
+- Non-Unix creation carries no mode rule, and `prepare` creates both paths
+  without a mode there, with a comment that the front-end for that platform
+  brings its own rule; `windows-named-pipe` owns it.
+- `libsqlite3-sys` bundles a C SQLite library into every build, and `sqlx` 0.9
+  needs a recent toolchain (MSRV 1.94 against the devenv shell's 1.101).
+- `docs/dev-env.md` and `docs/testing.md` were updated with the ticket, so
+  finalize needs no further docs change for the store itself.
 
 ---
 
 ## Downstream interface contracts (outline)
 
-These tickets are not pending yet, apart from the one pending section above
-(`state-store`). The two other tickets still pending in this effort are
-`event-stream` and `windows-named-pipe`; their sections are added when they reach
-the frontier, and the commitments below are what the landed tickets must already
-support, including the surfaces `local-identity-and-acl` landed.
+The tickets still pending in this effort are `pairing-and-tokens` (unblocked by
+the landed `state-store`, whose store and token surfaces it consumes),
+`event-stream`, `reverse-proxy-mode`, `windows-named-pipe` and `remote-pairing`.
+Their sections are added when their chains reach the frontier. The tickets the
+bullets below also name (`stream-resume-and-expiry`,
+`cancellation-and-slow-consumers`) are not pending yet, and the commitments below
+are what the landed tickets must already support, including the surfaces
+`local-identity-and-acl` and `state-store` landed.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
@@ -1922,7 +2048,16 @@ support, including the surfaces `local-identity-and-acl` landed.
   `api_contracts::identity`). Those two tickets own the `ClientError` credential
   variants; `local-identity-and-acl` added no credential, and it settled the
   endpoint default against its directory-ownership requirement on the
-  `$XDG_RUNTIME_DIR`, then `$TMPDIR`, rule.
+  `$XDG_RUNTIME_DIR`, then `$TMPDIR`, rule. `pairing-and-tokens` builds its token
+  path on the landed `state-store`: it calls `Store::open`, `mint`,
+  `insert_token(surface, &TokenHash)`, `verify_token` and `revoke_token` with the
+  surface name as a `&str`, maps `Verify::UnknownSurface` and `Verify::Mismatch`
+  onto its two rejection causes, turns `TokenError::Malformed` from
+  `Token::parse` into a typed refusal, and hashes the presented credential
+  exactly as the store does: SHA-256 over the token's canonical lowercase hex
+  text, the rule the known-answer digest in the `state-store` section pins. A
+  client that hashed the decoded bytes would pair successfully and then fail
+  every later call, so the rule is named here as well as there.
 
 ## Architecture notes
 
@@ -2006,6 +2141,18 @@ support, including the surfaces `local-identity-and-acl` landed.
   surfaces; the earlier notes in this section list `local-identity-and-acl` as
   still pending at their own landing moment, and this note carries the current
   set.
+- `state-store` landed as the merge commit `925371a` on `task/state-store`, with
+  the ticket note and the committed deviation report in the docs commit
+  `e824546`. It gives `crates/daemon` a library target and the store and token
+  modules beside its binary, keeps the store decoupled from
+  `api_contracts::identity` by taking surface names as `&str`, pins the
+  hash-input rule the pairing chain must match, and generalises the landed
+  private-path rule into `transport::ensure_private_dir` and
+  `transport::restrict_file`. The tickets still pending in the effort are
+  `pairing-and-tokens` (unblocked by this landing), `event-stream`,
+  `reverse-proxy-mode`, `windows-named-pipe` and `remote-pairing`; the earlier
+  notes in this section carry the pending set at their own landing moment, and
+  this note carries the current set.
 
 ---
 
