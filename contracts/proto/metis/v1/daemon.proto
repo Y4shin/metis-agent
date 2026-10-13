@@ -1,9 +1,8 @@
 // The daemon's wire contract, first version.
 //
-// Two ordinary RPCs for now. Later tickets append an event stream and its
-// messages to the same service and package. Changing or removing what is here
-// already breaks clients, and `buf breaking` in FILE mode is the gate that
-// catches it.
+// Two ordinary RPCs and the event stream. Later tickets append cancellation to
+// the same service and package. Changing or removing what is here already
+// breaks clients, and `buf breaking` in FILE mode is the gate that catches it.
 
 syntax = "proto3";
 
@@ -18,6 +17,14 @@ service DaemonService {
   // surface's own token. The key travels in the request body and nowhere
   // else, and the token is answered once: the daemon keeps only its hash.
   rpc Pair(PairRequest) returns (PairResponse);
+
+  // Stream the daemon's events for the selected channels. The stream's first
+  // message is the snapshot of each selected channel's head, later messages
+  // carry the events that follow, and an idle stream carries heartbeats as
+  // ordinary messages. The response is the event itself rather than a named
+  // response wrapper, which is why this RPC carries the one lint exception
+  // in `buf.yaml`.
+  rpc StreamEvents(StreamEventsRequest) returns (stream Event);
 }
 
 message EchoRequest {
@@ -45,4 +52,67 @@ message PairResponse {
   // The surface's token, returned once. The daemon stores only its hash, so
   // this response is the only time the token exists in the daemon's memory.
   string token = 1;
+}
+
+// The channels one stream selects, and where it starts.
+message StreamEventsRequest {
+  // The channels to stream, of the daemon's `daemon`, `session:<id>`,
+  // `task:<id>`, and `workflow_run:<id>` vocabulary. An empty selection
+  // starts a stream that carries nothing but heartbeats, because a typo
+  // must not leak every channel.
+  repeated string channels = 1;
+
+  // The event to resume after. `0` means no cursor, and identifiers start
+  // at `1`, so the field needs no `optional`. The placeholder rule this
+  // version implements is that a non-zero cursor suppresses live events at
+  // or below it; `stream-resume-and-expiry` replaces it with real resume
+  // and expiry semantics.
+  uint64 last_event_id = 2;
+}
+
+// One message on an event stream: the snapshot that opens it, a later event,
+// or a heartbeat.
+message Event {
+  // The event's identifier, monotonic across every channel of the daemon and
+  // starting at `1`.
+  uint64 id = 1;
+
+  // What this message is.
+  EventKind kind = 2;
+
+  // The channel the event belongs to, in the `StreamEventsRequest.channels`
+  // vocabulary. A heartbeat carries no channel: it belongs to the stream, not
+  // to a channel.
+  string channel = 3;
+
+  // The event's structured content, as JSON text.
+  //
+  // The field is a `string` rather than a well-known type or a generated
+  // message, so that neither generation nor the runtime pulls a schema or
+  // well-known-type dependency in for payloads the stream treats as opaque.
+  // A more native encoding can replace it only by breaking the compatibility
+  // gate, because `buf breaking` runs in FILE mode and this is field 4 of a
+  // committed message.
+  string payload = 4;
+}
+
+// What one message on an event stream is.
+enum EventKind {
+  // Not set. A receiver treats it as a message it cannot act on.
+  EVENT_KIND_UNSPECIFIED = 0;
+
+  // The opening message of every stream. A selected channel that holds an
+  // event contributes its head, and when no selected channel holds anything the
+  // snapshot is one empty message: no channel, no payload, and the daemon's
+  // latest identifier. A receiver therefore always sees the snapshot before any
+  // live traffic.
+  EVENT_KIND_SNAPSHOT = 1;
+
+  // A liveness message on an otherwise idle stream. It carries the id of the
+  // most recent event the daemon assigned and no channel, so identifiers never
+  // decrease across a stream's whole life.
+  EVENT_KIND_HEARTBEAT = 2;
+
+  // A published event.
+  EVENT_KIND_EVENT = 3;
 }

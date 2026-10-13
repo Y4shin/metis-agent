@@ -3,17 +3,25 @@
 # repository root.
 #
 # `contracts/proto` is the module root, so the package `metis.v1` lives at
-# `contracts/proto/metis/v1/`. Lint runs in STANDARD mode with no exception
-# yet: the `RPC_RESPONSE_STANDARD_NAME` exception the streaming `Event` message
-# needs is added with that message, not in advance. Breaking runs in FILE mode,
-# and `buf breaking` runs with `--against-config buf.yaml` so that both sides of
-# the comparison resolve this same module.
+# `contracts/proto/metis/v1/`. Lint runs in STANDARD mode with one exception,
+# scoped to one rule and one file: `RPC_RESPONSE_STANDARD_NAME` for the
+# streaming `StreamEvents` RPC, whose response is the `Event` the stream
+# carries. Breaking runs in FILE mode, and `buf breaking` runs with
+# `--against-config buf.yaml` so that both sides of the comparison resolve this
+# same module.
 version: v2
 modules:
   - path: contracts/proto
 lint:
   use:
     - STANDARD
+  # The streaming RPC answers with `Event` itself rather than with a named
+  # response wrapper, because the response is the event the stream carries.
+  # The exception is scoped to the one rule and the one file that declares the
+  # RPC, which is the tightest scope buf v2 offers.
+  ignore_only:
+    RPC_RESPONSE_STANDARD_NAME:
+      - contracts/proto/metis/v1/daemon.proto
 breaking:
   use:
     - FILE

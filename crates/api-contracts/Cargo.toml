@@ -24,6 +24,11 @@ tower.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 
+# The event ring beside the transport: its live subscription is a `Stream`, and
+# the serving side assembles the snapshot, that subscription, and the heartbeat
+# into one.
+futures-util.workspace = true
+
 # The ACL on a Unix socket path: the group is set with `chown`, which `std`
 # does not expose. The Windows front-end arrives with its own ticket.
 [target.'cfg(unix)'.dependencies]

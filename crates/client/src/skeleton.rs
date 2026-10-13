@@ -1,12 +1,12 @@
 //! The skeleton daemon: test support for the wire path.
 //!
 //! This is deliberately not product API. It is the minimal `DaemonService`
-//! implementation the transport tests and the `echo` example drive, so the
+//! implementation the transport tests and the walkthrough examples drive, so the
 //! served path is proven end to end before the daemon effort replaces it with
-//! the real service. It echoes the request and stamps `received_at` with an
-//! RFC 3339 UTC time, matching the contract. `serve_uds` and `serve_remote` are
-//! the start paths its tests use: the first binds a Unix socket, the second
-//! binds the TCP address `METIS_TCP_ADDR` names, if any.
+//! the real service. It echoes the request, stamps `received_at` with an
+//! RFC 3339 UTC time, and streams whatever its event ring holds. `serve_uds` and
+//! `serve_remote` are the start paths its tests use: the first binds a Unix
+//! socket, the second binds the TCP address `METIS_TCP_ADDR` names, if any.
 //!
 //! `router_recording` is the same service with the identity declaration turned
 //! on: it records what each call declared and refuses a declaration it cannot
@@ -18,13 +18,58 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use api_contracts::connect::metis::v1::{DaemonService, DaemonServiceExt};
+use api_contracts::events::Ring;
 use api_contracts::identity::{self, ClientIdentity, IdentityError};
-use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse, PairRequest, PairResponse};
+use api_contracts::proto::metis::v1::{
+    EchoRequest, EchoResponse, Event, PairRequest, PairResponse, StreamEventsRequest,
+};
 use api_contracts::transport::{self, ConfigError};
-use connectrpc::{ConnectError, ErrorCode, RequestContext, Response, Router, ServiceRequest};
+use connectrpc::{
+    ConnectError, ErrorCode, RequestContext, Response, Router, ServiceRequest, ServiceResult,
+    ServiceStream,
+};
 
-/// The skeleton service: it echoes whatever it receives.
-pub struct SkeletonDaemon;
+/// How long the skeleton's streams may carry nothing before they carry a
+/// heartbeat. The daemon's own default is the same interval, and it is public
+/// for the walkthrough example and for a test that serves its own ring.
+pub const HEARTBEAT_DEFAULT: Duration = Duration::from_secs(15);
+
+/// How many events the skeleton's ring holds before the oldest is dropped.
+///
+/// Smaller than the daemon's window on purpose: the skeleton is test support and
+/// a smaller window makes a drop reachable from a test.
+const EVENT_CAPACITY: usize = 64;
+
+/// The skeleton service: it echoes whatever it receives, and it streams the
+/// events its ring holds.
+pub struct SkeletonDaemon {
+    ring: Ring,
+    heartbeat: Duration,
+}
+
+impl SkeletonDaemon {
+    /// The skeleton over an empty ring, heartbeating on the daemon's own
+    /// interval.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_ring(Ring::new(EVENT_CAPACITY), HEARTBEAT_DEFAULT)
+    }
+
+    /// The skeleton over `ring`, heartbeating every `heartbeat`.
+    ///
+    /// The caller keeps its own handle to `ring`, which is how a test or an
+    /// example publishes the events a stream carries.
+    #[must_use]
+    pub fn with_ring(ring: Ring, heartbeat: Duration) -> Self {
+        Self { ring, heartbeat }
+    }
+}
+
+impl Default for SkeletonDaemon {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // The generated trait uses an explicit RPITIT signature; an `async fn` impl
 // refines it, which the compiler flags with `refining_impl_trait`.
@@ -48,12 +93,53 @@ impl DaemonService for SkeletonDaemon {
     ) -> Result<Response<PairResponse>, ConnectError> {
         Err(unpaired())
     }
+
+    /// Stream the skeleton's ring: the snapshot for the selected channels, then
+    /// the events that follow.
+    async fn stream_events(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, StreamEventsRequest>,
+    ) -> ServiceResult<ServiceStream<Event>> {
+        // The channels are borrowed views of the request body, so they are
+        // copied onto the iterator's own stack slot rather than converted.
+        let channels = request.channels.iter().copied().collect::<Vec<_>>();
+        Ok(events(
+            &self.ring,
+            self.heartbeat,
+            &channels,
+            request.last_event_id,
+        ))
+    }
+}
+
+/// The body of a stream over `ring`: the snapshot of `channels` first, then the
+/// events that follow, with heartbeats on an idle stretch.
+///
+/// Both skeleton services serve their stream this way, so the skeleton and the
+/// daemon agree on the stream's shape by sharing the ring's own assembly rather
+/// than by repeating it.
+fn events(
+    ring: &Ring,
+    heartbeat: Duration,
+    channels: &[&str],
+    cursor: u64,
+) -> Response<ServiceStream<Event>> {
+    Response::stream(ring.stream(channels, cursor, heartbeat))
 }
 
 /// The router the skeleton registers on. The transport loop serves this.
 #[must_use]
 pub fn router() -> Router {
-    Arc::new(SkeletonDaemon).register(Router::new())
+    router_with(Ring::new(EVENT_CAPACITY), HEARTBEAT_DEFAULT)
+}
+
+/// The router the skeleton registers on, streaming `ring`.
+///
+/// The caller keeps a handle to `ring` to publish the events the stream carries.
+#[must_use]
+pub fn router_with(ring: Ring, heartbeat: Duration) -> Router {
+    Arc::new(SkeletonDaemon::with_ring(ring, heartbeat)).register(Router::new())
 }
 
 /// The identity declarations the daemon has recorded.
@@ -89,9 +175,13 @@ impl IdentityRecorder {
 }
 
 /// The skeleton service with the declaration turned on: it records the identity
-/// each call declares and refuses a declaration it will not act on.
+/// each call declares and refuses a declaration it will not act on. It streams
+/// an empty ring, because the recording is the subject here and a stream's
+/// contents are not.
 struct RecordingDaemon {
     recorder: IdentityRecorder,
+    ring: Ring,
+    heartbeat: Duration,
 }
 
 // The generated trait uses an explicit RPITIT signature; an `async fn` impl
@@ -117,6 +207,27 @@ impl DaemonService for RecordingDaemon {
     ) -> Result<Response<PairResponse>, ConnectError> {
         Err(unpaired())
     }
+
+    /// Stream the recording skeleton's ring. The declaration is checked and
+    /// recorded here for the same reason it is checked for echo: a handler that
+    /// skipped the call would leave a stream unrecorded rather than refused.
+    async fn stream_events(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, StreamEventsRequest>,
+    ) -> ServiceResult<ServiceStream<Event>> {
+        let declared = identity::from_headers(ctx.headers()).map_err(refuse)?;
+        self.recorder.record(declared);
+        // The channels are borrowed views of the request body, so they are
+        // copied onto the iterator's own stack slot rather than converted.
+        let channels = request.channels.iter().copied().collect::<Vec<_>>();
+        Ok(events(
+            &self.ring,
+            self.heartbeat,
+            &channels,
+            request.last_event_id,
+        ))
+    }
 }
 
 /// The refusal both skeleton services answer a pairing call with.
@@ -135,6 +246,8 @@ fn unpaired() -> ConnectError {
 pub fn router_recording(recorder: &IdentityRecorder) -> Router {
     Arc::new(RecordingDaemon {
         recorder: recorder.clone(),
+        ring: Ring::new(EVENT_CAPACITY),
+        heartbeat: HEARTBEAT_DEFAULT,
     })
     .register(Router::new())
 }
@@ -159,7 +272,7 @@ fn echo_body(message: &str) -> EchoResponse {
     }
 }
 
-/// Serve the skeleton on a Unix domain socket.
+/// Serve the skeleton on a Unix domain socket, streaming an empty ring.
 ///
 /// # Errors
 ///
@@ -167,6 +280,24 @@ fn echo_body(message: &str) -> EchoResponse {
 #[cfg(unix)]
 pub async fn serve_uds(path: &std::path::Path) -> std::io::Result<()> {
     api_contracts::transport::serve_uds(path, router()).await
+}
+
+/// Serve the skeleton on a Unix domain socket, streaming `ring`.
+///
+/// This is the start path a caller drives a stream through: it keeps a handle to
+/// `ring` and publishes into it. The interval is the one the caller names, so a
+/// walkthrough does not wait out the daemon's fifteen seconds.
+///
+/// # Errors
+///
+/// Returns the bind or accept error from the transport front-end.
+#[cfg(unix)]
+pub async fn serve_uds_with(
+    path: &std::path::Path,
+    ring: Ring,
+    heartbeat: Duration,
+) -> std::io::Result<()> {
+    api_contracts::transport::serve_uds(path, router_with(ring, heartbeat)).await
 }
 
 /// Wait, bounded, for a listener to create its socket file.

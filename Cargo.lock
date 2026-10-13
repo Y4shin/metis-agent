@@ -41,6 +41,7 @@ version = "0.0.0"
 dependencies = [
  "buffa",
  "connectrpc",
+ "futures-util",
  "http",
  "http-body",
  "hyper",
@@ -223,6 +224,7 @@ dependencies = [
  "api-contracts",
  "connectrpc",
  "http",
+ "hyper",
  "hyper-util",
  "tokio",
  "tower",

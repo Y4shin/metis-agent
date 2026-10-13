@@ -28,16 +28,19 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use api_contracts::connect::metis::v1::{
     DAEMON_SERVICE_ECHO_SPEC, DAEMON_SERVICE_PAIR_SPEC, DaemonService, DaemonServiceExt,
 };
-use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse, PairRequest, PairResponse};
+use api_contracts::proto::metis::v1::{
+    EchoRequest, EchoResponse, Event, PairRequest, PairResponse, StreamEventsRequest,
+};
 use api_contracts::transport::{serve_tcp_listener_service, serve_tcp_service, serve_uds_service};
 use client::credential::{self, Backend};
 use client::{Client, ClientError, CredentialCause, PairingCause, Surface};
 use connectrpc::{
     ConnectError, ConnectRpcService, RequestContext, Response, Router, ServiceRequest,
+    ServiceResult, ServiceStream,
 };
 use daemon::auth::{AuthInterceptor, AuthPolicy};
 use daemon::secret::{Secret, SecretRef};
-use daemon::service::{Service, service};
+use daemon::service::{HEARTBEAT_DEFAULT, Service, service};
 use daemon::state::{Store, Verify};
 use daemon::token::Token;
 
@@ -266,7 +269,14 @@ impl Fixture {
     fn recording_service(&self, policy: AuthPolicy, served: &Served) -> ConnectRpcService<Router> {
         let router = Arc::new(RecordingDaemon {
             served: served.clone(),
-            inner: Service::new(self.store.clone(), Some(self.secret.clone())),
+            // The recording service is about the credential policy, so it
+            // heartbeats on the daemon's own interval: no stream here waits on
+            // the interval.
+            inner: Service::new(
+                self.store.clone(),
+                Some(self.secret.clone()),
+                HEARTBEAT_DEFAULT,
+            ),
         })
         .register(Router::new());
         ConnectRpcService::new(router)
@@ -415,6 +425,19 @@ impl DaemonService for RecordingDaemon {
     ) -> Result<Response<PairResponse>, ConnectError> {
         self.served.record(ctx.path());
         self.inner.pair(ctx, request).await
+    }
+
+    /// Recorded before the stream is served, so a refusal proved here is
+    /// proved against a stream whose handler never ran. The streaming tests
+    /// themselves live in `stream.rs`; this arm exists so the recorder covers
+    /// every procedure the contract declares.
+    async fn stream_events(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, StreamEventsRequest>,
+    ) -> ServiceResult<ServiceStream<Event>> {
+        self.served.record(ctx.path());
+        self.inner.stream_events(ctx, request).await
     }
 }
 

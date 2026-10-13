@@ -19,12 +19,20 @@
 //! is reported as a typed error, so a caller can tell "pair me" from "your
 //! access is gone".
 //!
+//! [`Client::stream_events`] opens the daemon's event stream and hands back an
+//! [`EventStream`] to drain. The events it yields are the daemon's own event
+//! type, so a caller never sees a wire message, a buffa view, or the transport.
+//!
 //! `skeleton` holds the test-support service the walking-skeleton test and
 //! example drive, and the start paths for it. The daemon effort replaces it;
 //! the transport and the wrapper stay.
 
 pub mod credential;
 pub mod skeleton;
+
+mod stream;
+
+pub use stream::EventStream;
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -33,10 +41,11 @@ use std::path::PathBuf;
 use api_contracts::auth::{self, CredentialRefusal, PairRefusal};
 use api_contracts::connect::metis::v1::DaemonServiceClient;
 use api_contracts::identity;
-use api_contracts::proto::metis::v1::{EchoRequest, PairRequest};
+use api_contracts::proto::metis::v1::{EchoRequest, PairRequest, StreamEventsRequest};
 use api_contracts::transport;
 use connectrpc::ConnectError;
 use connectrpc::client::{ClientConfig, SharedHttp2Connection};
+use http::HeaderMap;
 
 use crate::credential::Backend;
 
@@ -329,6 +338,45 @@ impl Client {
             Err(err) => Err(refusal(err)),
         }
     }
+
+    /// Open the daemon's event stream for `channels`, after `last_event_id`.
+    ///
+    /// The stream opens with the snapshot of the selected channels (one empty
+    /// snapshot message when they hold nothing), what follows are the events
+    /// published while the stream is open, and an idle stretch is filled with
+    /// heartbeats. `last_event_id` is the cursor: `0` means no cursor, and the
+    /// identifiers it names start at `1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed errors [`Client::echo`] returns: the credential
+    /// check runs when the stream is established, so an unauthorized caller is
+    /// refused before any event is served.
+    pub async fn stream_events(
+        &self,
+        channels: &[&str],
+        last_event_id: u64,
+    ) -> Result<EventStream, ClientError> {
+        let request = StreamEventsRequest {
+            channels: channels
+                .iter()
+                .map(|channel| (*channel).to_owned())
+                .collect(),
+            last_event_id,
+            ..Default::default()
+        };
+        let stream = self.inner.stream_events(request).await.map_err(refusal)?;
+        // A Connect streaming response carries its status inside the stream, so
+        // a refusal arrives as a response the stream was established with and an
+        // error in the stream itself. Reading the refusal headers here is what
+        // makes a stream opened without a credential fail at the call that
+        // opened it, exactly as a unary call reports the same refusal, instead
+        // of failing at the first event the caller never gets.
+        if let Some(refusal) = typed_refusal(stream.headers()) {
+            return Err(refusal);
+        }
+        Ok(EventStream::new(stream))
+    }
 }
 
 /// The configuration a client with a declared surface carries: the declaration
@@ -372,27 +420,31 @@ fn with_credential(config: ClientConfig, token: Option<&str>) -> ClientConfig {
 /// The typed error one failed call earns.
 ///
 /// A refusal the daemon labelled is reported as the typed error it is, and
-/// anything else stays the transport error. Both refusals are read from
-/// response headers, never from message text.
-fn refusal(err: ConnectError) -> ClientError {
-    if let Some(refusal) = version_refusal(&err) {
-        return refusal;
-    }
-    if let Some(refusal) = credential_refusal(&err) {
-        return refusal;
-    }
-    if let Some(refusal) = pair_refusal(&err) {
-        return refusal;
-    }
-    ClientError::Call(err)
+/// anything else stays the transport error. Every refusal is read from response
+/// headers, never from message text.
+pub(crate) fn refusal(err: ConnectError) -> ClientError {
+    typed_refusal(err.response_headers()).unwrap_or(ClientError::Call(err))
+}
+
+/// The typed error a refusal's response headers name, or `None` when they name
+/// no refusal this build knows.
+///
+/// The event stream reports through this as well as a unary call: a Connect
+/// streaming response carries its status inside the stream, so its refusal
+/// headers are on the response the stream was established with rather than on a
+/// transport error.
+pub(crate) fn typed_refusal(headers: &HeaderMap) -> Option<ClientError> {
+    version_refusal(headers)
+        .or_else(|| credential_refusal(headers))
+        .or_else(|| pair_refusal(headers))
 }
 
 /// The typed error for a credential refusal.
 ///
 /// `None` means the failure is not a credential refusal, and the caller keeps
 /// the transport error.
-fn credential_refusal(err: &ConnectError) -> Option<ClientError> {
-    let header = err.response_headers().get(auth::AUTH_ERROR_HEADER)?;
+fn credential_refusal(headers: &HeaderMap) -> Option<ClientError> {
+    let header = headers.get(auth::AUTH_ERROR_HEADER)?;
     let refusal = CredentialRefusal::parse(header.to_str().ok()?)?;
     Some(match refusal {
         CredentialRefusal::Missing => ClientError::CredentialMissing,
@@ -427,8 +479,8 @@ pub enum CredentialCause {
 /// a closed pairing, a wrong key and a repeated pairing are told apart by the
 /// daemon's own vocabulary rather than by prose. `None` means the failure is not
 /// a pairing refusal, and the caller keeps the transport error.
-fn pair_refusal(err: &ConnectError) -> Option<ClientError> {
-    let header = err.response_headers().get(auth::PAIR_ERROR_HEADER)?;
+fn pair_refusal(headers: &HeaderMap) -> Option<ClientError> {
+    let header = headers.get(auth::PAIR_ERROR_HEADER)?;
     let refusal = PairRefusal::parse(header.to_str().ok()?)?;
     Some(match refusal {
         PairRefusal::Disabled => ClientError::Pairing {
@@ -468,10 +520,8 @@ pub enum PairingCause {
 /// The list is read from the refusal's response header, never from its message
 /// text, and `found` is the version this client declared. `None` means the
 /// failure is not a version refusal, and the caller keeps the transport error.
-fn version_refusal(err: &ConnectError) -> Option<ClientError> {
-    let header = err
-        .response_headers()
-        .get(identity::SUPPORTED_VERSIONS_HEADER)?;
+fn version_refusal(headers: &HeaderMap) -> Option<ClientError> {
+    let header = headers.get(identity::SUPPORTED_VERSIONS_HEADER)?;
     let supported = identity::parse_supported_versions(header.to_str().ok()?);
     if supported.is_empty() {
         return None;
@@ -728,7 +778,7 @@ mod tests {
             "protocol version 9 is not supported",
         )
         .with_headers(headers);
-        match version_refusal(&refusal) {
+        match version_refusal(refusal.response_headers()) {
             Some(ClientError::ProtocolVersion { found, supported }) => {
                 assert_eq!(found, PROTOCOL_VERSION, "the version this client declared");
                 assert_eq!(supported, vec![1, 2]);
@@ -750,7 +800,7 @@ mod tests {
         // A failure with no such header stays the transport error it was.
         let other = ConnectError::new(ErrorCode::Internal, "boom");
         assert!(
-            version_refusal(&other).is_none(),
+            version_refusal(other.response_headers()).is_none(),
             "an ordinary failure is not a version refusal"
         );
     }

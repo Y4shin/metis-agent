@@ -96,6 +96,7 @@ tokio = { version = "1", features = [
     "macros",
     "net",
     "rt",
+    "sync",
     "time",
 ] }
 tower = { version = "0.5", features = ["util"] }
@@ -105,3 +106,11 @@ hyper-util = { version = "0.1", features = [
     "server-auto",
     "tokio",
 ] }
+
+# Server-streaming handlers answer with a `Stream`, and the ring's live
+# subscription is one: the daemon and the client's in-process service assemble
+# the snapshot, the subscription, and the heartbeat into it. The streaming
+# trait `connectrpc` speaks is `futures_core::Stream`, which `futures-util`
+# re-exports, so one crate adds the `Stream` impl and the other two add no
+# dependency.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
