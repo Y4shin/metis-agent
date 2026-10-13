@@ -40,6 +40,7 @@ use std::path::PathBuf;
 
 use api_contracts::auth::{self, CredentialRefusal, PairRefusal};
 use api_contracts::connect::metis::v1::DaemonServiceClient;
+use api_contracts::events;
 use api_contracts::identity;
 use api_contracts::proto::metis::v1::{EchoRequest, PairRequest, StreamEventsRequest};
 use api_contracts::transport;
@@ -341,17 +342,29 @@ impl Client {
 
     /// Open the daemon's event stream for `channels`, after `last_event_id`.
     ///
-    /// The stream opens with the snapshot of the selected channels (one empty
-    /// snapshot message when they hold nothing), what follows are the events
-    /// published while the stream is open, and an idle stretch is filled with
-    /// heartbeats. `last_event_id` is the cursor: `0` means no cursor, and the
-    /// identifiers it names start at `1`.
+    /// A stream opened without a cursor starts with the snapshot of the selected
+    /// channels (one empty snapshot message when they hold nothing), what follows
+    /// are the events published while the stream is open, and an idle stretch is
+    /// filled with heartbeats.
+    ///
+    /// `last_event_id` is the cursor: `0` means no cursor, and the identifiers it
+    /// names start at `1`. A non-zero cursor resumes after the highest `EVENT`
+    /// identifier the caller has processed: the ring replays what it still holds
+    /// after that identifier, in order, and then carries the live events. A
+    /// resumed stream carries no snapshot, because the caller already holds the
+    /// state a snapshot would restate.
+    ///
+    /// A cursor the ring can no longer serve earns [`ClientError::CursorExpired`]
+    /// from this call. The answer is a resync, which is the cursorless form of
+    /// the same call: `stream_events(channels, 0)` opens a fresh stream that
+    /// begins with the snapshot. Nothing is retried on the caller's behalf.
     ///
     /// # Errors
     ///
-    /// Returns the same typed errors [`Client::echo`] returns: the credential
-    /// check runs when the stream is established, so an unauthorized caller is
-    /// refused before any event is served.
+    /// Returns [`ClientError::CursorExpired`] when the daemon can no longer
+    /// serve the cursor, and the same typed errors [`Client::echo`] returns: the
+    /// credential check runs when the stream is established, so an unauthorized
+    /// caller is refused before any event is served.
     pub async fn stream_events(
         &self,
         channels: &[&str],
@@ -437,6 +450,7 @@ pub(crate) fn typed_refusal(headers: &HeaderMap) -> Option<ClientError> {
     version_refusal(headers)
         .or_else(|| credential_refusal(headers))
         .or_else(|| pair_refusal(headers))
+        .or_else(|| cursor_refusal(headers))
 }
 
 /// The typed error for a credential refusal.
@@ -492,6 +506,24 @@ fn pair_refusal(headers: &HeaderMap) -> Option<ClientError> {
         PairRefusal::AlreadyPaired => ClientError::Pairing {
             cause: PairingCause::AlreadyPaired,
         },
+        // The vocabulary is non-exhaustive: a refusal this build does not know
+        // is left as the transport error rather than guessed at.
+        _ => return None,
+    })
+}
+
+/// The typed error for a cursor refusal.
+///
+/// The refusal is read from the response header, never from the message text, so
+/// the caller learns that the ring cannot serve the cursor from the daemon's own
+/// vocabulary. `None` means the failure is not a cursor refusal, and the caller
+/// keeps the transport error. An expired cursor is answered with a cursorless
+/// stream rather than a retry, so the caller is told rather than looped.
+fn cursor_refusal(headers: &HeaderMap) -> Option<ClientError> {
+    let header = headers.get(events::CURSOR_ERROR_HEADER)?;
+    let refusal = events::CursorRefusal::parse(header.to_str().ok()?)?;
+    Some(match refusal {
+        events::CursorRefusal::Expired => ClientError::CursorExpired,
         // The vocabulary is non-exhaustive: a refusal this build does not know
         // is left as the transport error rather than guessed at.
         _ => return None,
@@ -567,6 +599,11 @@ pub enum ClientError {
         /// The versions the daemon supports.
         supported: Vec<u32>,
     },
+    /// The daemon can no longer serve the cursor this client presented: the
+    /// ring's window moved past it, or the daemon restarted. The answer is a
+    /// resync, which is [`Client::stream_events`] with a cursor of `0`: a fresh
+    /// stream that begins with the snapshot.
+    CursorExpired,
 }
 
 impl fmt::Display for ClientError {
@@ -613,6 +650,10 @@ impl fmt::Display for ClientError {
                     "the daemon refuses protocol version {found}; it supports: {supported}"
                 )
             }
+            Self::CursorExpired => write!(
+                f,
+                "the daemon can no longer resume from this cursor: open a cursorless stream to resync"
+            ),
         }
     }
 }
@@ -626,6 +667,7 @@ impl std::error::Error for ClientError {
             Self::ProtocolVersion { .. } | Self::CredentialMissing => None,
             Self::CredentialRejected { .. } => None,
             Self::Pairing { .. } => None,
+            Self::CursorExpired => None,
         }
     }
 }
@@ -803,6 +845,43 @@ mod tests {
             version_refusal(other.response_headers()).is_none(),
             "an ordinary failure is not a version refusal"
         );
+    }
+
+    /// An expired cursor is the typed error, read from the response header and
+    /// never from message text; a value this build does not know, and a
+    /// failure with no such header, stay the transport error.
+    #[test]
+    fn a_cursor_refusal_is_a_typed_error() {
+        use super::{ClientError, cursor_refusal};
+        use api_contracts::events::{CURSOR_ERROR_HEADER, CursorRefusal};
+        use connectrpc::{ConnectError, ErrorCode};
+        use http::{HeaderMap, HeaderValue};
+
+        assert_eq!(CursorRefusal::Expired.to_string(), "expired");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(CURSOR_ERROR_HEADER, HeaderValue::from_static("expired"));
+        let refusal = ConnectError::new(ErrorCode::FailedPrecondition, "the ring moved on")
+            .with_headers(headers);
+        assert!(
+            matches!(
+                cursor_refusal(refusal.response_headers()),
+                Some(ClientError::CursorExpired)
+            ),
+            "the header is the refusal, not the message text"
+        );
+
+        // A refusal this build does not know is not guessed at.
+        let mut unknown = HeaderMap::new();
+        unknown.insert(
+            CURSOR_ERROR_HEADER,
+            HeaderValue::from_static("something-else"),
+        );
+        assert!(cursor_refusal(&unknown).is_none());
+
+        // An ordinary failure is not a cursor refusal.
+        let other = ConnectError::new(ErrorCode::Internal, "boom");
+        assert!(cursor_refusal(other.response_headers()).is_none());
     }
 
     /// The explicit override wins over both bases, so an operator or a test

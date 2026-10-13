@@ -17,11 +17,20 @@ type Body = hyper::body::Incoming;
 
 /// A live event stream from the daemon.
 ///
-/// The stream opens with the snapshot for the channels it selected (one empty
-/// snapshot message when they hold nothing), then carries the events that
-/// follow, with heartbeats on an idle stretch. Its identifiers never decrease.
-/// Dropping the stream drops the connection, and opening a new one is how a
-/// caller resyncs.
+/// A stream opened without a cursor begins with the snapshot for the channels it
+/// selected (one empty snapshot message when they hold nothing); a stream opened
+/// with a cursor begins with the events that follow it and carries no snapshot.
+/// Either way the live events follow, with heartbeats on an idle stretch, and
+/// the identifiers never decrease.
+///
+/// The cursor a caller resumes by is the highest `EVENT` identifier it has
+/// processed: a `SNAPSHOT` advances it only for the channels that message names,
+/// and a `HEARTBEAT` advances nothing even though it carries the daemon's latest
+/// identifier. Dropping the stream drops the connection, and reconnecting with
+/// that cursor replays what the ring still holds. A cursor the ring can no longer
+/// serve is refused at [`Client::stream_events`](crate::Client::stream_events)
+/// as [`ClientError::CursorExpired`](crate::ClientError::CursorExpired), whose
+/// answer is a cursorless stream, which begins with the snapshot.
 pub struct EventStream {
     inner: ServerStream<Body, EventView<'static>>,
 }
@@ -45,7 +54,10 @@ impl EventStream {
     /// An error is terminal: the stream will not carry another event, and
     /// recovering means opening a new stream. The daemon's own refusals are
     /// reported as the typed errors a unary call reports, because they travel in
-    /// the same headers.
+    /// the same headers. The cursor to resume by is the highest `EVENT`
+    /// identifier seen, and a refusal this stream cannot earn (an expired cursor
+    /// is refused at [`Client::stream_events`](crate::Client::stream_events)) is
+    /// answered with a cursorless stream.
     ///
     /// # Errors
     ///

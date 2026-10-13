@@ -18,12 +18,13 @@ service DaemonService {
   // else, and the token is answered once: the daemon keeps only its hash.
   rpc Pair(PairRequest) returns (PairResponse);
 
-  // Stream the daemon's events for the selected channels. The stream's first
-  // message is the snapshot of each selected channel's head, later messages
-  // carry the events that follow, and an idle stream carries heartbeats as
-  // ordinary messages. The response is the event itself rather than a named
-  // response wrapper, which is why this RPC carries the one lint exception
-  // in `buf.yaml`.
+  // Stream the daemon's events for the selected channels. A stream opened
+  // without a cursor begins with the snapshot of each selected channel's head;
+  // a stream opened with a cursor begins with the events that follow it, in
+  // identifier order. Later messages carry what is published while the stream
+  // is open, and an idle stream carries heartbeats as ordinary messages. The
+  // response is the event itself rather than a named response wrapper, which is
+  // why this RPC carries the one lint exception in `buf.yaml`.
   rpc StreamEvents(StreamEventsRequest) returns (stream Event);
 }
 
@@ -63,15 +64,17 @@ message StreamEventsRequest {
   repeated string channels = 1;
 
   // The event to resume after. `0` means no cursor, and identifiers start
-  // at `1`, so the field needs no `optional`. The placeholder rule this
-  // version implements is that a non-zero cursor suppresses live events at
-  // or below it; `stream-resume-and-expiry` replaces it with real resume
-  // and expiry semantics.
+  // at `1`, so the field needs no `optional`. A non-zero cursor resumes after
+  // that identifier: the ring replays what it still holds after it, in
+  // identifier order, and the stream carries no snapshot. A cursor the ring
+  // can no longer serve is refused before the stream opens, through the
+  // `metis-cursor-error: expired` response header, and the caller answers by
+  // opening a cursorless stream, which begins with the snapshot.
   uint64 last_event_id = 2;
 }
 
-// One message on an event stream: the snapshot that opens it, a later event,
-// or a heartbeat.
+// One message on an event stream: the snapshot that opens a stream with no
+// cursor, an event a stream replays or carries live, or a heartbeat.
 message Event {
   // The event's identifier, monotonic across every channel of the daemon and
   // starting at `1`.
@@ -101,11 +104,12 @@ enum EventKind {
   // Not set. A receiver treats it as a message it cannot act on.
   EVENT_KIND_UNSPECIFIED = 0;
 
-  // The opening message of every stream. A selected channel that holds an
-  // event contributes its head, and when no selected channel holds anything the
-  // snapshot is one empty message: no channel, no payload, and the daemon's
-  // latest identifier. A receiver therefore always sees the snapshot before any
-  // live traffic.
+  // The opening message of a stream that carries no cursor. A selected channel
+  // that holds an event contributes its head, and when no selected channel
+  // holds anything the snapshot is one empty message: no channel, no payload,
+  // and the daemon's latest identifier. A resumed stream carries no snapshot at
+  // all: it opens with the events that follow its cursor instead, because its
+  // caller already holds the state a snapshot would restate.
   EVENT_KIND_SNAPSHOT = 1;
 
   // A liveness message on an otherwise idle stream. It carries the id of the
