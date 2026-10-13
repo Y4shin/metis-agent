@@ -3,7 +3,7 @@ type: ticket
 subtype: feature
 title: Contract pipeline with one RPC
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 size: m
 ---
