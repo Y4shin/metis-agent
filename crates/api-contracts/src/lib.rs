@@ -22,6 +22,7 @@
 //! format the contract's `received_at` field asks for.
 
 pub mod auth;
+pub mod cancel;
 pub mod connect;
 pub mod events;
 pub mod identity;
