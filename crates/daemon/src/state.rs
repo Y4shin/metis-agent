@@ -343,10 +343,13 @@ fn prepare(directory: &Path, path: &Path) -> Result<(), StateError> {
 }
 
 /// An environment variable's value when it is set and not empty.
-fn env_value(variable: &str) -> Option<String> {
+///
+/// The value is kept as the operating system reported it, so a path that is not
+/// valid UTF-8 is used exactly rather than lossily.
+fn env_value(variable: &str) -> Option<std::ffi::OsString> {
     let value = std::env::var_os(variable)?;
     if value.is_empty() {
         return None;
     }
-    Some(value.to_string_lossy().into_owned())
+    Some(value)
 }
