@@ -10,7 +10,7 @@ use std::sync::Arc;
 use api_contracts::connect::metis::v1::{
     DAEMON_SERVICE_SERVICE_NAME, DaemonService, DaemonServiceExt,
 };
-use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse};
+use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse, PairRequest, PairResponse};
 use buffa::Message;
 use connectrpc::{RequestContext, Response, Router, ServiceRequest, ServiceResult};
 
@@ -19,6 +19,9 @@ const DAEMON_SERVICE_NAME: &str = "metis.v1.DaemonService";
 
 /// The Echo procedure path the the contract declares.
 const ECHO_PATH: &str = "metis.v1.DaemonService/Echo";
+
+/// The Pair procedure path the contract declares.
+const PAIR_PATH: &str = "metis.v1.DaemonService/Pair";
 
 #[test]
 fn echo_request_matches_the_declared_wire_format() {
@@ -61,6 +64,30 @@ fn echo_messages_round_trip_through_the_generated_message_api() {
     assert_eq!(decoded, response);
 }
 
+/// The pairing messages keep their declared field numbering, so a renumbered
+/// field cannot pass unnoticed. Both carry one length-delimited field 1.
+#[test]
+fn pair_messages_round_trip_through_the_generated_message_api() {
+    let request = PairRequest {
+        preshared_key: "key".to_owned(),
+        ..Default::default()
+    };
+    assert_eq!(request.encode_to_vec(), b"\x0a\x03key");
+
+    let decoded = PairRequest::decode(&mut request.encode_to_vec().as_slice())
+        .expect("PairRequest decodes what it encoded");
+    assert_eq!(decoded, request);
+
+    let response = PairResponse {
+        token: "abcd".to_owned(),
+        ..Default::default()
+    };
+    assert_eq!(response.encode_to_vec(), b"\x0a\x04abcd");
+    let decoded = PairResponse::decode(&mut response.encode_to_vec().as_slice())
+        .expect("PairResponse decodes what it encoded");
+    assert_eq!(decoded, response);
+}
+
 /// A stand-in service implementation. Nothing serves it here; this proves the
 /// generated trait is implementable from outside the crate.
 struct DummyDaemon;
@@ -80,17 +107,32 @@ impl DaemonService for DummyDaemon {
             ..Default::default()
         })
     }
+
+    async fn pair(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, PairRequest>,
+    ) -> ServiceResult<PairResponse> {
+        Response::ok(PairResponse {
+            token: String::new(),
+            ..Default::default()
+        })
+    }
 }
 
 #[test]
 fn generated_service_trait_registers_its_route_on_a_router() {
     assert_eq!(DAEMON_SERVICE_SERVICE_NAME, DAEMON_SERVICE_NAME);
 
-    // The router starts empty, so the route below comes from registration.
+    // The router starts empty, so the routes below come from registration.
     assert!(!Router::new().has_method(ECHO_PATH));
+    assert!(!Router::new().has_method(PAIR_PATH));
 
     let router = Arc::new(DummyDaemon).register(Router::new());
 
     assert!(router.has_method(ECHO_PATH));
-    assert_eq!(router.methods().collect::<Vec<_>>(), vec![ECHO_PATH]);
+    assert!(router.has_method(PAIR_PATH));
+    let mut methods = router.methods().collect::<Vec<_>>();
+    methods.sort_unstable();
+    assert_eq!(methods, vec![ECHO_PATH, PAIR_PATH]);
 }

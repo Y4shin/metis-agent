@@ -117,7 +117,10 @@ pub enum Verify {
 /// The connection pool is private: the store is the boundary, so a caller
 /// reaches the tables through the methods below and never through SQL of its
 /// own.
-#[derive(Debug)]
+///
+/// The handle is cheap to clone, because it is a pool: the service and the
+/// authorization interceptor mounted beside it share one store.
+#[derive(Debug, Clone)]
 pub struct Store {
     pool: SqlitePool,
 }
