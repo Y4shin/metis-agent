@@ -8,8 +8,31 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[lib]
+# The daemon's logic: the persistent store and the token surface. The binary
+# beside it stays a thin entry point, and the tests reach the same code the
+# binary runs.
+name = "daemon"
+path = "src/lib.rs"
+
 [dependencies]
 agent-harness.workspace = true
 workflow.workspace = true
 plugin-runtime.workspace = true
 api-contracts.workspace = true
+
+# The state store is one SQLite database, and the token surface needs the
+# operating system's random source and SHA-256.
+sqlx.workspace = true
+getrandom.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+
+[dev-dependencies]
+# The store's interface is asynchronous, so the tests are too, and the
+# in-memory database runs on this runtime.
+tokio.workspace = true
+# The migration seam reads the file the store created with an independent
+# connection, because what the migration left behind is what it asserts: the
+# token table and the ledger row that records the migration as applied.
+sqlx.workspace = true

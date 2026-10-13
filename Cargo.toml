@@ -69,6 +69,25 @@ connectrpc = { version = "=0.9.1", default-features = false, features = [
     "json",
 ] }
 
+# The daemon's persistent state: one SQLite database through `sqlx`'s runtime
+# API, with the schema applied by the migrator embedded on open. The feature set
+# is the minimum for that: the tokio runtime, the bundled SQLite driver, and the
+# `migrate!` macro. No TLS stack, no `DATABASE_URL`, no database server, and no
+# compile-time query macros.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+    "migrate",
+] }
+
+# The per-surface credential: `getrandom` supplies the 32 random bytes a token
+# is made of, `sha2` hashes it, and `subtle` compares a stored hash with a
+# presented one in constant time rather than with a short-circuiting `==`.
+getrandom = "0.4"
+sha2 = "0.11"
+subtle = "2"
+
 # The local transport's async runtime and HTTP stack. These follow their major
 # line; only the protocol pair above is pinned exactly. The tokio features are
 # the ones the listener, the connector, and the tests actually name.

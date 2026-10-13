@@ -18,7 +18,8 @@
 //! with the mode and group this daemon is configured with, and refuses a
 //! directory it did not create to spec rather than changing it. A local client
 //! therefore needs no credential; `identity` carries the declaration it makes
-//! instead.
+//! instead. The state store uses the same private-path rule for the directory
+//! and the file it owns, through `ensure_private_dir` and `restrict_file`.
 //!
 //! This module is the only place that knows how to serve and connect a stream.
 //! Generated code stays mounted and untouched.
@@ -77,8 +78,8 @@ pub async fn serve_uds(path: &std::path::Path, router: Router) -> io::Result<()>
     // created to spec first, then the stale socket file is removed, then the
     // socket is bound and the same rule applied to it: on Linux, connecting to
     // a Unix socket also checks write permission on the socket file.
-    let acl = SocketAcl::from_env().map_err(io::Error::other)?;
-    ensure_dir(path, &acl).map_err(io::Error::other)?;
+    let acl = PathAcl::from_env().map_err(io::Error::other)?;
+    ensure_dir(socket_dir(path).map_err(io::Error::other)?, &acl).map_err(io::Error::other)?;
     let _ = std::fs::remove_file(path);
     let listener = tokio::net::UnixListener::bind(path)?;
     apply_acl(path, &acl).map_err(io::Error::other)?;
@@ -212,20 +213,29 @@ pub const SOCKET_GROUP_ENV: &str = "METIS_SOCKET_GROUP";
 
 /// The access control a Unix socket path is created with.
 ///
+/// The access control a private path is created with: the mode it carries, and
+/// the group it is shared with when one is configured.
+///
 /// The owner is never configured: the daemon owns what it creates, as its own
 /// user, and no privileged step is involved.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy)]
-struct SocketAcl {
-    /// The mode of the socket's directory and of the socket file.
+struct PathAcl {
+    /// The mode of the path.
     mode: u32,
     /// The configured group, when there is one.
     group: Option<libc::gid_t>,
 }
 
 #[cfg(unix)]
-impl SocketAcl {
-    /// Read the configured access control from the environment.
+impl PathAcl {
+    /// The rule for a path nothing is configured for: `mode`, in this process's
+    /// own group.
+    fn private(mode: u32) -> Self {
+        Self { mode, group: None }
+    }
+
+    /// Read the socket's configured access control from the environment.
     ///
     /// An absent or empty [`SOCKET_GROUP_ENV`] is the private mode with no
     /// group; a name resolves to the host's group database.
@@ -245,6 +255,38 @@ impl SocketAcl {
             group: Some(group),
         })
     }
+}
+
+/// Create or accept the private directory at `dir` with `mode`, on the same
+/// rule [`ensure_socket_dir`] applies to a socket's directory.
+///
+/// The directory is created with `mode` already applied, so it is never briefly
+/// wider than the rule allows, and `mode` is applied again afterwards because
+/// `umask` can narrow a creation mode. A pre-existing directory is refused,
+/// never modified, when it is a symlink, is not a directory, is not owned by
+/// this process's user, or carries a mode wider than `mode`.
+///
+/// Ownership is never changed and no group is ever applied here: the caller
+/// owns what it creates, as its own user.
+///
+/// # Errors
+///
+/// Returns the creation, inspection, or permission failure. The reason is the
+/// error's own message, so a caller reports it rather than parsing it.
+#[cfg(unix)]
+pub fn ensure_private_dir(dir: &std::path::Path, mode: u32) -> io::Result<()> {
+    ensure_dir(dir, &PathAcl::private(mode))
+}
+
+/// Apply `mode` to the existing file at `path`: the file half of the same rule
+/// [`ensure_private_dir`] applies to a directory.
+///
+/// # Errors
+///
+/// Returns the permission failure.
+#[cfg(unix)]
+pub fn restrict_file(path: &std::path::Path, mode: u32) -> io::Result<()> {
+    apply_acl(path, &PathAcl::private(mode))
 }
 
 /// Create the socket's directory with the configured ownership and mode, or
@@ -267,83 +309,78 @@ impl SocketAcl {
 /// [`SOCKET_GROUP_ENV`] names no group on this host.
 #[cfg(unix)]
 pub fn ensure_socket_dir(socket: &std::path::Path) -> Result<(), ConfigError> {
-    let acl = SocketAcl::from_env()?;
-    ensure_dir(socket, &acl)
+    let acl = PathAcl::from_env()?;
+    let dir = socket_dir(socket).map_err(|source| ConfigError::SocketAcl {
+        path: socket.to_path_buf(),
+        source,
+    })?;
+    ensure_dir(dir, &acl).map_err(|source| ConfigError::SocketAcl {
+        path: dir.to_path_buf(),
+        source,
+    })
 }
 
 /// The directory a socket path lives in.
 #[cfg(unix)]
-fn socket_dir(socket: &std::path::Path) -> Result<&std::path::Path, ConfigError> {
+fn socket_dir(socket: &std::path::Path) -> io::Result<&std::path::Path> {
     socket
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| ConfigError::SocketAcl {
-            path: socket.to_path_buf(),
-            source: io::Error::new(
+        .ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the socket path has no directory to own",
-            ),
+            )
         })
 }
 
+/// Create or accept the directory at `dir` under one access control rule.
 #[cfg(unix)]
-fn ensure_dir(socket: &std::path::Path, acl: &SocketAcl) -> Result<(), ConfigError> {
+fn ensure_dir(dir: &std::path::Path, acl: &PathAcl) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
 
-    let dir = socket_dir(socket)?;
     match std::fs::symlink_metadata(dir) {
         Ok(metadata) => check_dir(dir, &metadata, acl)?,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(acl.mode)
-                .create(dir)
-                .map_err(|source| ConfigError::SocketAcl {
-                    path: dir.to_path_buf(),
-                    source,
-                })?;
+                .create(dir)?;
         }
-        Err(source) => {
-            return Err(ConfigError::SocketAcl {
-                path: dir.to_path_buf(),
-                source,
-            });
-        }
+        Err(source) => return Err(source),
     }
     apply_acl(dir, acl)
 }
 
 /// Refuse a pre-existing directory the daemon may not use, without touching it.
 #[cfg(unix)]
-fn check_dir(
-    dir: &std::path::Path,
-    metadata: &std::fs::Metadata,
-    acl: &SocketAcl,
-) -> Result<(), ConfigError> {
+fn check_dir(dir: &std::path::Path, metadata: &std::fs::Metadata, acl: &PathAcl) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let refuse = |reason: String| ConfigError::SocketAcl {
-        path: dir.to_path_buf(),
-        source: io::Error::new(io::ErrorKind::PermissionDenied, reason),
+    let refuse = |reason: String| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("cannot use {}: {reason}", dir.display()),
+        )
     };
     if metadata.file_type().is_symlink() {
         return Err(refuse(
-            "the socket directory is a symlink, which is never followed".to_owned(),
+            "it is a symlink, which is never followed".to_owned(),
         ));
     }
     if !metadata.is_dir() {
-        return Err(refuse("the socket directory is not a directory".to_owned()));
+        return Err(refuse("it is not a directory".to_owned()));
     }
     if metadata.uid() != unsafe { libc::geteuid() } {
         return Err(refuse(format!(
-            "the socket directory is owned by user {}, not by this user",
+            "it is owned by user {}, not by this user",
             metadata.uid()
         )));
     }
     let mode = metadata.mode() & 0o7777;
     if mode & !acl.mode != 0 {
         return Err(refuse(format!(
-            "the socket directory is mode {mode:o}, wider than the allowed {:o}",
+            "it is mode {mode:o}, wider than the allowed {:o}",
             acl.mode
         )));
     }
@@ -352,27 +389,23 @@ fn check_dir(
 
 /// Apply the configured mode, and the configured group when there is one.
 #[cfg(unix)]
-fn apply_acl(path: &std::path::Path, acl: &SocketAcl) -> Result<(), ConfigError> {
+fn apply_acl(path: &std::path::Path, acl: &PathAcl) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::PermissionsExt;
 
-    let refuse = |source: io::Error| ConfigError::SocketAcl {
-        path: path.to_path_buf(),
-        source,
-    };
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(acl.mode)).map_err(refuse)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(acl.mode))?;
     if let Some(group) = acl.group {
         let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-            refuse(io::Error::new(
+            io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "the socket path holds an interior NUL byte",
-            ))
+                "the path holds an interior NUL byte",
+            )
         })?;
         // `uid_t::MAX` leaves the owner alone: the daemon owns what it
         // created, and only the group is ever configured.
         let code = unsafe { libc::chown(raw.as_ptr(), libc::uid_t::MAX, group) };
         if code != 0 {
-            return Err(refuse(io::Error::last_os_error()));
+            return Err(io::Error::last_os_error());
         }
     }
     Ok(())
@@ -668,7 +701,7 @@ mod tests {
         use super::ENV_LOCK;
         use crate::transport::{
             ConfigError, SOCKET_GROUP_ENV, SOCKET_MODE_GROUP, SOCKET_MODE_PRIVATE,
-            ensure_socket_dir, serve_uds,
+            ensure_private_dir, ensure_socket_dir, restrict_file, serve_uds,
         };
         use connectrpc::Router;
         use std::ffi::OsString;
@@ -809,6 +842,32 @@ mod tests {
 
         fn mode_of(path: &Path) -> u32 {
             std::fs::metadata(path).expect("the path exists").mode() & 0o7777
+        }
+
+        /// The mode-taking half of the rule, which the daemon's state store
+        /// uses: a directory is created at the mode it is given, a directory
+        /// wider than that mode is refused untouched, and a file is narrowed to
+        /// the mode it is given.
+        #[test]
+        fn the_private_path_rule_takes_its_mode() {
+            let base = TempDir::new("state-modes");
+            let directory = base.join("state");
+            ensure_private_dir(&directory, 0o700).expect("the directory is created private");
+            assert_eq!(mode_of(&directory), 0o700);
+
+            let wider = base.join("wide");
+            std::fs::create_dir(&wider).expect("create the pre-existing directory");
+            std::fs::set_permissions(&wider, std::fs::Permissions::from_mode(0o777))
+                .expect("widen the pre-existing directory");
+            ensure_private_dir(&wider, 0o700).expect_err("mode 777 is wider than 700");
+            assert_eq!(mode_of(&wider), 0o777, "the directory is not chmodded");
+
+            let file = base.join("metis.db");
+            std::fs::write(&file, b"").expect("create the file");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))
+                .expect("widen the file");
+            restrict_file(&file, 0o600).expect("the file mode is applied");
+            assert_eq!(mode_of(&file), 0o600);
         }
 
         /// A socket directory the daemon creates is private to it: mode 700,

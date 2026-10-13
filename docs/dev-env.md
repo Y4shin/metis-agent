@@ -28,6 +28,19 @@ with crates under `crates/` listed explicitly in `members`.
 The SvelteKit frontend lives in `apps/ui` and uses npm. Run its checks from
 that directory with `npm run check` and `npm run build`.
 
+## Daemon state
+
+The daemon keeps its state in one SQLite database. `METIS_STATE_DB` names the
+file when it is set and not empty, otherwise the file is
+`$XDG_DATA_HOME/metis/metis.db`, otherwise `$HOME/.local/share/metis/metis.db`;
+with none of the three set, the daemon has nowhere to keep its state and
+there is no guess to fall back on. Opening the database creates its directory
+at mode 700 and the file at mode 600, and applies the schema embedded in the
+binary, so a fresh install needs no preparation step and no `sqlx-cli` call.
+
+The database carries the table the per-surface token hashes live in. A token
+itself is never written to it: only the SHA-256 of the token's text.
+
 ## Reproduction
 
 The first runnable path is the local transport skeleton:
