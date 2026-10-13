@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use daemon::state::{STATE_DB_ENV, StateError, resolve_db_path};
+use daemon::state::{STATE_DB_ENV, StateError, Store, resolve_db_path};
 
 /// The two standard variables the default path is derived from. They are
 /// restated rather than imported: this test asserts the documented rule, so it
@@ -149,4 +149,28 @@ fn the_database_path_follows_the_variable_then_the_data_home_then_home() {
         resolve_db_path().expect("an empty data home falls back to home"),
         home.join(".local/share/metis/metis.db")
     );
+}
+
+/// The store opens the path the rule resolved, and creates the file when it is
+/// not there yet: a fresh install needs no preparation step.
+#[tokio::test]
+async fn the_store_opens_at_the_resolved_path_and_creates_it() {
+    let env = StateEnv::empty();
+    let base = TempDir::new();
+    let configured = base.join("data/metis/metis.db");
+    env.set(STATE_DB_ENV, &configured);
+
+    assert!(
+        !configured.exists(),
+        "nothing is there before the daemon opens it"
+    );
+
+    let store = Store::open(resolve_db_path().expect("the override is the path"))
+        .await
+        .expect("a fresh path opens");
+    assert!(
+        configured.is_file(),
+        "the database is created where the rule points"
+    );
+    drop(store);
 }

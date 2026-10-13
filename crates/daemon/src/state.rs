@@ -7,7 +7,11 @@
 //! directory private to its own user and the file owner-only.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use sqlx::SqlitePool;
+use sqlx::sqlite::SqliteConnectOptions;
 
 /// The environment variable that names the database file directly.
 pub const STATE_DB_ENV: &str = "METIS_STATE_DB";
@@ -38,6 +42,10 @@ pub enum StateError {
     /// Neither a configured database path, nor a data home, nor a home
     /// directory is set, so there is no path the daemon may own.
     NoStateDir,
+    /// The state directory or the database file could not be prepared.
+    Io(io::Error),
+    /// The database refused to open or to run an operation.
+    Database(sqlx::Error),
 }
 
 impl fmt::Display for StateError {
@@ -47,11 +55,69 @@ impl fmt::Display for StateError {
                 f,
                 "neither {STATE_DB_ENV}, nor {XDG_DATA_HOME_ENV}, nor {HOME_ENV} names a place to keep the daemon's state"
             ),
+            Self::Io(source) => {
+                write!(f, "the daemon's state path could not be prepared: {source}")
+            }
+            Self::Database(source) => {
+                write!(f, "the state database refused an operation: {source}")
+            }
         }
     }
 }
 
-impl std::error::Error for StateError {}
+impl std::error::Error for StateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NoStateDir => None,
+            Self::Io(source) => Some(source),
+            Self::Database(source) => Some(source),
+        }
+    }
+}
+
+/// The daemon's persistent state: one SQLite database.
+///
+/// The connection pool is private: the store is the boundary, so a caller
+/// reaches the tables through the methods below and never through SQL of its
+/// own.
+#[derive(Debug)]
+pub struct Store {
+    pool: SqlitePool,
+}
+
+impl Store {
+    /// Open the database at `path`, creating it and the directory that holds it
+    /// when they are missing.
+    ///
+    /// The file is opened through a connection pool, because the daemon serves
+    /// several calls at once, and the schema is applied before this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Io`] when the path cannot be prepared and
+    /// [`StateError::Database`] when the database refuses to open.
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self, StateError> {
+        let path = path.as_ref();
+        let directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or_else(|| {
+                StateError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the database path has no directory to keep it in",
+                ))
+            })?;
+        std::fs::create_dir_all(directory).map_err(StateError::Io)?;
+
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options)
+            .await
+            .map_err(StateError::Database)?;
+        Ok(Self { pool })
+    }
+}
 
 /// The database path the daemon opens.
 ///
