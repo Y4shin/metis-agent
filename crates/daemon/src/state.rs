@@ -10,6 +10,8 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use api_contracts::transport;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
 
@@ -31,6 +33,15 @@ const STATE_DIR_BELOW_HOME: &str = ".local/share";
 
 /// The database file's name inside the state directory.
 const STATE_FILE: &str = "metis.db";
+
+/// The mode the state directory carries: the daemon's own user, and nobody
+/// else, because the file it holds is the token table.
+#[cfg(unix)]
+const STATE_DIR_MODE: u32 = 0o700;
+
+/// The mode the database file carries: owner-only, for the same reason.
+#[cfg(unix)]
+const STATE_FILE_MODE: u32 = 0o600;
 
 /// The state could not be resolved, opened, or queried.
 ///
@@ -107,7 +118,7 @@ impl Store {
                     "the database path has no directory to keep it in",
                 ))
             })?;
-        std::fs::create_dir_all(directory).map_err(StateError::Io)?;
+        prepare(directory, path)?;
 
         let options = SqliteConnectOptions::new()
             .filename(path)
@@ -144,6 +155,42 @@ pub fn resolve_db_path() -> Result<PathBuf, StateError> {
             .join(STATE_FILE));
     }
     Err(StateError::NoStateDir)
+}
+
+/// Create the directory that holds the database and the file itself, under the
+/// one private-path rule the socket's directory and socket file use.
+///
+/// The directory is created at 700 and the file at 600, so neither is ever
+/// readable by another user, and the file exists before the database opens it.
+/// A file that is already there keeps its contents: this never truncates the
+/// state, and it narrows a file whose mode was widened outside the daemon.
+#[cfg(unix)]
+fn prepare(directory: &Path, path: &Path) -> Result<(), StateError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    transport::ensure_private_dir(directory, STATE_DIR_MODE).map_err(StateError::Io)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(STATE_FILE_MODE)
+        .open(path)
+        .map_err(StateError::Io)?;
+    transport::restrict_file(path, STATE_FILE_MODE).map_err(StateError::Io)
+}
+
+/// Create the directory that holds the database and the file itself.
+///
+/// A platform without the Unix access rule creates both without a mode; the
+/// front-end for it brings its own rule, the way it brings its own transport.
+#[cfg(not(unix))]
+fn prepare(directory: &Path, path: &Path) -> Result<(), StateError> {
+    std::fs::create_dir_all(directory).map_err(StateError::Io)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(path)
+        .map_err(StateError::Io)?;
+    Ok(())
 }
 
 /// An environment variable's value when it is set and not empty.
