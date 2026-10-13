@@ -22,6 +22,11 @@
 //! [`Client::stream_events`] opens the daemon's event stream and hands back an
 //! [`EventStream`] to drain. The events it yields are the daemon's own event
 //! type, so a caller never sees a wire message, a buffa view, or the transport.
+//! Every stream declares a request identifier of its own, which
+//! [`Client::cancel`] stops the stream's work by; a stream the daemon drops or
+//! cancels is reported as the typed [`ClientError::StreamDropped`] or
+//! [`ClientError::StreamCancelled`], never as a clean end, so a gap is never
+//! mistaken for current state.
 //!
 //! `skeleton` holds the test-support service the walking-skeleton test and
 //! example drive, and the start paths for it. The daemon effort replaces it;

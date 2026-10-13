@@ -478,10 +478,11 @@ impl Ring {
     /// identifier the opening messages carried, so no identifier is carried
     /// twice. Heartbeats fill an idle stretch.
     ///
-    /// The item is a `Result` because that is the body a streaming handler
-    /// answers with: nothing fails today, and the ring going away ends the
-    /// stream cleanly, but a later drop policy can refuse in-stream without a
-    /// signature change.
+    /// The item is a `Result` because a stream can end in the middle: a
+    /// subscriber that fell past the window ends it with
+    /// [`StreamError::SlowConsumer`] rather than being carried across a gap. The
+    /// ring going away ends the stream cleanly instead, because a daemon that is
+    /// going away has nothing more to promise.
     ///
     /// # Errors
     ///

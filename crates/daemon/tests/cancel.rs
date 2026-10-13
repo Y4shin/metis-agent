@@ -529,6 +529,27 @@ async fn a_declared_identifier_comes_back_in_the_response_metadata() {
         Some(&HeaderValue::from_static("cli-8")),
         "the stream answer carries the identifier the call declared"
     );
+
+    // And a stream that declares none is served exactly as it was before
+    // identifiers existed: it opens with the snapshot and carries no identifier
+    // back.
+    let mut stream = daemon
+        .stream_events(StreamEventsRequest {
+            channels: vec!["daemon".to_owned()],
+            ..Default::default()
+        })
+        .await
+        .expect("a stream with no declared identifier is served");
+    assert_eq!(stream.headers().get(REQUEST_ID_HEADER), None);
+    let opening = stream
+        .message::<EventMessage>()
+        .await
+        .expect("the stream carries its opening message")
+        .expect("the stream has not ended");
+    assert_eq!(
+        opening.to_owned_message().kind.as_known(),
+        Some(EventKind::Snapshot)
+    );
 }
 
 /// A client that disconnects cancels nothing: the work it started continues,
