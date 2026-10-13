@@ -77,17 +77,22 @@ streaming assumptions before anything is built on top.
   is by cursor, and an expired cursor or a daemon restart forces a resync. The
   event stream is ephemeral and is not the source of truth.
 - Channels are `daemon`, `session:<id>`, `task:<id>`, and `workflow_run:<id>`.
-  A stream selects one or more channels through request fields and begins with a
-  snapshot message. Streams do not survive a reconnect, so a resync is a fresh stream.
-  There is one delivery queue per stream, so observed order equals event-id
-  order across channels.
+  A stream selects one or more channels through request fields. A stream opened
+  without a cursor begins with a snapshot message; a stream opened with a
+  resumable cursor begins with the events that follow that cursor instead, because
+  its caller already holds the state a snapshot would restate. Streams do not
+  survive a reconnect, so a resync is a fresh stream, and a resync is what a
+  caller does when it has no cursor to resume from or when the daemon refuses the
+  one it presented as expired. There is one delivery queue per stream, so observed
+  order equals event-id order across channels.
 - Cancellation is an explicit idempotent RPC carrying the target request id;
   dropping a stream cancels nothing by itself. A slow consumer sees bounded
   backpressure and then a plain stream drop, which the client answers with a
   resync, rather than events being dropped silently. The protocol major version
   is the proto package (`metis.v1`).
 - The stream's cursor travels in the request (`last_event_id`), the snapshot is
-  the stream's first message, and heartbeats are ordinary stream messages.
+  the first message of a stream opened without one, and heartbeats are ordinary
+  stream messages.
   Correlation ids are client-generated opaque strings, carried in request
   metadata and echoed verbatim in the response metadata.
 - The walking skeleton proves the package version, one dummy RPC over the local

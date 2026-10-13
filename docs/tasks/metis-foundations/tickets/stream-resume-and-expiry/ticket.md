@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Stream resume and expired cursors
 status: stable
-workflow_state: ready
-blocked_by: [event-stream]
+workflow_state: done
+blocked_by:
+- event-stream
 size: s
 ---
 
@@ -108,3 +109,33 @@ iteration bound rather than naming the private capacity, so a much larger
 capacity would fail loudly instead of adapting; and
 `docs/tasks/metis-foundations/map.md` still carries the unqualified "the snapshot
 is the stream's first message".
+
+Knowledge harvested at finalize: the effort map's two sentences about the stream's
+opening message were narrowed in the same landing, so its channel bullet now reads
+the snapshot as the cursorless stream's first message and names the resumed stream's
+replay instead, and its cursor bullet says the snapshot is the first message of a
+stream opened without a cursor. The resync the map pairs with a reconnect is now
+reachable in two ways: a caller with no cursor to resume from, and a caller whose
+cursor the daemon refused as expired through `metis-cursor-error`. The map's fog
+entry about telling a deliberate slow-consumer drop from a transport failure is
+untouched, because nothing this ticket lands drops a stream on purpose.
+
+The arch spec carries the measured rule rather than the planned one: the expiry
+predicate is the single expression `cursor != 0 && (cursor > latest ||
+cursor.saturating_add(1) < earliest)` evaluated under the lock that reads the
+window, `CursorError` is deliberately not `#[non_exhaustive]` while the wire
+vocabulary `CursorRefusal` is where additivity lives, and `impl
+std::error::Error for CursorError` is an addition the approved section did not
+name. Two things a later ticket should know: no test pins the
+`FailedPrecondition` status end to end, so the wire code can change with every
+test still green, and the two expiry fixtures reach the moved window by
+publishing under a 10 000 iteration bound rather than by naming the private ring
+capacity, so a much larger capacity would fail loudly rather than adapt.
+
+The chain history is worth keeping: the first attempt timed out at its 900 second
+budget after its tdd and verify steps were already complete, and the retry's tdd
+step re-verified the unchanged tree and added no commit. That is why the working
+branch carries seven `wip:` commits and no eighth, and why the verified tree and
+the landed tree are the same commit. The +50 percent retry with the prior
+attempt's outputs as context is the recovery that worked, the same one the
+event-stream chain needed.
