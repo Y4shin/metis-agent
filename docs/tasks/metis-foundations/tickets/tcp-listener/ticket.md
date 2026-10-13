@@ -19,8 +19,9 @@ silently expose every interface.
 - [ ] The service listens on TCP only when explicitly enabled in configuration.
 - [ ] The bind address is required from configuration, with no default.
 - [ ] With no remote configuration, no TCP socket is opened, asserted by a test.
-- [ ] A test connects the client over TCP and completes both the echo RPC and the
-      event stream.
+- [ ] A test connects the client over TCP and completes the echo RPC. The
+      realtime stream over TCP is asserted by the ticket that owns the first
+      streaming RPC, because the contract has none until `event-stream` lands.
 
 ## Blocked by
 

@@ -1261,12 +1261,131 @@ C, and header checks for seam 5.
 
 ---
 
+## Pending ticket: `tcp-listener`
+
+Blocked by `local-transport-rpc-skeleton`, landed; not landed itself. The
+optional remote transport: the same router reachable over TCP when the operator
+names a bind address, and no listener at all when they do not.
+
+### Exports
+
+- `crates/api-contracts/src/transport.rs` gains the TCP front-ends beside the
+  landed Unix ones, sharing `serve_stream` exactly as `serve_uds` does:
+  - `pub async fn serve_tcp(addr: SocketAddr, router: Router) -> io::Result<()>`:
+    binds `tokio::net::TcpListener`, builds the router once into an `Arc`,
+    accepts in a loop, and hands each stream to `serve_stream`. No stale file to
+    remove and no second serve loop.
+  - `pub fn tcp_transport(addr: SocketAddr) -> connectrpc::client::Http2Connection`,
+    beside `uds_transport` and built the same way (`lazy_with_connector` over a
+    `service_fn` that opens `TcpStream::connect`), because `client::Client`
+    deliberately exposes no transport injection point as landed. Its authority
+    is `http://<addr>`.
+  - `pub const REMOTE_ADDR_ENV: &str = "METIS_TCP_ADDR";` beside the transport
+    that reads it, and `pub fn resolve_remote_addr() -> Result<Option<SocketAddr>,
+    ConfigError>`: unset or empty is `None`, which is the whole of "off by
+    default"; an `IP:port` literal is `Some`; anything else is a typed
+    `ConfigError` naming the variable and the value, never a silent disable.
+    `ConfigError` is a new small non-exhaustive enum in this module, the first
+    configuration error in the repository.
+- `crates/client/src/lib.rs`: `pub async fn with_remote_addr(addr: SocketAddr) ->
+  Result<Client, ClientError>` on the landed `Client`, mirroring
+  `with_endpoint`. The wrapper keeps the transport private, so caller code names
+  no TCP type. There is no remote constructor that reads the environment,
+  because `METIS_TCP_ADDR` is the server's bind address; how a client finds a
+  remote daemon is `pairing-and-tokens`' subject.
+- `crates/client/src/skeleton.rs`: `pub async fn serve_remote() ->
+  Result<Option<SocketAddr>, ConfigError>`. It resolves through
+  `resolve_remote_addr()`; `None` returns `Ok(None)` having bound nothing,
+  `Some(addr)` binds and accepts on its own task and returns the bound address,
+  so the test connects without guessing a port. Test support keeps this start
+  path until the daemon effort wires it into `main`.
+- `docs/testing.md`: the transport bullet gains the remote test command and the
+  variable, next to `METIS_ENDPOINT`.
+
+### Existing abstractions to use
+
+- `serve_stream` unchanged, and `serve_uds` as the shape the TCP front-end
+  copies: bind, accept, clone the `Arc` per stream, spawn.
+- `skeleton::router()`: the remote test serves the same router the socket path
+  serves, so it proves the transport and not a second service.
+- The RAII environment helper in `crates/client/tests/echo.rs`
+  (`EndpointOverride`, including the note that mutating the environment is
+  unsafe in edition 2024) is the prior art for the remote variable's test. The
+  new test lives in its own binary, `crates/client/tests/remote.rs`, and is not
+  `#[cfg(unix)]`, because TCP is the first transport here that every target has.
+- `Client`, `ClientError`, and the existing wrapper test
+  `wrapper_echoes_over_a_temporary_socket`, whose assertion pair the TCP test
+  repeats.
+- `connectrpc::ConnectRpcService` and the `hyper_util` auto builder stay
+  internal to `serve_stream`.
+
+### Do NOT reimplement
+
+- Do not add a second serve loop, a second service, or a per-connection router
+  build: each accepted stream gets a clone of the one `Arc<Router>`.
+- Do not wire TLS, a proxy header, or a trust rule. `tls-and-client-trust` and
+  `reverse-proxy-mode` own those; this listener is plaintext.
+- Do not add an `enabled` flag beside the address. Naming the address is the
+  enablement; a separate flag would add an "enabled but unconfigured" state with
+  nothing behind it.
+- Do not create a configuration crate or a config file format for one variable.
+  The environment is this effort's configuration surface (`METIS_ENDPOINT`
+  landed that way).
+- Do not add a public transport injection point to `Client`, and do not change
+  the generated tree, the contract, or the ABI layout.
+- Do not add authentication. That is `local-identity-and-acl`, and it applies to
+  every transport.
+
+### Seams
+
+1. **Configuration seam.** `resolve_remote_addr()` reads `METIS_TCP_ADDR`:
+   unset and empty give `None`; `127.0.0.1:0`, a port-bearing IPv4 value, and an
+   IPv6 literal give `Some`; a malformed value and a bare hostname give
+   `ConfigError`. Unit-tested with the RAII helper. The rule is an `IP:port`
+   literal so resolution happens at bind time, not at config time.
+2. **Off-by-default seam.** With the variable unset the start path binds
+   nothing: the test asserts `serve_remote()` returns `Ok(None)`, then binds the
+   port it reserved before the call and requires that bind to succeed, so the
+   absence is measured rather than inferred.
+3. **Listener seam.** A TCP listener serves the landed router: the test starts
+   `serve_remote()` with `METIS_TCP_ADDR` set, takes the returned address, and
+   drives the echo RPC through `Client::with_remote_addr` end to end.
+4. **Shared-path seam.** The TCP connection traverses the same `serve_stream` as
+   the duplex and socket tests, which the echoed value asserts: a second serve
+   loop would have to reproduce the service to pass.
+5. **No-leak seam.** The accept task is dropped or aborted at the end of each
+   test, and the following test can bind the same port, so a listener outliving
+   its test cannot hide behind a passing suite.
+
+Test types: unit tests in `api-contracts` for seam 1, integration tests in
+`crates/client/tests/remote.rs` for seams 2 to 5 over a real loopback listener.
+No new harness and no new test protocol.
+
+### Interface contract
+
+- `tls-and-client-trust` and `reverse-proxy-mode` add their own bind and
+  connector front-ends against `serve_stream`, `serve_tcp`'s shape, and
+  `resolve_remote_addr()`'s rule, and still do not add an injection point to
+  `Client`.
+- `local-identity-and-acl` and `pairing-and-tokens` add the credential path.
+  Until they land, an enabled listener serves the same unauthenticated surface
+  the local socket serves, which is why the bind address is required and has no
+  default. The ordering risk is recorded, not hidden.
+- The plaintext warning the map's constraints require belongs to the daemon's
+  startup policy and to `reverse-proxy-mode`; this ticket records the residual
+  instead of inventing a policy surface for it.
+- The realtime stream over TCP is not asserted here: no streaming RPC exists
+  until `event-stream` lands, and `serve_stream` serves any Connect service over
+  the stream it is handed. The stream-over-TCP assertion belongs to the ticket
+  that owns the first stream.
+
+---
+
 ## Downstream interface contracts (outline)
 
-These tickets are not pending yet, and no ticket section is pending now: every
-ticket that has reached the frontier has landed. Their sections are added when
-they reach the frontier, and the commitments below are what the landed tickets
-must already support.
+These tickets are not pending yet, apart from the one pending section above
+(`tcp-listener`). Their sections are added when they reach the frontier, and the
+commitments below are what the landed tickets must already support.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
