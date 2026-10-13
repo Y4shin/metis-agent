@@ -93,3 +93,11 @@ has no graceful shutdown, matching `serve_uds`; and
 `no_remote_configuration_opens_no_tcp_socket`'s rebind probe is near-vacuous on
 its own, with the `Ok(None)` assertion and the configuration unit tests carrying
 criterion 3.
+
+Knowledge harvested at finalize: the effort map gained a decision bullet for the
+remote listener's rule and for the stream-over-TCP assertion now sitting with
+`event-stream`; `docs/testing.md` already carried the remote run commands and
+the configuration rule from the implementation, so it needed no further change.
+The operator reviewed the unexercised `serve_tcp` at finalize and accepted it as
+a documented gap, so the daemon effort adds its own coverage when it wires
+`serve_tcp` into `main`.

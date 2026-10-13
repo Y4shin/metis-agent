@@ -240,6 +240,18 @@ streaming assumptions before anything is built on top.
   version 2 so the per-capability gate is falsifiable end to end, the payload
   types prove unknown fields decode, and the harness baseline is 73 checks. The
   effort's remaining work is the transport and stream line.
+- The optional remote transport is real and off by default: `METIS_TCP_ADDR`
+  holding an `IP:port` literal is the whole switch, there is no default bind
+  address, and an absent, empty or malformed value never opens a socket, with
+  `ConfigError` naming the variable and the value. `transport::serve_tcp_listener`
+  is the one TCP accept loop over the landed `serve_stream`, `serve_tcp` is bind
+  plus delegate for the daemon to call, `remote_authority` is the one
+  `http://<addr>` rule, and `Client::with_remote_addr` reaches the listener
+  without adding a public transport injection point to the wrapper. The listener
+  is plaintext and unauthenticated until `tls-and-client-trust`,
+  `reverse-proxy-mode`, `local-identity-and-acl` and `pairing-and-tokens` land,
+  which is why the bind address is required. The stream-over-TCP assertion is
+  carried by `event-stream`, which owns the first streaming RPC.
 
 ## Fog
 
