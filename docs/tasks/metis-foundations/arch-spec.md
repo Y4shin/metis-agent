@@ -1314,6 +1314,20 @@ feature on, so the host keeps the primitives and the envelope alone.
   exported `metis_*` symbol. The harness drives the futures path end to end and
   prints 43 checks, one `[ok]`/`[fail]` line each plus the teardown ordering,
   flushing per line and exiting non-zero on any failure.
+- `crates/plugin-fixture/c/c-plugin.c` and `scripts/build-c-plugin.sh`: the C
+  implementer of the table, compiled with `-std=c11 -Wall -Wextra -Werror` under
+  both gcc and clang into `target/c-plugin/libcplugin.so`. It publishes four
+  capabilities (`c.ready`, `c.timer`, `c.cancel`, `c.drop_in_flight`), keeps its
+  own allocation ledger (allocs, frees, live, double frees, bad frees), its own
+  waker-clone ledger, and a reply-after-drop count, and reports all of them
+  through the host's `log` callback at `shutdown`. Everything it needs comes
+  from the committed header, including the presence rule, which is what the
+  header's slot constants exist for.
+- The harness gains the C section: it runs the build script, loads the gcc
+  build, drives the ready path, the timer round trip, cancel, and a drop with
+  its service reply in flight, then requires zero live buffers, zero double
+  frees, a balanced waker count on both sides, and one recorded reply after a
+  drop. The harness now prints 62 checks.
 - `crates/plugin-fixture/Cargo.toml`: `schemars` for the derived inline schemas.
   `crates/plugin-runtime/Cargo.toml`: `libloading`, `serde_json`, `serde`,
   `jsonschema`, and `plugin-fixture` as a dev-dependency for the integration
@@ -1359,27 +1373,28 @@ feature on, so the host keeps the primitives and the envelope alone.
 6. **The hazard set.** A panic in a poll, a panic in a destructor, a panic in a
    host callback, a blocking poll under the watchdog, a cancel that resolves as
    `Cancelled`, a missed cancel deadline, and a double drop.
-7. **No plugin thread.** A capability driven to completion starts no thread,
+7. **The C implementer.** Compiled by both compilers, loaded, driven through the
+   ready path, a timer, cancel and a drop with its reply in flight, with its own
+   ledger at zero and both sides' waker counts balanced.
+8. **No plugin thread.** A capability driven to completion starts no thread,
    asserted by a thread count in `tests/no_plugin_thread.rs` (its own binary, so
    the counts are not the harness's own threads), and by counting eight
    concurrent plugin futures on one host loop in `tests/concurrency.rs`.
-8. **The authoring feature gate.** `plugin-contract` still builds with
+9. **The authoring feature gate.** `plugin-contract` still builds with
    `--no-default-features` and no ordinary dependencies.
 
 Test types: the integration tests and the harness binary for seams 1, 4, 5, 6
-and 7; unit tests for seam 2 and for the routed trait in seam 3; the feature-gate
-test for seam 8.
+and 7; unit tests for seam 2 and for the routed trait in seam 3; the
+thread-count tests for seam 8; the feature-gate test for seam 9.
 
 ### Residual, not landed by this ticket
 
-- The C implementer of the table, its gcc and clang compile steps, and the
-  harness checks that drive it end to end. The header is ready for it (the
-  envelope constants and the slot constants are in it), and the layout rules it
-  must reproduce are asserted in `c/layout_static_asserts.c`, but the implementer
-  itself did not land.
 - A wake after a future is dropped is recorded by the runtime's waker and by the
   harness's, and the counter exists, but no fixture capability produces one on
-  purpose, so no check drives it.
+  purpose, so no check drives it. A drop after unload is likewise structural
+  rather than driven: the ordering ledger records that nothing is dropped after
+  the unload, and no test deliberately drops a future into an unloaded library,
+  because that is the use-after-unload bug the ordering exists to prevent.
 - The harness does not yet refuse a capability by descriptor version: the
   fixture advertises version 1 only, so that check could not fail. The gate
   itself is implemented and tested in `plugin-runtime`.

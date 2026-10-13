@@ -246,6 +246,8 @@ fn main() -> ExitCode {
     drive_capabilities(&mut checks, &state, instance, list.as_ref());
     run_hazard_checks(&mut checks, &state, instance);
 
+    drive_c_plugin(&mut checks);
+
     // --- teardown: quiesce, drop, then unload ------------------------------
 
     checks.check(
@@ -697,6 +699,246 @@ impl Default for WatchdogOutcome {
             status: MetisStatus::Internal,
         }
     }
+}
+
+/// The C implementer of the table, compiled by the script and driven here.
+///
+/// This is the half of the proof the Rust fixture cannot give: that the
+/// committed header is enough for a non-Rust author. The library is compiled
+/// with `-std=c11 -Wall -Wextra -Werror` under gcc and clang, loaded, and driven
+/// through the same host driver as the fixture, and the C side's own ledger has
+/// to agree with the host's counters at the end.
+fn drive_c_plugin(checks: &mut Checks) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|crates| crates.parent())
+        .expect("the repository root")
+        .to_path_buf();
+    let script = root.join("scripts/build-c-plugin.sh");
+    let compiled = Command::new("bash").arg(&script).output();
+    match compiled {
+        Ok(output) if output.status.success() => {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if !line.trim().is_empty() {
+                    println!("[order] {line}");
+                }
+            }
+            checks.check(
+                true,
+                "cplugin.compiled_by_gcc_and_clang",
+                "both compilers accepted the committed header",
+            );
+        }
+        Ok(output) => {
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            checks.check(
+                false,
+                "cplugin.compiled_by_gcc_and_clang",
+                format!("the build script exited {}", output.status),
+            );
+            return;
+        }
+        Err(err) => {
+            checks.check(false, "cplugin.compiled_by_gcc_and_clang", err);
+            return;
+        }
+    }
+
+    let path = root.join("target/c-plugin/libcplugin.so");
+    if !checks.check(path.exists(), "cplugin.library_present", path.display()) {
+        return;
+    }
+    // SAFETY: the harness built this library from the tree it is testing.
+    let library = match unsafe { Library::new(&path) } {
+        Ok(library) => library,
+        Err(err) => {
+            checks.check(
+                false,
+                "cplugin.library_loaded",
+                format!("dlopen failed: {err}"),
+            );
+            return;
+        }
+    };
+    checks.check(true, "cplugin.library_loaded", "the gcc build loads");
+
+    let entry = unsafe { library.get::<MetisPluginEntryV1Fn>(METIS_PLUGIN_ENTRY_V1) };
+    let table_ptr = match &entry {
+        Ok(entry) => unsafe { entry() },
+        Err(err) => {
+            checks.check(false, "cplugin.entry_symbol", err);
+            return;
+        }
+    };
+    if !checks.check(
+        !table_ptr.is_null(),
+        "cplugin.entry_symbol",
+        "metis_plugin_entry_v1 resolved",
+    ) {
+        return;
+    }
+    match metis_dynamic_symbols(&path) {
+        Ok(symbols) => {
+            checks.check(
+                symbols == vec!["metis_plugin_entry_v1".to_string()],
+                "cplugin.exactly_one_metis_symbol",
+                format!("{symbols:?}"),
+            );
+        }
+        Err(err) => {
+            checks.check(false, "cplugin.exactly_one_metis_symbol", err);
+        }
+    }
+    match unsafe { metis_read_table(table_ptr) } {
+        Ok(read) => {
+            checks.check(
+                read.abi_major == METIS_ABI_MAJOR
+                    && read.abi_minor == METIS_ABI_MINOR
+                    && read.size == mem::size_of::<MetisPluginTableV1>(),
+                "cplugin.table_is_the_revision",
+                format!(
+                    "the C table reports {}.{} and {} bytes",
+                    read.abi_major, read.abi_minor, read.size
+                ),
+            );
+        }
+        Err(err) => {
+            checks.check(false, "cplugin.table_is_the_revision", err);
+        }
+    }
+
+    let state = HostState::new(table_ptr);
+    state.order("the C library loaded");
+    let mut instance: *mut c_void = std::ptr::null_mut();
+    // SAFETY: the host table lives in the box and stays valid for the
+    // instance's lifetime.
+    let created = unsafe { ((*table_ptr).create_instance)(state.api(), &mut instance) };
+    if !checks.check(
+        created == MetisStatus::Ok && !instance.is_null(),
+        "cplugin.instance_created",
+        format!("status={}", created.as_str()),
+    ) {
+        return;
+    }
+
+    let mut listed = MetisBuffer::empty();
+    let status = unsafe { ((*table_ptr).list_capabilities)(instance, &mut listed) };
+    let names = if status == MetisStatus::Ok {
+        let bytes = state.take_plugin_buffer(listed);
+        metis_payload_body(&bytes)
+            .ok()
+            .and_then(|body| serde_json::from_slice::<CapabilityList>(body).ok())
+            .map(|list| {
+                list.capabilities
+                    .iter()
+                    .map(|descriptor| descriptor.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    checks.check(
+        names
+            == vec![
+                "c.ready".to_string(),
+                "c.timer".to_string(),
+                "c.cancel".to_string(),
+                "c.drop_in_flight".to_string(),
+            ],
+        "cplugin.capabilities_listed",
+        format!("{names:?}"),
+    );
+
+    let ready = state.drive(instance, "c.ready", "ready", 400);
+    checks.check(
+        ready.status == MetisStatus::Ok && ready.polls == 1,
+        "cplugin.ready_path",
+        format!("status={} polls={}", ready.status.as_str(), ready.polls),
+    );
+
+    let timer = state.drive(instance, "c.timer", "timer", 401);
+    checks.check(
+        timer.status == MetisStatus::Ok && timer.polls >= 2,
+        "cplugin.timer_round_trip",
+        format!("status={} polls={}", timer.status.as_str(), timer.polls),
+    );
+
+    let cancel = state.cancel_call(instance, "c.cancel", 402);
+    checks.check(
+        cancel.status == MetisStatus::Cancelled,
+        "cplugin.cancel_resolves_cancelled",
+        format!("status={}", cancel.status.as_str()),
+    );
+
+    checks.check(
+        state.drop_with_reply_in_flight(instance, "c.drop_in_flight", 403),
+        "cplugin.drop_with_reply_in_flight",
+        "the reply arrived after the drop and was reported, not dereferenced",
+    );
+
+    let shutdown = unsafe { ((*table_ptr).shutdown)(instance) };
+    state.order("the C instance quiesced");
+    checks.check(
+        shutdown == MetisStatus::Ok,
+        "cplugin.shutdown_ok",
+        format!("status={}", shutdown.as_str()),
+    );
+    match state.c_ledger() {
+        Some(ledger) => {
+            checks.check(
+                ledger.get("allocs") == ledger.get("frees") && ledger.get("live") == Some(&0),
+                "cplugin.ledger_zero_live",
+                format!("{ledger:?}"),
+            );
+            checks.check(
+                ledger.get("double_frees") == Some(&0) && ledger.get("bad_frees") == Some(&0),
+                "cplugin.no_double_free",
+                format!("{ledger:?}"),
+            );
+            checks.check(
+                ledger.get("waker_clones") == ledger.get("waker_releases"),
+                "cplugin.c_waker_count_balanced",
+                format!("{ledger:?}"),
+            );
+            checks.check(
+                ledger
+                    .get("replies_after_drop")
+                    .copied()
+                    .unwrap_or_default()
+                    >= 1,
+                "cplugin.reply_after_drop_recorded",
+                format!("{ledger:?}"),
+            );
+        }
+        None => {
+            checks.check(
+                false,
+                "cplugin.ledger_zero_live",
+                "the C plugin reported no ledger",
+            );
+        }
+    }
+    checks.check(
+        state.waker_clones() == state.waker_drops(),
+        "cplugin.host_waker_count_balanced",
+        format!(
+            "{} clones, {} releases",
+            state.waker_clones(),
+            state.waker_drops()
+        ),
+    );
+
+    let destroy = unsafe { ((*table_ptr).destroy_instance)(instance) };
+    checks.check(
+        destroy == MetisStatus::Ok,
+        "cplugin.destroy_ok",
+        format!("status={}", destroy.as_str()),
+    );
+    // Nothing is inside the C plugin code once every future is dropped, so the
+    // library may go.
+    drop(library);
+    state.order("the C library unloaded after destroy");
 }
 
 /// The outcome of one driven call.
@@ -1174,6 +1416,68 @@ impl HostState {
             .is_none();
         self.quarantined.store(false, SeqCst);
         refused
+    }
+
+    /// The C plugin's one-line ledger, parsed.
+    fn c_ledger(&self) -> Option<HashMap<String, usize>> {
+        let logs = self.logs.lock().unwrap();
+        let line = logs
+            .iter()
+            .rev()
+            .find(|line| line.contains("CPLUGIN_ACCOUNT"))?
+            .clone();
+        let payload = line.split("CPLUGIN_ACCOUNT").nth(1)?.trim().to_string();
+        let mut ledger = HashMap::new();
+        for field in payload.split_whitespace() {
+            let (key, value) = field.split_once('=')?;
+            ledger.insert(key.to_string(), value.parse().ok()?);
+        }
+        Some(ledger)
+    }
+
+    /// Answers an outstanding service and reports the status the plugin gave,
+    /// which is how the drop-with-a-reply-in-flight case is observed.
+    fn answer_status(&self, instance: *mut c_void, request_id: u64, body: &str) -> MetisStatus {
+        let encoded = metis_encode_payload(body.as_bytes());
+        // SAFETY: the instance is live and the answer buffer is host-owned and
+        // borrowed for this call.
+        unsafe {
+            ((*self.table).service_complete)(
+                instance,
+                request_id,
+                MetisStatus::Ok,
+                MetisBuffer {
+                    ptr: encoded.as_ptr() as *mut u8,
+                    len: encoded.len(),
+                    cap: encoded.len(),
+                    owner: METIS_BUFFER_OWNER_HOST,
+                    reserved: 0,
+                },
+            )
+        }
+    }
+
+    /// Starts a call that asks for a service, drops its future before the
+    /// answer arrives, and then answers anyway.
+    fn drop_with_reply_in_flight(
+        &self,
+        instance: *mut c_void,
+        capability: &str,
+        request_id: u64,
+    ) -> bool {
+        let Some(handle) = self.invoke(instance, capability, "inflight", request_id) else {
+            return false;
+        };
+        let (parked, _) = self.poll(&handle, request_id);
+        let dropped = self.drop_future(&handle, request_id);
+        let answered = self.answer_status(instance, request_id, "{\"delay_ms\":20}");
+        println!(
+            "[order] the reply in flight for request {request_id} returned {}",
+            answered.as_str()
+        );
+        parked == MetisStatus::Pending
+            && dropped == MetisStatus::Ok
+            && answered == MetisStatus::NotFound
     }
 
     /// Drops one future twice and reports whether the second drop was refused.

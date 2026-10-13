@@ -61,6 +61,12 @@ Plugin ABI, documented in `crates/plugin-contract/src/abi` and
   ordering as it happens, and a `[result] PASS`/`FAIL` line; it exits non-zero on
   any failure. The harness rebuilds the fixture library first, so a stale `.so`
   is never loaded.
+- `bash scripts/build-c-plugin.sh` -- compile the C implementer of the table
+  (`crates/plugin-fixture/c/c-plugin.c`) with `-std=c11 -Wall -Wextra -Werror`
+  under both gcc and clang, and leave the gcc build at
+  `target/c-plugin/libcplugin.so`. The ABI harness runs this script itself and
+  then drives that library end to end, so the header is proven usable by a
+  compiler other than rustc and by a plugin that is not the fixture.
 - `bash scripts/regenerate-abi-header.sh` -- regenerate the committed C header
   from the `repr(C)` Rust; `--check` regenerates into a scratch file and fails
   on any difference.
