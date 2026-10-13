@@ -1,8 +1,13 @@
-# Plugin contract v2: proposal for approval
+# Round 3 decision proposals (working record)
 
-Throwaway prototype material, but this document is the shape the operator asked
-to approve before the prototype folds it in. It is written to be annotated: mark
-each decision keep, change, or reject, and add what you want different.
+Round 3 proposal record. This is the record of what the four lanes proposed and
+the evidence behind it, kept for provenance. It is deliberately written as a
+proposal against the current harness.
+
+The **final contract text is not this file**. It is written only after the
+operator approves the revised contract in the working session, from scratch and
+without reference to the round 3 harness. Until then this file is a record, not
+an approval artifact.
 
 The north star for the round was: **the plugin just gives the host async tasks
 that the host can launch and await on its own runtime.** Everything below is

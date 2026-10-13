@@ -91,9 +91,12 @@ that item is picked up.
   their evidence and the C plugin source preserved under
   `spikes/plugin-registry/round-3/`, and the parent's own re-runs under
   `round-3/verification/`.
-- Nothing is folded into the prototype: the operator asked for an approval round
-  on the final FFI/ABI and trait shape first. The proposal to approve is
-  `spikes/plugin-registry/CONTRACT-V2-PROPOSAL.md`, decisions D1 to D7.
+- Nothing is folded into the prototype yet. The operator approved the revised
+  contract as the v1 shape on 2026-10-13. The contract text now lives at
+  `docs/plugin-contract.md`, and `spikes/plugin-registry/CONTRACT-V2-PROPOSAL.md`
+  is the proposal record (decisions D1 to D7) behind it. Folding the approved
+  shape into the prototype still has to happen, and where it lands depends on
+  which ticket owns it.
 - Verified in the parent: shape 95/95 with the futures path on and 20/20 with the
   legacy path compiled out (both in debug and release), reclaim 101/101 with zero
   leaked ctx boxes and waker clones, ownership 92 host checks plus 14 C-probe
