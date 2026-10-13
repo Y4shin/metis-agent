@@ -950,3 +950,84 @@ async fn pairing_stays_exempt_over_the_tcp_service_front_end() {
         vec!["cli".to_owned()]
     );
 }
+
+/// One service, mounted on the Unix socket front-end and on the TCP one,
+/// refuses the same call with no credential and serves the same call with a
+/// paired token.
+///
+/// The front-ends are two bind shapes over one connection body, so the remote
+/// one must not be a second, weaker policy path: the service value is the same
+/// one on both, and the answers have to match.
+#[tokio::test]
+async fn a_service_mounted_on_both_front_ends_answers_the_same_way() {
+    let fixture = Fixture::new("parity").await;
+    let served = Served::default();
+    let service = fixture.recording_service(AuthPolicy::TokenRequired, &served);
+
+    let socket = fixture.socket("parity");
+    serve(&socket, service.clone()).await;
+    let reserved = reserve_loopback_port();
+    tokio::spawn(async move {
+        if let Err(err) = serve_tcp_service(reserved, service).await {
+            eprintln!("remote service listener error: {err}");
+        }
+    });
+    assert!(
+        wait_for_tcp(reserved).await,
+        "the TCP front-end binds the reserved address"
+    );
+
+    // The same request with no credential: both refuse as missing, and neither
+    // handler ran.
+    for (front_end, caller) in [
+        ("local", fixture.client(&socket, Surface::Cli).await),
+        ("remote", fixture.remote_client(reserved, Surface::Cli).await),
+    ] {
+        let error = caller
+            .echo("who am i")
+            .await
+            .expect_err("a credential is required on both front-ends");
+        assert!(
+            matches!(error, ClientError::CredentialMissing),
+            "the {front_end} front-end: expected the missing-credential refusal, got {error}"
+        );
+    }
+    assert!(
+        served.paths().is_empty(),
+        "no handler ran on either front-end: {served:?}",
+        served = served.paths()
+    );
+
+    // The same request carrying a paired token: both serve it, and both reach
+    // the mounted handler with the method path alone.
+    fixture
+        .store
+        .insert_token("cli", &landed_hash(TOKEN_A).hash())
+        .await
+        .expect("the row is written");
+    plant("cli", TOKEN_A);
+
+    let local = fixture.client(&socket, Surface::Cli).await;
+    let remote = fixture.remote_client(reserved, Surface::Cli).await;
+    let local_reply = local
+        .echo("the same request")
+        .await
+        .expect("the local front-end serves the paired token");
+    let remote_reply = remote
+        .echo("the same request")
+        .await
+        .expect("the remote front-end serves the paired token");
+    assert_eq!(local_reply, "the same request");
+    assert_eq!(
+        local_reply, remote_reply,
+        "the two front-ends answer the same request the same way"
+    );
+    assert_eq!(
+        served.paths(),
+        vec![
+            DAEMON_SERVICE_ECHO_SPEC.procedure.to_owned(),
+            DAEMON_SERVICE_ECHO_SPEC.procedure.to_owned(),
+        ],
+        "the mounted handler served one call per front-end"
+    );
+}
