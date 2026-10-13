@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Pairing over the remote listener (remote-pairing)
+
+Pairing is now reachable from a device with no local socket: a client pairs over the TCP listener with the preshared key, keeps the minted token, and serves authenticated calls on the same transport. Pairing became optional, since an absent or empty `METIS_PRESHARED_KEY` resolves to `None` and closes pairing while every other call keeps serving, and an unresolvable reference stays a loud error. All three refusal causes, disabled, wrong key and already paired, now travel in a `metis-pair-error` header and reach the client as typed errors instead of `PermissionDenied` or `AlreadyExists`. Closing pairing is a state rather than a revocation, so surfaces paired earlier keep serving until their token row is deleted; the missing rate limit on network-reachable pairing attempts is recorded as fog.
+
 ## 2026-10-13, Service-taking TCP front-end (serve-tcp-service)
 
 `transport::serve_tcp_service` and `serve_tcp_listener_service` now mount a `ConnectRpcService` on TCP, the way `serve_uds_service` already did on the Unix socket, because `connectrpc` keeps the interceptor chain on the service rather than the router. Both transports can therefore enforce the credential policy the last ticket added, with no peer-address sniffing: the tests refuse a credentialless call with the typed missing-credential error, serve a paired token, keep `Pair` exempt, and assert the two front-ends answer identically. `serve_tcp_listener` and `serve_stream` were reduced to delegations over the one private connection body, keeping their signatures and observable behaviour, and the workspace suite is at 144 passed, 0 failed.
