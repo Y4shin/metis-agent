@@ -27,5 +27,6 @@ pub mod events;
 pub mod identity;
 pub mod keychain;
 pub mod proto;
+pub mod request;
 pub mod time;
 pub mod transport;
