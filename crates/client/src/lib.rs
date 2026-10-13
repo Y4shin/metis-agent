@@ -12,6 +12,13 @@
 //! records. The declaration is not a credential, and no call is authenticated
 //! by it.
 //!
+//! A surface pairs once: [`Client::pair`] presents the daemon's preshared key
+//! and keeps the token it is answered with, and every later call carries that
+//! token as `Authorization` metadata. The credential is never named by a caller
+//! and never appears in a URL. A daemon that answers with a credential refusal
+//! is reported as a typed error, so a caller can tell "pair me" from "your
+//! access is gone".
+//!
 //! `skeleton` holds the test-support service the walking-skeleton test and
 //! example drive, and the start paths for it. The daemon effort replaces it;
 //! the transport and the wrapper stay.
@@ -23,12 +30,15 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use api_contracts::auth::{self, CredentialRefusal};
 use api_contracts::connect::metis::v1::DaemonServiceClient;
 use api_contracts::identity;
-use api_contracts::proto::metis::v1::EchoRequest;
+use api_contracts::proto::metis::v1::{EchoRequest, PairRequest};
 use api_contracts::transport;
 use connectrpc::ConnectError;
 use connectrpc::client::{ClientConfig, SharedHttp2Connection};
+
+use crate::credential::Backend;
 
 /// The environment variable that points the local client at a non-default
 /// endpoint. The daemon effort binds the same variable.
@@ -161,6 +171,9 @@ impl Surface {
 /// private, so the transport stays swappable without moving a caller.
 pub struct Client {
     inner: DaemonServiceClient<SharedHttp2Connection>,
+    /// The surface this client declares. The credential it carries belongs to
+    /// this surface, so pairing and the stored credential agree on it.
+    surface: Surface,
 }
 
 impl Client {
@@ -186,15 +199,12 @@ impl Client {
     #[cfg(unix)]
     pub async fn with_endpoint(endpoint: impl Into<PathBuf>) -> Result<Self, ClientError> {
         let transport = transport::uds_transport(endpoint).shared(64);
-        Ok(Self {
-            inner: DaemonServiceClient::new(
-                transport,
-                declare(
-                    ClientConfig::new(transport::local_authority()),
-                    Surface::Unspecified,
-                ),
-            ),
-        })
+        let surface = Surface::Unspecified;
+        Self::assembled(
+            transport,
+            ClientConfig::new(transport::local_authority()),
+            surface,
+        )
     }
 
     /// Connect over the remote transport to an explicit TCP address.
@@ -209,29 +219,90 @@ impl Client {
     /// Returns a [`ClientError`] when the remote transport cannot be built.
     pub async fn with_remote_addr(addr: SocketAddr) -> Result<Self, ClientError> {
         let transport = transport::tcp_transport(addr).shared(64);
+        let surface = Surface::Unspecified;
+        Self::assembled(
+            transport,
+            ClientConfig::new(transport::remote_authority(addr)),
+            surface,
+        )
+    }
+
+    /// Build a client around a transport, declaring `surface` and carrying
+    /// whatever credential that surface has stored.
+    fn assembled(
+        transport: SharedHttp2Connection,
+        base: ClientConfig,
+        surface: Surface,
+    ) -> Result<Self, ClientError> {
+        let config = configured(base, surface)?;
         Ok(Self {
-            inner: DaemonServiceClient::new(
-                transport,
-                declare(
-                    ClientConfig::new(transport::remote_authority(addr)),
-                    Surface::Unspecified,
-                ),
-            ),
+            inner: DaemonServiceClient::new(transport, config),
+            surface,
         })
     }
 
-    /// Declare which surface this client speaks for.
+    /// Declare which surface this client speaks for, and carry that surface's
+    /// stored credential.
     ///
-    /// The surface is request metadata the daemon records; it authenticates
-    /// nothing. The declaration is rebuilt rather than appended, so the
-    /// surface header is replaced instead of duplicated: the generated client
-    /// exposes its configuration as a mutable reference, and `connectrpc`
-    /// 0.9.1 offers no mutable default-header accessor.
+    /// The surface is request metadata the daemon records, and it is also the
+    /// name the credential is filed under, so this is where a client that has
+    /// paired before picks its token up. The declaration is rebuilt rather than
+    /// appended, so the surface header is replaced instead of duplicated: the
+    /// generated client exposes its configuration as a mutable reference, and
+    /// `connectrpc` 0.9.1 offers no mutable default-header accessor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Credential`] when the credential store cannot be
+    /// read, which includes the platform keychain refusing to answer.
+    pub fn with_surface(self, surface: Surface) -> Result<Self, ClientError> {
+        let base = self.inner.config().clone();
+        let config = configured(base, surface)?;
+        let mut self_ = self;
+        *self_.inner.config_mut() = config;
+        self_.surface = surface;
+        Ok(self_)
+    }
+
+    /// The surface this client declares.
     #[must_use]
-    pub fn with_surface(mut self, surface: Surface) -> Self {
-        let authority = self.inner.config().base_uri().clone();
-        *self.inner.config_mut() = declare(ClientConfig::new(authority), surface);
-        self
+    pub fn surface(&self) -> Surface {
+        self.surface
+    }
+
+    /// Pair this surface: present `preshared_key`, keep the token the daemon
+    /// answers with, and report where it was kept.
+    ///
+    /// The token is stored for the declared surface and attached to this client
+    /// as well, so the calls that follow need no credential named at the call
+    /// site. The pairing call itself carries no credential: it is the call that
+    /// mints one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Credential`] when the token cannot be kept,
+    /// [`ClientError::ProtocolVersion`] when the daemon refuses this client's
+    /// declared version, and [`ClientError::Call`] with the daemon's own
+    /// refusal (a wrong preshared key, or a surface that is already paired)
+    /// otherwise.
+    pub async fn pair(&mut self, preshared_key: &str) -> Result<Backend, ClientError> {
+        let request = PairRequest {
+            preshared_key: preshared_key.to_owned(),
+            ..Default::default()
+        };
+        let response = self.inner.pair(request).await.map_err(refusal)?;
+        let token = response.into_owned().token;
+        let backend =
+            credential::store(self.surface.as_str(), &token).map_err(ClientError::Credential)?;
+        self.attach(&token);
+        Ok(backend)
+    }
+
+    /// Replace this client's configuration with the declaration plus `token`,
+    /// so every later call carries it.
+    fn attach(&mut self, token: &str) {
+        let base = self.inner.config().clone();
+        *self.inner.config_mut() = with_credential(declare(base, self.surface), Some(token));
     }
 
     /// Perform the echo RPC and return the daemon's echoed message.
@@ -249,21 +320,96 @@ impl Client {
         };
         match self.inner.echo(request).await {
             Ok(response) => Ok(response.into_owned().message),
-            Err(err) => Err(version_refusal(&err).unwrap_or(ClientError::Call(err))),
+            Err(err) => Err(refusal(err)),
         }
     }
 }
 
-/// The configuration every constructor builds: the given configuration plus
-/// the identity declaration each call carries as request metadata.
-fn declare(config: ClientConfig, surface: Surface) -> ClientConfig {
-    config
+/// The configuration a client with a declared surface carries: the declaration
+/// every call makes, plus the credential stored for that surface when there is
+/// one.
+fn configured(base: ClientConfig, surface: Surface) -> Result<ClientConfig, ClientError> {
+    let stored = credential::load(surface.as_str()).map_err(ClientError::Credential)?;
+    Ok(with_credential(
+        declare(base, surface),
+        stored.as_ref().map(|stored| stored.token()),
+    ))
+}
+
+/// The configuration holding the identity declaration each call carries as
+/// request metadata, on the base configuration's authority.
+///
+/// The configuration the wrapper builds holds the authority and the
+/// declaration alone, so rebuilding it from the base loses nothing.
+fn declare(base: ClientConfig, surface: Surface) -> ClientConfig {
+    ClientConfig::new(base.base_uri().clone())
         .with_default_header(
             identity::PROTOCOL_VERSION_HEADER,
             identity::PROTOCOL_VERSION.to_string(),
         )
         .with_default_header(identity::PROTOCOL_SURFACE_HEADER, surface.as_str())
         .with_default_header(identity::PROTOCOL_CLIENT_VERSION_HEADER, CLIENT_VERSION)
+}
+
+/// Add the credential as a default header, when there is one.
+///
+/// The credential travels as metadata on every call, including the event
+/// stream, and never in a URL: the URL is built from the authority and the
+/// method's procedure path alone.
+fn with_credential(config: ClientConfig, token: Option<&str>) -> ClientConfig {
+    match token {
+        Some(token) => config.with_default_header(auth::AUTHORIZATION_HEADER, auth::bearer(token)),
+        None => config,
+    }
+}
+
+/// The typed error one failed call earns.
+///
+/// A refusal the daemon labelled is reported as the typed error it is, and
+/// anything else stays the transport error. Both refusals are read from
+/// response headers, never from message text.
+fn refusal(err: ConnectError) -> ClientError {
+    if let Some(refusal) = version_refusal(&err) {
+        return refusal;
+    }
+    if let Some(refusal) = credential_refusal(&err) {
+        return refusal;
+    }
+    ClientError::Call(err)
+}
+
+/// The typed error for a credential refusal.
+///
+/// `None` means the failure is not a credential refusal, and the caller keeps
+/// the transport error.
+fn credential_refusal(err: &ConnectError) -> Option<ClientError> {
+    let header = err.response_headers().get(auth::AUTH_ERROR_HEADER)?;
+    let refusal = CredentialRefusal::parse(header.to_str().ok()?)?;
+    Some(match refusal {
+        CredentialRefusal::Missing => ClientError::CredentialMissing,
+        CredentialRefusal::Invalid => ClientError::CredentialRejected {
+            cause: CredentialCause::Invalid,
+        },
+        CredentialRefusal::Revoked => ClientError::CredentialRejected {
+            cause: CredentialCause::Revoked,
+        },
+        // The vocabulary is non-exhaustive: a refusal this build does not know
+        // is left as the transport error rather than guessed at.
+        _ => return None,
+    })
+}
+
+/// Why the daemon refused a presented credential.
+///
+/// The distinction is the one a caller acts on: an invalid credential means the
+/// wrong one is being presented, and a revoked one means the surface has no
+/// access left and has to pair again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialCause {
+    /// The surface has a token, and this is not it.
+    Invalid,
+    /// The surface has no token: it was never paired, or its token was revoked.
+    Revoked,
 }
 
 /// The typed error for a refusal that lists supported protocol versions.
@@ -285,10 +431,10 @@ fn version_refusal(err: &ConnectError) -> Option<ClientError> {
     })
 }
 
-/// The wrapper's typed error over the transport and protocol failures.
+/// The wrapper's typed error over the transport, protocol, and credential
+/// failures.
 ///
-/// The credential-specific variants arrive with the authentication ticket, so
-/// the enum is non-exhaustive from outside the crate.
+/// The enum is non-exhaustive from outside the crate.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ClientError {
@@ -297,6 +443,16 @@ pub enum ClientError {
     Call(ConnectError),
     /// The local endpoint could not be resolved.
     Endpoint(EndpointError),
+    /// The daemon needs a credential this client does not have, so the surface
+    /// has to pair.
+    CredentialMissing,
+    /// The daemon refused the credential this client presented.
+    CredentialRejected {
+        /// Why it was refused.
+        cause: CredentialCause,
+    },
+    /// The credential store could not be read or written.
+    Credential(credential::CredentialError),
     /// The daemon refused the protocol version this client declared, and said
     /// which versions it supports.
     ProtocolVersion {
@@ -310,8 +466,22 @@ pub enum ClientError {
 impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Call(err) => write!(f, "echo call failed: {err}"),
+            Self::Call(err) => write!(f, "the call failed: {err}"),
             Self::Endpoint(err) => write!(f, "the local endpoint could not be resolved: {err}"),
+            Self::CredentialMissing => write!(
+                f,
+                "the daemon needs a credential for this surface; pair it first"
+            ),
+            Self::CredentialRejected { cause } => match cause {
+                CredentialCause::Invalid => {
+                    write!(f, "the daemon refused this surface's credential as invalid")
+                }
+                CredentialCause::Revoked => write!(
+                    f,
+                    "the daemon has no token for this surface: it was never paired, or it was revoked"
+                ),
+            },
+            Self::Credential(err) => write!(f, "the credential could not be kept: {err}"),
             Self::ProtocolVersion { found, supported } => {
                 let supported = supported
                     .iter()
@@ -332,7 +502,9 @@ impl std::error::Error for ClientError {
         match self {
             Self::Call(err) => Some(err),
             Self::Endpoint(err) => Some(err),
-            Self::ProtocolVersion { .. } => None,
+            Self::Credential(err) => Some(err),
+            Self::ProtocolVersion { .. } | Self::CredentialMissing => None,
+            Self::CredentialRejected { .. } => None,
         }
     }
 }
@@ -346,6 +518,12 @@ impl From<ConnectError> for ClientError {
 impl From<EndpointError> for ClientError {
     fn from(err: EndpointError) -> Self {
         Self::Endpoint(err)
+    }
+}
+
+impl From<credential::CredentialError> for ClientError {
+    fn from(err: credential::CredentialError) -> Self {
+        Self::Credential(err)
     }
 }
 

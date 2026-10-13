@@ -17,12 +17,14 @@
 //! `identity` is the declaration a client carries as request metadata on every
 //! call and the version gate the daemon applies to it.
 //!
-//! `auth` is the credential's wire vocabulary, and `keychain` is the platform's
-//! keychain, reached through its command line tool.
+//! `auth` is the credential's wire vocabulary, `keychain` is the platform's
+//! keychain, reached through its command line tool, and `time` is the stamp
+//! format the contract's `received_at` field asks for.
 
 pub mod auth;
 pub mod connect;
 pub mod identity;
 pub mod keychain;
 pub mod proto;
+pub mod time;
 pub mod transport;
