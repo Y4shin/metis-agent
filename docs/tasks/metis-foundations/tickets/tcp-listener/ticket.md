@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Remote TCP listener, off by default
 status: stable
-workflow_state: ready
-blocked_by: [local-transport-rpc-skeleton]
+workflow_state: done
+blocked_by:
+- local-transport-rpc-skeleton
 size: s
 ---
 
