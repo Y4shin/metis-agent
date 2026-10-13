@@ -5,6 +5,11 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Plugin authoring trait and adapters (plugin-authoring-trait)
+
+Plugin authors now write ordinary async Rust: `plugin-contract` gained the feature-gated `authoring` module with the `Plugin` trait, an awaitable cancellation token on the per-request context, the capability declaration, a `const fn` function table, a host adapter, and a minimal executor, while the runtime still depends on the primitives and payload envelope alone. The adapter always completes through the host callback (the ABI keeps its inline path for direct implementers), the trait module names no ABI type, lifecycle hooks and plugin-originated events have routes, and the fixture was rewritten through the trait with the same capability names and single exported symbol.
+
+
 ## 2026-10-13, Local transport and the echo RPC skeleton (local-transport-rpc-skeleton)
 
 Made the first real path between two processes: one handwritten transport module in `api-contracts` that serves any Connect service over a Unix domain socket (and over any async bidirectional stream), plus a UI-independent `client` wrapper that calls the echo RPC without the caller naming a transport, and a runnable example proving it end to end. The endpoint is a platform default with a `METIS_ENDPOINT` override, and the socket tests clean up after themselves. Nothing in the generated trees changed.

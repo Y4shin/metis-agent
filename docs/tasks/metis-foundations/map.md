@@ -204,6 +204,16 @@ streaming assumptions before anything is built on top.
   loop clones an `Arc` per accepted stream while a direct caller can still pass a
   bare router. The endpoint is a platform default with a `METIS_ENDPOINT`
   override, resolved through one function both the wrapper and the example call.
+- The plugin authoring surface is real and feature-gated: `plugin-contract`
+  exports the `Plugin` trait, `Call` with an awaitable cancellation token, the
+  descriptor declaration, `const fn table::<P>()`, a host adapter, and a minimal
+  executor behind the `authoring` feature, so `plugin-runtime` still depends on
+  the primitives and the envelope alone. The adapter always returns `Pending`
+  while the ABI keeps its inline path for direct implementers, the trait module
+  names no ABI type, `shutdown` releases the instance so a later
+  `destroy_instance` is `NotFound`, and the fixture is rewritten through the
+  trait with the same four capability names and the same single exported
+  symbol.
 - The contract gates read one configuration at the repository root, and CI
   authenticates the plugin-resolving step with `BUF_TOKEN` from
   `secrets.BUF_TOKEN`, unsetting it when the secret is empty. Measured on buf
@@ -249,6 +259,23 @@ streaming assumptions before anything is built on top.
   daemon effort would restate the literal `METIS_ENDPOINT` unless the constant is
   exported. Related: `serve_uds` has no shutdown path that unlinks its socket, so
   a stopped listener leaves the socket file behind.
+- The authoring trait's capability vocabulary is fixed at four role-named arms
+  (`answer`, `deferred`, `cancellable`, `fault`) with plugin-chosen capability
+  names, so a plugin can express at most four capabilities, one per arm, and a
+  fifth needs a trait change rather than a plugin choice. `metis-plugin-sdk`
+  re-exports this surface, so the shape should be confirmed before that effort
+  pins author-facing API; the alternatives are a macro over a per-capability
+  trait, which the authoring spike measured as unjustified at this size, or a
+  runtime dispatch method on the trait.
+- The ABI's inline `invoke` result has no in-tree exerciser once the fixture goes
+  through the trait, and the authoring module publishes harness-shaped helpers
+  (`HostAdapter`'s observation and plumbing methods) that a dependent effort must
+  decide whether to re-export or hide.
+- The feature-off path is not compiled by the workspace build: `cargo test`
+  enables `authoring` because the fixture turns it on, so only
+  `cargo test -p plugin-contract` alone (or a
+  `cargo check -p plugin-contract --no-default-features` CI step, not added)
+  compiles the crate without the feature.
 
 ## Out of scope
 
