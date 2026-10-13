@@ -36,6 +36,7 @@ agent-harness = { path = "crates/agent-harness" }
 workflow = { path = "crates/workflow" }
 plugin-contract = { path = "crates/plugin-contract" }
 plugin-runtime = { path = "crates/plugin-runtime" }
+plugin-fixture = { path = "crates/plugin-fixture" }
 api-contracts = { path = "crates/api-contracts" }
 client = { path = "crates/client" }
 
