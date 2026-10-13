@@ -23,11 +23,13 @@ use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
-use connectrpc::ConnectError;
+use connectrpc::{ConnectError, ErrorCode};
+use futures_util::StreamExt as _;
 use futures_util::stream::{self, Stream};
 use http::{HeaderMap, HeaderValue};
 use tokio::sync::broadcast;
 
+use crate::cancel::InFlight;
 use crate::proto::metis::v1::{self, EventKind};
 
 /// Why a cursor cannot be served.
@@ -136,6 +138,126 @@ pub fn cursor_refusal_headers(error: &CursorError) -> HeaderMap {
 }
 
 impl std::error::Error for CursorError {}
+
+/// Why a stream ended in the middle rather than carrying what was published.
+///
+/// A stream opens before any of this can happen, so a refusal here is not the
+/// answer to the call that opened it: it is the stream's own end, and its
+/// meaning crosses the wire as
+/// [`STREAM_ERROR_HEADER`] in the stream's trailing metadata rather than as an
+/// HTTP status on a response that was already sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamError {
+    /// The caller fell behind: it did not read the stream fast enough, and the
+    /// daemon's bounded window dropped events before they could be carried.
+    SlowConsumer {
+        /// How many events the window dropped before the caller could read
+        /// them. A gap is never silent: the count is named here and in the
+        /// message the caller is answered with.
+        skipped: u64,
+    },
+    /// The request that owned this stream was cancelled: a `Cancel` call named
+    /// the identifier the stream registered under.
+    Cancelled,
+}
+
+impl fmt::Display for StreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SlowConsumer { skipped } => write!(
+                f,
+                "the caller fell behind the stream and {skipped} events were dropped before they could be carried; open a fresh stream to resync"
+            ),
+            Self::Cancelled => f.write_str(
+                "the request that owned this stream was cancelled, so the stream stopped",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StreamError {}
+
+/// The trailer a stream refusal carries.
+///
+/// The meaning crosses the wire as this header and never as message text, so a
+/// client maps it to a typed error instead of parsing prose. A stream refusal
+/// happens after the response was established, so the header travels in the
+/// trailing metadata of a Connect stream, which is the only place a mid-stream
+/// failure has to put it.
+pub const STREAM_ERROR_HEADER: &str = "metis-stream-error";
+
+/// How a stream was dropped, as it crosses the wire.
+///
+/// The enum is non-exhaustive: a later way to end a stream adds itself without
+/// breaking a caller that matches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StreamRefusal {
+    /// The caller did not read the stream fast enough.
+    SlowConsumer,
+    /// The request that owned the stream was cancelled.
+    Cancelled,
+}
+
+impl StreamRefusal {
+    /// The header value this refusal crosses the wire as.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SlowConsumer => "slow-consumer",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Read a refusal from the header value it crossed the wire as.
+    ///
+    /// `None` means the value is not a refusal this build knows, which leaves
+    /// the caller with the transport error rather than a guess.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "slow-consumer" => Some(Self::SlowConsumer),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for StreamRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The trailer a stream refusal carries.
+#[must_use]
+pub fn stream_refusal_headers(error: &StreamError) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    match error {
+        StreamError::SlowConsumer { .. } => headers.insert(
+            STREAM_ERROR_HEADER,
+            HeaderValue::from_static(StreamRefusal::SlowConsumer.as_str()),
+        ),
+        StreamError::Cancelled => headers.insert(
+            STREAM_ERROR_HEADER,
+            HeaderValue::from_static(StreamRefusal::Cancelled.as_str()),
+        ),
+    };
+    headers
+}
+
+/// Refuse a stream that cannot continue, in the shape every serving path uses.
+///
+/// A stream refusal happens after the response was established, so the meaning
+/// travels in the trailing metadata, and the status code names the reason for a
+/// caller that reads no header.
+fn stream_refusal(error: &StreamError) -> ConnectError {
+    let code = match error {
+        StreamError::SlowConsumer { .. } => ErrorCode::ResourceExhausted,
+        StreamError::Cancelled => ErrorCode::Canceled,
+    };
+    ConnectError::new(code, error.to_string()).with_trailers(stream_refusal_headers(error))
+}
 
 /// One event: the Rust mirror of the contract's `Event` message.
 ///
@@ -438,10 +560,15 @@ impl Ring {
             heartbeat: tokio::time::interval_at(tokio::time::Instant::now() + heartbeat, heartbeat),
             floor,
             last: floor,
+            done: false,
             ring: Arc::downgrade(&self.inner),
         };
         Ok(stream::unfold(state, |mut state| async move {
             loop {
+                if state.done {
+                    // The stream already ended with its terminal refusal.
+                    return None;
+                }
                 if let Some((event, kind)) = state.pending.pop_front() {
                     state.last = state.last.max(event.id);
                     // The kind describes the message, not the event: a message
@@ -457,7 +584,8 @@ impl Ring {
                 let next = tokio::select! {
                     biased;
                     received = state.subscription.recv() => match received {
-                        Some(event) => Next::Event(event),
+                        Some(Live::Event(event)) => Next::Event(event),
+                        Some(Live::Lagged { skipped }) => Next::Lagged { skipped },
                         None => Next::Ended,
                     },
                     _ = state.heartbeat.tick() => Next::Heartbeat,
@@ -466,6 +594,17 @@ impl Ring {
                     // The ring is gone: the daemon is going away too, so the
                     // stream ends rather than hanging on a promise nobody keeps.
                     Next::Ended => return None,
+                    // The caller fell behind the window. A gap is not a state a
+                    // caller can work from, so the stream ends with the typed
+                    // refusal that names what it lost; the caller's answer is a
+                    // fresh stream.
+                    Next::Lagged { skipped } => {
+                        state.done = true;
+                        return Some((
+                            Err(stream_refusal(&StreamError::SlowConsumer { skipped })),
+                            state,
+                        ));
+                    }
                     Next::Heartbeat => {
                         let id = state.latest_id();
                         state.last = state.last.max(id);
@@ -510,6 +649,12 @@ enum Next {
     Event(Event),
     /// The stream was idle for the heartbeat interval.
     Heartbeat,
+    /// The subscriber fell behind the window, which dropped this many events
+    /// before they could be carried.
+    Lagged {
+        /// How many events were dropped before they could be carried.
+        skipped: u64,
+    },
     /// The ring is gone, so nothing more will be published.
     Ended,
 }
@@ -530,6 +675,9 @@ struct StreamState {
     floor: u64,
     /// The highest identifier carried so far.
     last: u64,
+    /// Whether the stream has already ended with its terminal refusal, so the
+    /// poll after that one ends it rather than carrying anything else.
+    done: bool,
     /// The ring, weakly: the serving stream must not keep the ring alive, or a
     /// dropped ring would never end the streams it opened.
     ring: Weak<RingInner>,
@@ -554,39 +702,138 @@ impl RingInner {
     }
 }
 
+/// What one live receive learned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Live {
+    /// The next published event.
+    Event(Event),
+    /// The subscriber fell behind the ring's window, which dropped `skipped`
+    /// events before they could be carried. The receiver stays subscribed: it
+    /// is the caller that must decide whether to resync.
+    Lagged {
+        /// How many events were dropped before they could be carried.
+        skipped: u64,
+    },
+}
+
 /// A live subscription to a ring: the events published after it was taken.
 ///
-/// A subscriber that fell behind the ring's capacity skips what it missed and
-/// continues with the oldest event still held. That is the channel's own
-/// behaviour rather than a policy this ring adds, and the drop policy for a slow
-/// consumer belongs to `cancellation-and-slow-consumers`.
+/// A subscriber that fell behind the ring's capacity is told what the window
+/// lost rather than silently carried forward: [`Subscription::recv`] reports
+/// the lag, and the serving stream turns the first one into its terminal
+/// refusal, because a gap in a stream is not a state a caller can work from.
 pub struct Subscription {
     receiver: broadcast::Receiver<Event>,
 }
 
 impl Subscription {
-    /// The next published event, or `None` when the ring is gone.
-    pub async fn recv(&mut self) -> Option<Event> {
-        loop {
-            match self.receiver.recv().await {
-                Ok(event) => return Some(event),
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return None,
-            }
+    /// The next live delivery, or `None` when the ring is gone.
+    ///
+    /// A lag is reported rather than hidden: the subscriber stays subscribed
+    /// and the count of what the window dropped is in the value, so the caller
+    /// decides whether to carry on across the gap or to resync.
+    pub async fn recv(&mut self) -> Option<Live> {
+        match self.receiver.recv().await {
+            Ok(event) => Some(Live::Event(event)),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => Some(Live::Lagged { skipped }),
+            Err(broadcast::error::RecvError::Closed) => None,
         }
     }
+}
+
+/// Gate a serving stream on one request's cancellation.
+///
+/// The stream carries what `inner` carries until the request's work is
+/// cancelled, and then ends with the typed cancelled refusal. The guard is held
+/// for as long as the stream runs, so the work is in flight exactly as long as
+/// the stream that serves it, and it is dropped, together with the registry
+/// entry it owns, the moment the stream ends for any reason.
+///
+/// Both the daemon's own service and the client's in-process service gate their
+/// streams here, so a cancellation ends a stream the same way whichever one is
+/// served.
+pub fn cancellable<S>(
+    inner: S,
+    guard: Option<InFlight>,
+) -> impl Stream<Item = Result<v1::Event, ConnectError>> + Send
+where
+    S: Stream<Item = Result<v1::Event, ConnectError>> + Send + 'static,
+{
+    // Boxed so the gate can poll the inner stream from the state it owns
+    // without bounding it to `Unpin`; the ring's own stream is an opaque type
+    // whose pinning a caller cannot name.
+    let state = Serving {
+        inner: Box::pin(inner),
+        guard,
+        done: false,
+    };
+    stream::unfold(state, |mut state| async move {
+        if state.done {
+            // The stream already ended with its terminal refusal.
+            return None;
+        }
+        let step = match state.guard.as_ref() {
+            // No identifier was declared, so nothing can cancel this stream.
+            None => Step::Item(state.inner.next().await),
+            Some(guard) => tokio::select! {
+                // The inner stream is polled first, so a message the ring
+                // already produced is carried before a cancellation that
+                // arrived at the same moment ends the stream.
+                biased;
+                item = state.inner.next() => Step::Item(item),
+                () = guard.cancelled() => Step::Cancelled,
+            },
+        };
+        match step {
+            Step::Item(Some(item)) => Some((item, state)),
+            Step::Item(None) => None,
+            Step::Cancelled => {
+                state.done = true;
+                Some((Err(stream_refusal(&StreamError::Cancelled)), state))
+            }
+        }
+    })
+}
+
+/// The gate's state: the stream it carries, the guard that keeps the request in
+/// flight, and whether the terminal refusal has already been carried.
+struct Serving<S> {
+    inner: std::pin::Pin<Box<S>>,
+    guard: Option<InFlight>,
+    done: bool,
+}
+
+/// What one poll of the gate learned.
+enum Step {
+    /// The inner stream produced an item, or ended.
+    Item(Option<Result<v1::Event, ConnectError>>),
+    /// The request was cancelled.
+    Cancelled,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CURSOR_ERROR_HEADER, CursorError, CursorRefusal, Event, Ring, cursor_refusal_headers,
+        CURSOR_ERROR_HEADER, CursorError, CursorRefusal, Event, Live, Ring, STREAM_ERROR_HEADER,
+        StreamError, StreamRefusal, Subscription, cancellable, cursor_refusal_headers,
+        stream_refusal_headers,
     };
+    use crate::cancel::{CancelOutcome, Registry};
     use crate::proto::metis::v1::EventKind;
-    use connectrpc::ConnectError;
+    use crate::request::RequestId;
+    use connectrpc::{ConnectError, ErrorCode};
     use futures_util::StreamExt as _;
     use http::HeaderValue;
     use std::time::Duration;
+
+    /// The next event a subscription delivers. The tests that expect a lag read
+    /// the variant themselves.
+    async fn next_event(live: &mut Subscription) -> Event {
+        match live.recv().await.expect("the subscription is live") {
+            Live::Event(event) => event,
+            Live::Lagged { skipped } => panic!("an unexpected lag of {skipped}"),
+        }
+    }
 
     /// Every event published carries the next daemon-wide identifier, whatever
     /// channel it belongs to, and the first one is `1`.
@@ -722,11 +969,223 @@ mod tests {
         assert_eq!(ring.publish("daemon", EventKind::Event, "1"), 1);
         assert_eq!(ring.publish("session:7", EventKind::Event, "2"), 2);
 
-        let first = live.recv().await.expect("the subscription is live");
+        let first = next_event(&mut live).await;
         assert_eq!(first.id, 1);
         assert_eq!(first.channel, "daemon");
-        let second = live.recv().await.expect("the subscription is live");
+        let second = next_event(&mut live).await;
         assert_eq!(second.id, 2);
+    }
+
+    /// A subscriber that fell behind is told what the window dropped instead of
+    /// being carried forward across a gap nobody named.
+    #[tokio::test]
+    async fn a_subscription_reports_what_a_lag_skipped() {
+        let ring = Ring::new(2);
+        let mut live = ring.subscribe();
+
+        // The channel's buffer is the ring's window, so three sends with
+        // nothing read overwrite the oldest one.
+        ring.publish("daemon", EventKind::Event, "1");
+        ring.publish("daemon", EventKind::Event, "2");
+        ring.publish("daemon", EventKind::Event, "3");
+
+        match live.recv().await.expect("the subscription is live") {
+            Live::Lagged { skipped } => {
+                assert_eq!(skipped, 1, "the event the window overwrote")
+            }
+            other => panic!("expected a reported lag, got {other:?}"),
+        }
+    }
+
+    /// The stream refusal crosses the wire as one trailer value, and a value
+    /// this build does not know parses to nothing rather than to a guess.
+    #[test]
+    fn the_stream_refusal_round_trips_as_a_trailer() {
+        let headers = stream_refusal_headers(&StreamError::SlowConsumer { skipped: 3 });
+        assert_eq!(
+            headers.get(STREAM_ERROR_HEADER),
+            Some(&HeaderValue::from_static("slow-consumer")),
+            "the meaning crosses the wire as the trailer, not as message text"
+        );
+        let headers = stream_refusal_headers(&StreamError::Cancelled);
+        assert_eq!(
+            headers.get(STREAM_ERROR_HEADER),
+            Some(&HeaderValue::from_static("cancelled"))
+        );
+
+        assert_eq!(StreamRefusal::SlowConsumer.as_str(), "slow-consumer");
+        assert_eq!(StreamRefusal::Cancelled.as_str(), "cancelled");
+        assert_eq!(StreamRefusal::Cancelled.to_string(), "cancelled");
+        assert_eq!(
+            StreamRefusal::parse("slow-consumer"),
+            Some(StreamRefusal::SlowConsumer)
+        );
+        assert_eq!(
+            StreamRefusal::parse(" cancelled "),
+            Some(StreamRefusal::Cancelled)
+        );
+        assert_eq!(
+            StreamRefusal::parse("something-else"),
+            None,
+            "a refusal this build does not know is left as the transport error"
+        );
+        assert!(
+            StreamError::SlowConsumer { skipped: 3 }
+                .to_string()
+                .contains("3 events were dropped"),
+            "the message names what was lost"
+        );
+    }
+
+    /// A serving stream that finds its subscriber past the window ends with the
+    /// typed slow-consumer refusal rather than carrying a gap: the count is in
+    /// the message, the meaning is in the trailer, and nothing follows it.
+    #[tokio::test]
+    async fn a_stream_ends_with_the_slow_consumer_refusal_when_it_fell_behind()
+    -> Result<(), CursorError> {
+        let ring = Ring::new(2);
+        let mut stream = Box::pin(ring.stream(&["daemon"], 0, Duration::from_secs(60))?);
+
+        // The stream opens with the empty snapshot, and nothing is read while
+        // the ring publishes, so the subscriber falls behind the window.
+        let opening = stream.next().await.expect("a stream").expect("a message");
+        assert_eq!(opening.kind, EventKind::Snapshot);
+        ring.publish("daemon", EventKind::Event, "1");
+        ring.publish("daemon", EventKind::Event, "2");
+        ring.publish("daemon", EventKind::Event, "3");
+
+        let refusal = stream
+            .next()
+            .await
+            .expect("the stream carries the refusal")
+            .expect_err("a subscriber past the window is refused");
+        assert_eq!(
+            refusal.code,
+            ErrorCode::ResourceExhausted,
+            "the stream ran out of room for this caller"
+        );
+        assert_eq!(
+            refusal.trailers().get(STREAM_ERROR_HEADER),
+            Some(&HeaderValue::from_static("slow-consumer")),
+            "a mid-stream refusal travels in the trailing metadata"
+        );
+        let message = refusal.message.clone().unwrap_or_default();
+        assert!(
+            message.contains("1 events were dropped"),
+            "the message names the loss rather than skipping it in silence: {message}"
+        );
+        assert!(
+            stream.next().await.is_none(),
+            "nothing follows the refusal: the gap is never presented as state"
+        );
+        Ok(())
+    }
+
+    /// A reader that keeps up never sees the refusal, under the same load that
+    /// drops a stalled one: the bound is the window, not the traffic.
+    #[tokio::test]
+    async fn a_stream_that_keeps_up_is_never_refused() -> Result<(), CursorError> {
+        let ring = Ring::new(2);
+        let mut stream = Box::pin(ring.stream(&["daemon"], 0, Duration::from_secs(60))?);
+        let opening = stream.next().await.expect("a stream").expect("a message");
+        assert_eq!(opening.kind, EventKind::Snapshot);
+
+        // Published and read one at a time, past the capacity of the window.
+        for expected in 1..=8 {
+            let id = ring.publish("daemon", EventKind::Event, "{}");
+            assert_eq!(id, expected);
+            let event = stream.next().await.expect("a stream").expect("a message");
+            assert_eq!(event.kind, EventKind::Event);
+            assert_eq!(event.id, id);
+        }
+        Ok(())
+    }
+
+    /// A registered request's stream ends with the typed cancelled refusal as
+    /// soon as the request is cancelled, carries nothing after it, and keeps
+    /// the work in flight for as long as it runs.
+    #[tokio::test]
+    async fn a_cancelled_request_ends_its_stream() -> Result<(), CursorError> {
+        let ring = Ring::new(4);
+        let registry = Registry::new();
+        let id = RequestId::parse("cli-7").expect("a printable identifier");
+        let guard = registry.register("cli", id.clone());
+
+        let inner = ring.stream(&["daemon"], 0, Duration::from_secs(60))?;
+        let mut stream = Box::pin(cancellable(inner, Some(guard)));
+        assert_eq!(
+            registry.in_flight(),
+            1,
+            "the guard the stream carries keeps the work in flight"
+        );
+
+        let opening = stream.next().await.expect("a stream").expect("a message");
+        assert_eq!(opening.kind, EventKind::Snapshot);
+
+        assert_eq!(registry.cancel("cli", &id), CancelOutcome::Cancelled);
+        let refusal = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the cancellation ends the stream")
+            .expect("the stream carries the refusal")
+            .expect_err("a cancelled stream is refused");
+        assert_eq!(refusal.code, ErrorCode::Canceled);
+        assert_eq!(
+            refusal.trailers().get(STREAM_ERROR_HEADER),
+            Some(&HeaderValue::from_static("cancelled"))
+        );
+        assert!(
+            stream.next().await.is_none(),
+            "a stopped stream carries nothing more"
+        );
+        Ok(())
+    }
+
+    /// A stream whose request declared no identifier is not cancellable, and it
+    /// is served exactly as the ring serves it.
+    #[tokio::test]
+    async fn a_stream_with_no_registered_request_is_served_unchanged() -> Result<(), CursorError> {
+        let ring = Ring::new(4);
+        let inner = ring.stream(&["daemon"], 0, Duration::from_secs(60))?;
+        let mut stream = Box::pin(cancellable(inner, None));
+
+        let opening = stream.next().await.expect("a stream").expect("a message");
+        assert_eq!(opening.kind, EventKind::Snapshot);
+
+        let published = ring.publish("daemon", EventKind::Event, "{}");
+        let event = stream.next().await.expect("a stream").expect("a message");
+        assert_eq!(event.id, published);
+        Ok(())
+    }
+
+    /// Dropping the stream drops the guard, so the work leaves the registry
+    /// when the stream ends for any reason: a disconnect cancels nothing and
+    /// leaves nothing behind.
+    #[tokio::test]
+    async fn dropping_the_stream_leaves_the_registry() -> Result<(), CursorError> {
+        let ring = Ring::new(4);
+        let registry = Registry::new();
+        let id = RequestId::parse("cli-7").expect("a printable identifier");
+        let guard = registry.register("cli", id.clone());
+        let inner = ring.stream(&["daemon"], 0, Duration::from_secs(60))?;
+        let stream = cancellable(inner, Some(guard));
+
+        drop(stream);
+        assert_eq!(
+            registry.in_flight(),
+            0,
+            "the work is not in flight any more"
+        );
+        assert_eq!(
+            registry.cancellations(),
+            0,
+            "a client going away is not a cancellation"
+        );
+        assert_eq!(
+            registry.cancel("cli", &id),
+            CancelOutcome::AlreadyFinished,
+            "work that ended is answered as already finished"
+        );
+        Ok(())
     }
 
     /// The cursor refusal crosses the wire as one header value, and a value
