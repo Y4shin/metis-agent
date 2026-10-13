@@ -1,0 +1,62 @@
+# cbindgen configuration for the plugin ABI header (D2, D13).
+#
+# `repr(C)` Rust in `crates/plugin-contract/src/abi` is the source of truth;
+# this file governs the committed header at `include/metis_plugin_abi.h`, which
+# `scripts/regenerate-abi-header.sh` regenerates and CI checks for drift.
+language = "C"
+include_guard = "METIS_PLUGIN_ABI_H"
+pragma_once = true
+documentation = true
+documentation_style = "doxy"
+style = "both"
+# `usize` in Rust is `size_t` in C, which is what the layout assertions in
+# `src/abi/layout.rs` and `c/layout_static_asserts.c` are written in terms of.
+usize_is_size_t = true
+cpp_compat = false
+tab_width = 4
+
+# Every ABI type must be listed here. A crate whose surface is a table of
+# function pointers exports no function for cbindgen to seed its dependency
+# graph from, so without this list the header would contain only the constants
+# (measured).
+[export]
+include = [
+    "MetisStatus",
+    "MetisBuffer",
+    "MetisTablePrefix",
+    "MetisPluginTableV1",
+    "MetisHostApiV1",
+    "MetisCreateInstanceFn",
+    "MetisDestroyInstanceFn",
+    "MetisListCapabilitiesFn",
+    "MetisInvokeFn",
+    "MetisCancelFn",
+    "MetisReleaseBufferFn",
+    "MetisShutdownFn",
+    "MetisCompleteFn",
+    "MetisProgressFn",
+    "MetisEmitEventFn",
+    "MetisLogFn",
+    "MetisPluginEntryV1Fn",
+]
+
+# The payload envelope lives in `crate::payload`, deliberately outside the C ABI
+# surface, and its constants are excluded here so the generated header contains
+# exactly the contents of `crate::abi`. cbindgen emits every public constant of
+# the crate regardless of the include list above (measured), so the exclusion is
+# what keeps the C ABI surface and the cbindgen surface the same thing.
+exclude = [
+    "METIS_PAYLOAD_VERSION_MASK",
+    "METIS_PAYLOAD_CODEC_BIT",
+    "METIS_PAYLOAD_RESERVED_MASK",
+    "METIS_PAYLOAD_FORMAT_VERSION",
+    "METIS_CODEC_JSON",
+    "METIS_CODEC_MESSAGEPACK",
+]
+
+[enum]
+prefix_with_name = true
+rename_variants = "ScreamingSnakeCase"
+
+[fn]
+rename_args = "None"
