@@ -232,6 +232,21 @@ fn raw_client(path: &Path) -> DaemonServiceClient<connectrpc::client::SharedHttp
     DaemonServiceClient::new(transport, config)
 }
 
+/// Wait, bounded, for `condition` to hold.
+///
+/// The daemon notices a disconnect one round trip later, so a test that asserts
+/// what the registry holds after one gives it that round trip instead of racing
+/// it. The bound is generous and the loop fails loudly if nothing ever changes.
+async fn wait_for(what: &str, condition: impl Fn() -> bool) {
+    for _ in 0..250 {
+        if condition() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("waited for {what}")
+}
+
 /// The next message on `stream`, or a panic naming what was expected when the
 /// stream ends first.
 async fn next(stream: &mut EventStream) -> Event {
@@ -491,5 +506,92 @@ async fn a_declared_identifier_comes_back_in_the_response_metadata() {
         stream.headers().get(REQUEST_ID_HEADER),
         Some(&HeaderValue::from_static("cli-8")),
         "the stream answer carries the identifier the call declared"
+    );
+}
+
+/// A client that disconnects cancels nothing: the work it started continues,
+/// the ring keeps what it holds, and the registry's count of cancellations is
+/// untouched. The stream that went away left as finished rather than as
+/// cancelled, which is why cancelling its identifier afterwards is answered as
+/// already finished.
+#[tokio::test]
+async fn a_disconnected_client_cancels_nothing() {
+    let fixture = Fixture::new("disconnect").await;
+    let socket = fixture.socket("disconnect");
+    let service = fixture.service();
+    let ring: Ring = service.ring();
+    let registry = service.cancellations();
+    let _served = serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
+
+    let head = ring.publish("daemon", EventKind::Event, "{\"head\":true}");
+
+    let caller = fixture.client(&socket, Surface::Test).await;
+
+    // The stream the client walks away from.
+    let mut gone = caller
+        .stream_events(&["daemon"], 0)
+        .await
+        .expect("the stream is established");
+    let opening = next(&mut gone).await;
+    assert_eq!(opening.kind, EventKind::Snapshot);
+    let gone_id = gone.request_id().clone();
+
+    // The work that has to keep running, under its own identifier.
+    let mut kept = caller
+        .stream_events(&["daemon"], 0)
+        .await
+        .expect("the second stream is established");
+    let opening = next(&mut kept).await;
+    assert_eq!(opening.kind, EventKind::Snapshot);
+    let kept_id = kept.request_id().clone();
+    assert_eq!(registry.in_flight(), 2, "two streams are in flight");
+
+    // The disconnect. The daemon notices when the connection goes away, which
+    // is a round trip rather than an instant, so the registry is waited on.
+    drop(gone);
+    wait_for("the disconnected stream to leave the registry", || {
+        registry.in_flight() == 1
+    })
+    .await;
+
+    assert_eq!(
+        registry.cancellations(),
+        0,
+        "a client going away is not a cancellation"
+    );
+
+    // The work continues: the stream that is still open carries what is
+    // published now, under its own identifier first.
+    let published = ring.publish("daemon", EventKind::Event, "{\"after\":true}");
+    let event = next(&mut kept).await;
+    assert_eq!(event.kind, EventKind::Event);
+    assert_eq!(event.id, published);
+
+    assert_eq!(
+        ring.since(0, &["daemon"])
+            .iter()
+            .map(|event| event.id)
+            .collect::<Vec<_>>(),
+        vec![head, published],
+        "the disconnect left the ring exactly as it was"
+    );
+
+    // The work that is still running is still cancellable by its identifier.
+    assert_eq!(
+        caller
+            .cancel(&kept_id)
+            .await
+            .expect("the cancel reaches the daemon"),
+        CancelOutcome::Cancelled
+    );
+    assert_eq!(registry.cancellations(), 1, "the deliberate cancel counted");
+
+    // And the disconnected stream's work ended as finished, never as cancelled.
+    assert_eq!(
+        caller
+            .cancel(&gone_id)
+            .await
+            .expect("the cancel reaches the daemon"),
+        CancelOutcome::AlreadyFinished
     );
 }
