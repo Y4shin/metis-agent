@@ -3,11 +3,13 @@
 //! The wrapper hides the local transport: a caller constructs a [`Client`] and
 //! calls a method, and its API names no transport, no `Http2Connection`, and no
 //! generated stub type. A later transport changes the construction, not the
-//! caller's code.
+//! caller's code. `Client::local` and `Client::with_endpoint` reach the local
+//! socket on Unix, and `Client::with_remote_addr` reaches the optional TCP
+//! listener, which is off unless the daemon was given a bind address.
 //!
 //! `skeleton` holds the test-support service the walking-skeleton test and
-//! example drive. The daemon effort replaces it; the transport and the wrapper
-//! stay.
+//! example drive, and the start paths for it. The daemon effort replaces it;
+//! the transport and the wrapper stay.
 
 pub mod skeleton;
 

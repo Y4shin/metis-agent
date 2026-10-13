@@ -1,10 +1,12 @@
-//! The skeleton daemon: test support for the local wire path.
+//! The skeleton daemon: test support for the wire path.
 //!
 //! This is deliberately not product API. It is the minimal `DaemonService`
-//! implementation the transport test and the `echo` example drive, so the
+//! implementation the transport tests and the `echo` example drive, so the
 //! served path is proven end to end before the daemon effort replaces it with
 //! the real service. It echoes the request and stamps `received_at` with an
-//! RFC 3339 UTC time, matching the contract.
+//! RFC 3339 UTC time, matching the contract. `serve_uds` and `serve_remote` are
+//! the start paths its tests use: the first binds a Unix socket, the second
+//! binds the TCP address `METIS_TCP_ADDR` names, if any.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

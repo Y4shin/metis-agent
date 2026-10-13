@@ -1,15 +1,20 @@
-//! The local transport: one serve loop and one connector shape, shared by every
+//! The transport: one serve loop and one connector shape, shared by every
 //! front-end.
 //!
 //! `serve_stream` is the accept-loop body. It is generic over any asynchronous
 //! bidirectional stream, so a Unix socket, a named pipe, a TCP socket, or an
 //! in-memory duplex pair all reach the same Connect service without a second
-//! serve loop. `serve_uds` and `uds_transport` are the Unix front-ends: the
-//! later transport tickets add their own listener and connector against the
-//! same two shapes.
+//! serve loop. `serve_uds` and `uds_transport` are the Unix front-ends;
+//! `serve_tcp` (`serve_tcp_listener` when the caller must report the bound
+//! address) and `tcp_transport` are the TCP ones; the later transport tickets
+//! add their own listener and connector against the same shapes.
 //!
-//! This module is the only place that knows how to serve and connect a local
-//! stream. Generated code stays mounted and untouched.
+//! The remote front-end is off unless the operator names a bind address:
+//! `REMOTE_ADDR_ENV` carries an `IP:port` literal, `resolve_remote_addr` reads
+//! it, and there is no default address to fall back to.
+//!
+//! This module is the only place that knows how to serve and connect a stream.
+//! Generated code stays mounted and untouched.
 
 use std::io;
 use std::net::SocketAddr;
@@ -368,7 +373,12 @@ mod tests {
     /// must not look like an intentional one.
     #[test]
     fn a_value_that_is_not_an_ip_port_literal_is_a_typed_error() {
-        for value in ["127.0.0.1", "example.com:80", "not an address", "127.0.0.1:port"] {
+        for value in [
+            "127.0.0.1",
+            "example.com:80",
+            "not an address",
+            "127.0.0.1:port",
+        ] {
             let env = RemoteAddrEnv::set(value);
             let error = resolve_remote_addr().expect_err("a non-literal value is refused");
             let message = error.to_string();
