@@ -5,6 +5,11 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Contract gates read one configuration and authenticate to the BSR (contract-gate-hardening)
+
+Moved the buf configuration to the repository root, so `buf lint`, `buf breaking`, and generation read one `buf.yaml` and the declared policy is the one that runs; `--against-config buf.yaml` keeps both sides of the breaking comparison scoped to `contracts/proto`. CI supplies `BUF_TOKEN` from `secrets.BUF_TOKEN` to the single plugin-resolving step and unsets it when the secret is empty, and the gate configuration gained an on-demand acceptance probe at `scripts/probe-contract-gates.sh`. Measured: anonymous resolution is rate limited, an unset or empty token reaches the BSR anonymously, and a non-empty unverifiable token is refused before any request.
+
+
 ## 2026-10-13, Plugin ABI primitives proven by a fixture plugin (plugin-abi-core)
 
 Made the plugin boundary real: `crates/plugin-contract` now holds the `repr(C)` primitive ABI (versioned entry symbol, append-only function table with `size` first, host callback table with `user_data`, status space with `pending`, payload envelope), with the layout asserted in Rust and by a C translation unit compiled on every build. A committed cbindgen header with a drift check, plus a fixture `cdylib` and a 41-check harness that loads it and drives the whole table, including per-side buffer release and panic containment on both sides.
