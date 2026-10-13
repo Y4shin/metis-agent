@@ -461,6 +461,50 @@ mod tests {
         drop(env);
     }
 
+    /// A refusal that lists supported versions becomes the typed error. The
+    /// list comes from the response header, never from the message text: the
+    /// version the message mentions is not the one the error reports.
+    #[test]
+    fn a_version_refusal_is_a_typed_error() {
+        use super::{ClientError, version_refusal};
+        use api_contracts::identity::{PROTOCOL_VERSION, SUPPORTED_VERSIONS_HEADER};
+        use connectrpc::{ConnectError, ErrorCode};
+        use http::{HeaderMap, HeaderValue};
+
+        let mut headers = HeaderMap::new();
+        headers.insert(SUPPORTED_VERSIONS_HEADER, HeaderValue::from_static("1, 2"));
+        let refusal = ConnectError::new(
+            ErrorCode::InvalidArgument,
+            "protocol version 9 is not supported",
+        )
+        .with_headers(headers);
+        match version_refusal(&refusal) {
+            Some(ClientError::ProtocolVersion { found, supported }) => {
+                assert_eq!(found, PROTOCOL_VERSION, "the version this client declared");
+                assert_eq!(supported, vec![1, 2]);
+            }
+            other => panic!("expected the typed version error, got {other:?}"),
+        }
+
+        // The message names the supported versions too, for a person reading it.
+        let display = ClientError::ProtocolVersion {
+            found: PROTOCOL_VERSION,
+            supported: vec![1, 2],
+        }
+        .to_string();
+        assert!(
+            display.contains("1, 2"),
+            "the message lists them: {display}"
+        );
+
+        // A failure with no such header stays the transport error it was.
+        let other = ConnectError::new(ErrorCode::Internal, "boom");
+        assert!(
+            version_refusal(&other).is_none(),
+            "an ordinary failure is not a version refusal"
+        );
+    }
+
     /// The explicit override wins over both bases, so an operator or a test
     /// that names an endpoint is never second-guessed.
     #[test]
