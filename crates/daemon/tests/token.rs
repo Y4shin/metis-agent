@@ -96,3 +96,19 @@ fn parsing_accepts_hex_text_in_either_case_and_refuses_anything_else() {
         );
     }
 }
+
+/// The credential is never printed: a token's `Debug` form redacts its text, so
+/// an accidental `{:?}` cannot put it in a log line.
+#[test]
+fn a_token_does_not_print_itself() {
+    let token = Token::parse(KNOWN_HEX_TEXT).expect("the known text parses");
+    let printed = format!("{token:?}");
+    assert!(
+        !printed.contains(KNOWN_HEX_TEXT),
+        "the text is redacted: {printed}"
+    );
+    assert!(
+        printed.contains("redacted"),
+        "the printed form says it is redacted: {printed}"
+    );
+}

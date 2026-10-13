@@ -235,6 +235,15 @@ fn without_a_keychain_tool_the_owner_only_file_answers() {
         None
     );
 
+    // The credential is never printed: a `{:?}` on what the store answered
+    // redacts the token text.
+    let printed = format!("{stored:?}");
+    assert!(!printed.contains(TOKEN), "the token is redacted: {printed}");
+    assert!(
+        printed.contains("redacted") && printed.contains("cli.token"),
+        "the printed form says what is redacted and where it lives: {printed}"
+    );
+
     assert_eq!(
         credential::remove("cli").expect("the credential is removed"),
         Some(Backend::File(expected.clone()))

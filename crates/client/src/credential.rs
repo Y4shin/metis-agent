@@ -61,10 +61,21 @@ impl fmt::Display for Backend {
 }
 
 /// A credential the store answered with, and the backend that answered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Stored {
     token: String,
     backend: Backend,
+}
+
+/// The credential is never printed: `Debug` redacts the token, so an
+/// accidental `{:?}` cannot put it in a log line.
+impl fmt::Debug for Stored {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stored")
+            .field("token", &"<redacted>")
+            .field("backend", &self.backend)
+            .finish()
+    }
 }
 
 impl Stored {

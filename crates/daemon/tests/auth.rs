@@ -101,6 +101,7 @@ impl AuthEnv {
             daemon::state::STATE_DB_ENV,
             "METIS_SOCKET_GROUP",
             daemon::secret::PRESHARED_KEY_ENV,
+            "METIS_TEST_KEY",
         ]
         .into_iter()
         .map(|name| (name, std::env::var_os(name)))
@@ -117,8 +118,16 @@ impl AuthEnv {
             std::env::set_var(daemon::state::STATE_DB_ENV, database);
             std::env::remove_var("METIS_SOCKET_GROUP");
             std::env::remove_var(daemon::secret::PRESHARED_KEY_ENV);
+            std::env::remove_var("METIS_TEST_KEY");
         }
         this
+    }
+
+    /// Set one of the variables this guard holds. The guard keeps the lock, so
+    /// the write is as serialised as the ones above.
+    fn set(&self, name: &str, value: &str) {
+        // SAFETY: the guard holds `ENV_LOCK` for its whole lifetime.
+        unsafe { std::env::set_var(name, value) };
     }
 }
 
@@ -195,6 +204,34 @@ impl Fixture {
     async fn serve_daemon(&self, path: &Path, policy: AuthPolicy) {
         let service = service(self.store.clone(), self.secret.clone(), policy);
         serve(path, service).await;
+    }
+
+    /// Serve the daemon's own service with the key its configuration names,
+    /// resolved the way the daemon resolves it at startup.
+    async fn serve_configured_daemon(&self, path: &Path, policy: AuthPolicy) {
+        let secret =
+            daemon::secret::resolve_preshared_key().expect("the configured preshared key resolves");
+        serve(path, service(self.store.clone(), secret, policy)).await;
+    }
+
+    /// Set one of the daemon's or the client's configuration variables.
+    fn set_var(&self, name: &str, value: &str) {
+        self._env.set(name, value);
+    }
+
+    /// Every byte the daemon keeps for this database: the file and, when a
+    /// journal sits beside it, the journal too.
+    fn database_bytes(&self) -> Vec<u8> {
+        let path = self.database();
+        let mut bytes = std::fs::read(&path).expect("the database file is readable");
+        for suffix in ["-wal", "-journal"] {
+            let mut sidecar = path.as_os_str().to_owned();
+            sidecar.push(suffix);
+            if let Ok(extra) = std::fs::read(PathBuf::from(sidecar)) {
+                bytes.extend(extra);
+            }
+        }
+        bytes
     }
 
     /// Serve a recording service with `policy`, so a test can prove whether a
@@ -334,6 +371,16 @@ async fn pairing_mints_one_token_the_daemon_keeps_only_as_a_hash() {
         .expect("the credential store answers")
         .expect("the token was kept");
     let presented = landed_hash(stored.token());
+
+    // What the daemon kept is the hash: the token text it answered with is
+    // nowhere in the database, file or journal.
+    let database = fixture.database_bytes();
+    assert!(
+        !database
+            .windows(stored.token().len())
+            .any(|window| window == stored.token().as_bytes()),
+        "the database holds only the hash"
+    );
     assert_eq!(
         fixture
             .store
@@ -375,6 +422,59 @@ async fn pairing_mints_one_token_the_daemon_keeps_only_as_a_hash() {
     assert_eq!(
         fixture.store.surfaces().await.expect("the rows read").len(),
         1
+    );
+}
+
+/// Pairing is gated by the key the daemon's own configuration names: the
+/// reference is resolved the way the daemon resolves it at startup, and the
+/// resolved secret is what the pairing call is checked against.
+#[tokio::test]
+async fn the_pairing_gate_uses_the_configured_key_reference() {
+    let fixture = Fixture::new("configured-key").await;
+    let socket = fixture.socket("configured-key");
+
+    // The configuration names a secret file, which is one of the four forms,
+    // and the file is private to its owner.
+    let key_file = fixture.state.join("preshared");
+    std::fs::write(&key_file, "the-configured-key\n").expect("write the secret file");
+    std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600))
+        .expect("restrict the secret file");
+    fixture.set_var(
+        daemon::secret::PRESHARED_KEY_ENV,
+        &format!("file:{}", key_file.display()),
+    );
+    fixture
+        .serve_configured_daemon(&socket, AuthPolicy::TokenRequired)
+        .await;
+
+    let mut caller = fixture.client(&socket, Surface::Cli).await;
+    let wrong = caller
+        .pair("not-the-configured-key")
+        .await
+        .expect_err("the configured key is the only one that pairs");
+    match wrong {
+        ClientError::Call(source) => assert_eq!(source.code, ErrorCode::PermissionDenied),
+        other => panic!("expected the pairing refusal, got {other}"),
+    }
+    assert!(
+        fixture
+            .store
+            .surfaces()
+            .await
+            .expect("the rows read")
+            .is_empty()
+    );
+
+    caller
+        .pair("the-configured-key")
+        .await
+        .expect("the key the configuration resolved pairs the surface");
+    assert_eq!(
+        caller
+            .echo("paired with the configured key")
+            .await
+            .expect("the daemon serves the paired surface"),
+        "paired with the configured key"
     );
 }
 
