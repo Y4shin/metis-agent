@@ -154,6 +154,27 @@ Plugin host, documented in `crates/plugin-runtime`:
   thread. The runtime starts no runtime of its own: it hands back a `Future` and
   the test's small loop polls it.
 
+Daemon state, documented in `crates/daemon`:
+
+- `cargo test -p daemon` -- the daemon's store and the token surface.
+  `crates/daemon/tests/path.rs` covers the path rule (`METIS_STATE_DB`, then
+  `$XDG_DATA_HOME/metis/metis.db`, then `$HOME/.local/share/metis/metis.db`,
+  then the typed refusal when none of them is set);
+  `crates/daemon/tests/state.rs` opens a store on a temporary file and asserts
+  the directory at 700 and the file at 600, the committed migration applied on
+  open, the token round trip, per-surface revocation, and the typed refusal of
+  pairing a surface twice; `crates/daemon/tests/token.rs` covers minting, the
+  SHA-256 known answer and parsing. The store operations run on
+  `sqlite::memory:`; the creation and migration seams run on a temporary file.
+  There is no database server, no `DATABASE_URL`, no committed `.sqlx` offline
+  data and no `sqlx-cli` step: the store uses `sqlx`'s runtime queries and the
+  migrator embedded in the binary, so the existing `cargo test` step carries it.
+- The private-path rule the state directory and file share with the socket is
+  unit-tested in `crates/api-contracts/src/transport.rs`
+  (`cargo test -p api-contracts`): `ensure_private_dir` takes its mode, refuses a
+  directory wider than that mode without chmodding it, and `restrict_file`
+  narrows a file to the mode it is given.
+
 ## CI
 
 `.github/workflows/ci.yml` runs the Rust commands above through the devenv
