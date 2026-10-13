@@ -3,7 +3,7 @@ type: ticket
 subtype: feature
 title: Plugin ABI primitives proven by a fixture plugin
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 size: m
 ---
