@@ -195,11 +195,16 @@ streaming assumptions before anything is built on top.
   every out-of-surface public constant in its `exclude` list, because it emits
   the crate's public constants regardless of that list. `plugin-compatibility`
   and `plugin-authoring-trait` extend this layout additively.
-- The contract gates move their configuration to the repository root and take a
-  `BUF_TOKEN` in CI, tracked as `contract-gate-hardening`. `buf lint` reading
-  `contracts/buf.yaml` while `buf breaking` and generation read buf's defaults
-  from the root is a divergence that would let a declared breaking policy go
-  unlived, and anonymous BSR resolution can fail a run for a non-code reason.
+- The contract gates read one configuration at the repository root, and CI
+  authenticates the plugin-resolving step with `BUF_TOKEN` from
+  `secrets.BUF_TOKEN`, unsetting it when the secret is empty. Measured on buf
+  1.73.0: `buf lint` and `buf breaking` resolve no plugins and pass even under a
+  token buf refuses; an unset or empty token reaches the BSR anonymously and is
+  rate limited, while a non-empty unverifiable token is refused before any
+  request. The breaking gate needs `--against-config buf.yaml`, without which
+  both sides of the comparison resolve different roots and the command exits 100
+  with spurious deleted-file reports. The gate configuration is covered by the
+  on-demand probe at `scripts/probe-contract-gates.sh`.
 
 ## Fog
 
@@ -216,11 +221,12 @@ streaming assumptions before anything is built on top.
   pinning, the regeneration cost of a minor bump, and when to take one.
 - Whether the Connect JSON codec is enabled for outside clients, and what that
   means for the auth and error model.
-- Whether the contract pipeline's BSR dependency should stay online: the
+- Whether the contract pipeline's BSR dependency should stay anonymous: the
   regeneration and drift checks resolve both pinned plugins from the BSR over the
   network on every run, anonymous rate limiting can fail them for a non-code
-  reason, and no `BUF_TOKEN` is pinned. A token in CI or vendored pinned plugins
-  would remove the dependency, at the cost of a secret or a vendored binary.
+  reason, and CI now lifts that limit with a `BUF_TOKEN` when the secret exists.
+  Recording a real token in the repository secret is a human action; until it is
+  done, a pull request can still go red on rate limiting and needs a re-run.
 - How the client distinguishes a deliberate slow-consumer stream drop from a
   transport failure, so the resync decision is not guesswork.
 

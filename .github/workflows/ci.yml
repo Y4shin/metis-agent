@@ -34,17 +34,34 @@ jobs:
       - name: Test
         run: devenv shell -- cargo test
 
+      # Both contract gates run from the repository root, where the one
+      # `buf.yaml` lives, so the gate that runs and the policy that is declared
+      # cannot read different files.
       - name: Contract lint
-        working-directory: contracts
         run: devenv shell -- buf lint
 
-      # Run from the repository root: the comparison walks the whole tree on
-      # both sides, so the contract files line up with the branch's copy.
+      # `--against-config` scopes the `main` side of the comparison with the
+      # same root configuration as the working tree, so the two sides line up on
+      # `contracts/proto` instead of comparing a module with a whole tree.
       - name: Contract breaking changes
-        run: devenv shell -- buf breaking --against '.git#branch=main'
+        run: devenv shell -- buf breaking --against '.git#branch=main' --against-config buf.yaml
 
       - name: Contract regeneration check
-        run: devenv shell -- bash scripts/regenerate-contracts.sh --check
+        env:
+          # The two codegen plugins are BSR remote plugins, so this step
+          # resolves them over the network. A configured secret lifts the
+          # anonymous rate limit.
+          BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
+        run: |
+          # An absent secret arrives here as the empty string. Measured on buf
+          # 1.73.0: an empty `BUF_TOKEN` is treated like an unset one, while a
+          # non-empty token the BSR cannot verify is refused before any plugin
+          # resolves. The step does not rely on that distinction: it drops the
+          # variable when the secret carries nothing, so buf is either given a
+          # real token or no variable at all, and the gate keeps working
+          # without authentication.
+          if [ -z "${BUF_TOKEN:-}" ]; then unset BUF_TOKEN; fi
+          devenv shell -- bash scripts/regenerate-contracts.sh --check
 
       # The harness rebuilds the fixture cdylib itself before loading it, so a
       # stale library cannot be loaded even when this step follows a cached

@@ -1,0 +1,19 @@
+# Buf configuration for the Metis wire contract. Every buf command reads this
+# one file: `buf lint`, `buf breaking`, and `buf generate` all run from the
+# repository root.
+#
+# `contracts/proto` is the module root, so the package `metis.v1` lives at
+# `contracts/proto/metis/v1/`. Lint runs in STANDARD mode with no exception
+# yet: the `RPC_RESPONSE_STANDARD_NAME` exception the streaming `Event` message
+# needs is added with that message, not in advance. Breaking runs in FILE mode,
+# and `buf breaking` runs with `--against-config buf.yaml` so that both sides of
+# the comparison resolve this same module.
+version: v2
+modules:
+  - path: contracts/proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

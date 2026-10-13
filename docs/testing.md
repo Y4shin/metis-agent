@@ -24,14 +24,22 @@ Frontend, run from `apps/ui`:
 - `npm run check` -- `svelte-kit sync` plus `svelte-check`.
 - `npm run build` -- the static build through `@sveltejs/adapter-static`.
 
-Contract, documented in `contracts/README.md`:
+Contract, documented in `contracts/README.md`, with both buf commands run from
+the repository root, where the one `buf.yaml` lives:
 
 - `bash scripts/regenerate-contracts.sh` -- regenerate the committed Rust for
   the wire contract; `--check` regenerates into a scratch directory and fails on
   any difference.
-- `cd contracts && buf lint` -- contract lint.
-- `buf breaking --against '.git#branch=main'` from the repository root --
-  contract compatibility against the landing branch.
+- `buf lint` -- contract lint. The root `buf.yaml` declares the module at
+  `contracts/proto`, so this lints exactly the contract.
+- `buf breaking --against '.git#branch=main' --against-config buf.yaml` --
+  contract compatibility against the landing branch, scoped to the same module
+  on both sides.
+- `bash scripts/probe-contract-gates.sh` -- the on-demand acceptance probe for
+  the gate configuration: root configuration, deliberate-edit verdict flips for
+  lint and breaking, the `BUF_TOKEN` forms, and the drift check. It restores
+  every file it touches, and it skips the network-only halves when the anonymous
+  BSR rate limit is exhausted. It is not part of CI.
 
 Plugin ABI, documented in `crates/plugin-contract/src/abi` and
 `crates/plugin-fixture`:
