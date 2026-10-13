@@ -11,6 +11,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use api_contracts::transport::REMOTE_ADDR_ENV;
+use client::Client;
 use client::skeleton;
 
 /// Serialises the environment in this test binary: `std::env` is process wide
@@ -109,6 +110,33 @@ fn the_listener_task_releases_its_port_when_it_is_dropped() {
     drop(env);
     drop(runtime);
 
-    let probe = TcpListener::bind(addr).expect("the port is free once the listener task is dropped");
+    let probe =
+        TcpListener::bind(addr).expect("the port is free once the listener task is dropped");
     drop(probe);
+}
+
+/// The wrapper reaches the skeleton over a real loopback listener and returns
+/// the echoed message. The address comes from the listener, so the test never
+/// guesses a port, and the call traverses the same `serve_stream` the duplex
+/// and socket tests drive: a second serve loop would have to reproduce the
+/// service to answer it.
+#[tokio::test]
+async fn the_client_echoes_over_the_remote_listener() {
+    let env = RemoteAddrOverride::set("127.0.0.1:0");
+
+    let addr = skeleton::serve_remote()
+        .await
+        .expect("a literal address is accepted")
+        .expect("naming an address enables the listener");
+
+    let caller = Client::with_remote_addr(addr)
+        .await
+        .expect("the remote transport builds");
+    let echoed = caller
+        .echo("hello over the remote listener")
+        .await
+        .expect("the wrapper performs the echo RPC");
+
+    assert_eq!(echoed, "hello over the remote listener");
+    drop(env);
 }

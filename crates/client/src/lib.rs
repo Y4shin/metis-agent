@@ -12,6 +12,7 @@
 pub mod skeleton;
 
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use api_contracts::connect::metis::v1::DaemonServiceClient;
@@ -77,6 +78,26 @@ impl Client {
             inner: DaemonServiceClient::new(
                 transport,
                 ClientConfig::new(transport::local_authority()),
+            ),
+        })
+    }
+
+    /// Connect over the remote transport to an explicit TCP address.
+    ///
+    /// The wrapper keeps the transport private, so the caller names no TCP type
+    /// and no generated stub. This constructor takes the address; it does not
+    /// read the server's bind variable, because how a client finds a remote
+    /// daemon is the pairing ticket's subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ClientError`] when the remote transport cannot be built.
+    pub async fn with_remote_addr(addr: SocketAddr) -> Result<Self, ClientError> {
+        let transport = transport::tcp_transport(addr).shared(64);
+        Ok(Self {
+            inner: DaemonServiceClient::new(
+                transport,
+                ClientConfig::new(transport::remote_authority(addr)),
             ),
         })
     }
