@@ -173,6 +173,18 @@ streaming assumptions before anything is built on top.
   whose generated server duplicated the DTOs. One message set, no conversion
   layer, no JVM, a static musl build, and a compile-only Windows named pipe were
   all verified.
+- The contract pipeline is measured end to end: hand-written Protobuf under
+  `metis.v1` generates through the two pinned BSR remote plugins into committed
+  trees under `crates/api-contracts/generated/`, mounted with `include!` and two
+  module-level clippy allows, one of which stays dormant until the contract
+  declares its first enum. One regeneration script with a byte-for-byte drift
+  check, `buf lint`, and `buf breaking` run in CI, and the everyday build needs
+  no generator, `protoc`, or JVM. The rustfmt post-step takes
+  `normalize_comments=true`, because buffa's multi-line doc comments otherwise
+  become indented code blocks that rustdoc collects as doctests which cannot
+  compile. `buf breaking` reads buf's built-in default configuration rather than
+  `contracts/buf.yaml`'s `breaking` block, because the CI command runs from the
+  repository root.
 
 ## Fog
 
@@ -189,9 +201,11 @@ streaming assumptions before anything is built on top.
   pinning, the regeneration cost of a minor bump, and when to take one.
 - Whether the Connect JSON codec is enabled for outside clients, and what that
   means for the auth and error model.
-- Whether the generated code's rustfmt post-step is a script step or an
-  exclusion, since raw `buf generate` output fails the repository fmt gate, and
-  which allow attributes the real generated tree needs.
+- Whether the contract pipeline's BSR dependency should stay online: the
+  regeneration and drift checks resolve both pinned plugins from the BSR over the
+  network on every run, anonymous rate limiting can fail them for a non-code
+  reason, and no `BUF_TOKEN` is pinned. A token in CI or vendored pinned plugins
+  would remove the dependency, at the cost of a secret or a vendored binary.
 - How the client distinguishes a deliberate slow-consumer stream drop from a
   transport failure, so the resync decision is not guesswork.
 
