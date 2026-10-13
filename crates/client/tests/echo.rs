@@ -15,9 +15,14 @@ use api_contracts::proto::metis::v1::EchoRequest;
 use api_contracts::transport::{local_authority, serve_stream};
 use client::Client;
 use client::skeleton;
+use client::{default_endpoint, resolve_endpoint};
 use connectrpc::client::{ClientConfig, Http2Connection};
 use hyper_util::rt::TokioIo;
 use tower::service_fn;
+
+/// The environment variable that overrides the local endpoint. The daemon
+/// effort binds the same variable.
+const ENDPOINT_ENV: &str = "METIS_ENDPOINT";
 
 /// A temporary socket directory that removes itself on drop, so the socket
 /// directory is cleaned up on the success path and on a panic alike.
@@ -45,6 +50,34 @@ impl TempSocket {
 impl Drop for TempSocket {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Sets `METIS_ENDPOINT` for the duration of a test and restores the previous
+/// value on drop, so a panic cannot leak the override into another test.
+struct EndpointOverride {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EndpointOverride {
+    fn set(value: &Path) -> Self {
+        let previous = std::env::var_os(ENDPOINT_ENV);
+        // Edition 2024 makes mutating the process environment unsafe because it
+        // is not thread-safe. This is the only test in the binary that reads or
+        // writes the variable, so nothing races it.
+        unsafe { std::env::set_var(ENDPOINT_ENV, value) };
+        Self { previous }
+    }
+}
+
+impl Drop for EndpointOverride {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(ENDPOINT_ENV, value),
+                None => std::env::remove_var(ENDPOINT_ENV),
+            }
+        }
     }
 }
 
@@ -128,4 +161,36 @@ async fn wrapper_echoes_over_a_temporary_socket() {
         !directory.exists(),
         "the temporary socket directory is removed"
     );
+}
+
+/// The platform default is the literal the effort fixes, not whatever the
+/// environment happens to hold.
+#[test]
+fn default_endpoint_is_the_platform_default() {
+    assert_eq!(default_endpoint(), PathBuf::from("/tmp/metis-daemon.sock"));
+}
+
+/// The environment override redirects the local constructor to its socket, and
+/// an empty override means "unset" rather than "the empty path".
+#[tokio::test]
+async fn environment_override_redirects_the_local_constructor() {
+    let socket = TempSocket::new();
+    serve_skeleton(socket.path()).await;
+
+    let override_guard = EndpointOverride::set(socket.path());
+    assert_eq!(resolve_endpoint(), socket.path().to_path_buf());
+
+    // The local constructor resolves the override and reaches the skeleton. No
+    // transport, `Http2Connection`, or generated stub type is named here.
+    let caller = Client::local().await.expect("the local client builds");
+    let echoed = caller
+        .echo("hello through the override")
+        .await
+        .expect("the override is honoured");
+    assert_eq!(echoed, "hello through the override");
+
+    unsafe { std::env::set_var(ENDPOINT_ENV, "") };
+    assert_eq!(resolve_endpoint(), default_endpoint());
+
+    drop(override_guard);
 }
