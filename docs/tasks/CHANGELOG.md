@@ -5,6 +5,11 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Plugin ABI primitives proven by a fixture plugin (plugin-abi-core)
+
+Made the plugin boundary real: `crates/plugin-contract` now holds the `repr(C)` primitive ABI (versioned entry symbol, append-only function table with `size` first, host callback table with `user_data`, status space with `pending`, payload envelope), with the layout asserted in Rust and by a C translation unit compiled on every build. A committed cbindgen header with a drift check, plus a fixture `cdylib` and a 41-check harness that loads it and drives the whole table, including per-side buffer release and panic containment on both sides.
+
+
 ## 2026-10-13, Contract pipeline with one RPC (contract-pipeline)
 
 Made the wire contract real: hand-written Protobuf under package `metis.v1` with

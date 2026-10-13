@@ -298,6 +298,13 @@ pub type MetisLogFn = unsafe extern "C" fn(
 /// usable: without it a host has nowhere to keep the state the callback needs.
 /// A host that does not support a callback installs a no-op stub rather than a
 /// null pointer.
+///
+/// Each callback is an `extern "C"` frame reached from plugin code, so a panic
+/// inside one unwinds into plugin frames and aborts across the boundary. The
+/// host must wrap every callback body in `catch_unwind` and turn a panic into a
+/// status the plugin sees, exactly as the plugin side wraps its exported
+/// adapters (D7 as amended by the mechanics spike); only the callback's own
+/// frame can do this, because the plugin that called it catches nothing.
 #[repr(C)]
 pub struct MetisHostApiV1 {
     /// Size in bytes of this table. First field, always.
