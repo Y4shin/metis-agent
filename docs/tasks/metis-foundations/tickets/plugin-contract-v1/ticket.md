@@ -174,7 +174,7 @@ follows, and an implementer should not silently reopen them:
   same change, and `docs/plugin-contract.md` section 16 lists what was
   superseded.
 - Prototype evidence worth reading before starting: the deleted-surface table and
-  the contract sketch in `round-3/shape/FINDINGS-shape.md` (the lane calls it the
+  the contract sketch in `round-3/shape/FINDINGS-shape.md`, the reclaim ledger in
   `round-3/reclaim/FINDINGS-reclaim.md`, the ownership clause and the C plugin in
   `round-3/ownership/`, and the drop-panic probe in
   `round-3/asyncffi/FINDINGS-async-ffi.md`.
@@ -244,6 +244,14 @@ cargo locks; event and progress callbacks are read and released but only logged,
 pending the daemon effort; and the C plugin keeps file-scope globals with a
 single-instance assumption. There is no `async-ffi` dependency anywhere outside
 `spikes/`.
+
+Landing lessons. The version gate refuses a minor it does not know, and the
+variant `plugin-compatibility` relaxes to additive tolerance is `MinorMismatch`,
+while `EntryMissing` and `Unreadable` cover the size cases. Two items stay open
+for deliberate review rather than being inherited by accident: the duplicated
+capability declaration (`registry::Capability` against `CapabilityDescriptor`,
+tied by a test) and the error taxonomy realised partly by `CallError`,
+`RouteError` and `RegistryError` ahead of the item that would decide it.
 
 Pointers: the ADR is `docs/adr/0002-plugin-contract-futures-only.md`, the C
 implementer is `crates/plugin-fixture/c/c-plugin.c`, the build is

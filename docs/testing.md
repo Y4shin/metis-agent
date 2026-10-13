@@ -105,8 +105,9 @@ Plugin host, documented in `crates/plugin-runtime`:
 
 `.github/workflows/ci.yml` runs the Rust commands above through the devenv
 shell on push to `main` and on pull requests, followed by the three contract
-commands and the two plugin ABI commands (the harness and the header drift
-check). The frontend commands are not in CI yet; add them when the frontend
+commands and the four plugin ABI commands (the C plugin build, the
+authoring-feature-off check, the harness, and the header drift check). The
+frontend commands are not in CI yet; add them when the frontend
 has behaviour worth gating.
 
 ## Mock conventions
