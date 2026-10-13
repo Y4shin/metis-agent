@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Contract gates read one configuration and authenticate to the BSR
 status: stable
-workflow_state: ready
-blocked_by: [contract-pipeline]
+workflow_state: done
+blocked_by:
+- contract-pipeline
 size: s
 ---
 
