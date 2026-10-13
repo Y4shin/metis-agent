@@ -45,3 +45,12 @@ jobs:
 
       - name: Contract regeneration check
         run: devenv shell -- bash scripts/regenerate-contracts.sh --check
+
+      # The harness rebuilds the fixture cdylib itself before loading it, so a
+      # stale library cannot be loaded even when this step follows a cached
+      # build. It prints one line per check and exits non-zero on failure.
+      - name: Plugin ABI harness
+        run: devenv shell -- cargo run -p plugin-fixture --bin abi-harness
+
+      - name: Plugin ABI header regeneration check
+        run: devenv shell -- bash scripts/regenerate-abi-header.sh --check
