@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Local access control and surface identity (local-identity-and-acl)
+
+The daemon now creates its socket directory and the socket itself with mode 700, or 770 when `METIS_SOCKET_GROUP` names a group its user belongs to, and refuses a pre-existing directory that is a symlink, is owned by someone else, or is wider than the rule, instead of chmodding it. Every client call declares `metis-protocol-version`, `metis-surface` and `metis-client-version` as Connect default headers, the service records them, and a missing, malformed or unsupported version is refused with `InvalidArgument` carrying `metis-supported-versions`, which the wrapper turns into `ClientError::ProtocolVersion`; the declaration is not authentication, and credentials arrive with `pairing-and-tokens`. The default endpoint moved off `/tmp/metis-daemon.sock` to `$XDG_RUNTIME_DIR/metis/daemon.sock`, then `$TMPDIR/metis/daemon.sock`, then a typed `NoPrivateBase` error, which closes the conflict between the old `/tmp` default and the ownership rule.
+
 ## 2026-10-13, Remote TCP listener, off by default (tcp-listener)
 
 The daemon's service is now reachable over TCP when `METIS_TCP_ADDR` names an `IP:port` literal, and no socket is opened when it does not: there is no default bind address, an absent or empty value disables the listener, and a malformed value is a typed `ConfigError` rather than a silent disable. `transport::serve_tcp_listener` is the one TCP accept loop over the landed `serve_stream`, `serve_tcp` is the bind-and-delegate entry point the daemon will call, `remote_authority` keeps the connection authority and the request authority in step, and `Client::with_remote_addr` reaches the listener without adding a transport injection point to the wrapper. The listener is plaintext and unauthenticated until the TLS, proxy and pairing tickets land, and `serve_tcp` itself has no direct test yet, which the operator accepted as a documented gap.
