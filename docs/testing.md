@@ -51,6 +51,21 @@ Local transport skeleton, documented in `crates/client`:
   the wrapper, prints `[echo]` and `[result] PASS`, and exits non-zero on
   failure.
 
+Remote transport, off unless `METIS_TCP_ADDR` names an `IP:port` literal. There
+is no default bind address, so remote access cannot be enabled by accident:
+
+- `cargo test -p client --test remote` -- the remote test starts the TCP
+  listener on the port the kernel assigns (`METIS_TCP_ADDR=127.0.0.1:0`), takes
+  the bound address from `skeleton::serve_remote`, and calls echo through
+  `Client::with_remote_addr`; it also asserts that an unset variable binds no
+  socket, and that the listener task releases its port when it is dropped. TCP
+  is the first front-end every target has, so the test is not Unix-gated.
+- The configuration rule is unit-tested in
+  `crates/api-contracts/src/transport.rs` (`cargo test -p api-contracts`): unset
+  and empty resolve to `None`, an `IP:port` literal resolves to `Some`, and
+  anything else is a typed `ConfigError` naming the variable and the value
+  rather than a silent disable.
+
 Plugin ABI, documented in `crates/plugin-contract/src/abi` and
 `crates/plugin-fixture`:
 
