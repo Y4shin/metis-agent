@@ -657,6 +657,98 @@ mod tests {
         assert_eq!(second.id, 2);
     }
 
+    /// A cursor the window has moved past, and a cursor beyond the newest
+    /// identifier, are both expired and both carry the window's bounds in the
+    /// value; a cursor of zero is never expired, because it means "no cursor".
+    #[tokio::test]
+    async fn a_cursor_outside_the_window_is_expired_and_names_both_bounds() {
+        let ring = Ring::new(2);
+        ring.publish("daemon", EventKind::Event, "1");
+        ring.publish("daemon", EventKind::Event, "2");
+        ring.publish("daemon", EventKind::Event, "3");
+        ring.publish("daemon", EventKind::Event, "4");
+        assert_eq!(ring.earliest_resumable(), 3, "the window holds 3 and 4");
+        assert_eq!(ring.latest_id(), 4);
+
+        // Older than the window: the event that follows this cursor is gone.
+        let past = match ring.stream(&["daemon"], 1, Duration::from_secs(60)) {
+            Ok(_) => panic!("the window moved past cursor 1"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            past,
+            CursorError::Expired {
+                cursor: 1,
+                earliest_resumable: 3,
+                latest_id: 4,
+            }
+        );
+        assert!(
+            past.to_string().contains("window moved past it"),
+            "the message names the moved window: {past}"
+        );
+
+        // Beyond the newest identifier: the identifier space began again, as it
+        // does when the daemon restarts.
+        let beyond = match ring.stream(&["daemon"], 9, Duration::from_secs(60)) {
+            Ok(_) => panic!("cursor 9 is beyond the newest identifier"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            beyond,
+            CursorError::Expired {
+                cursor: 9,
+                earliest_resumable: 3,
+                latest_id: 4,
+            }
+        );
+        assert!(
+            beyond.to_string().contains("restarted"),
+            "the message names the restarted identifier space: {beyond}"
+        );
+
+        // No cursor is never expired, however far the window has moved.
+        assert!(
+            ring.stream(&["daemon"], 0, Duration::from_secs(60)).is_ok(),
+            "zero means no cursor"
+        );
+    }
+
+    /// The edges of the window are servable: a cursor one below the oldest held
+    /// identifier resumes with the event that opened the window, and a cursor at
+    /// the newest identifier resumes with nothing and carries what is published
+    /// next.
+    #[tokio::test]
+    async fn the_edges_of_the_window_are_servable() {
+        let ring = Ring::new(2);
+        ring.publish("daemon", EventKind::Event, "1");
+        ring.publish("daemon", EventKind::Event, "2");
+        ring.publish("daemon", EventKind::Event, "3");
+
+        // `cursor == earliest_resumable() - 1`: the event that opened the window
+        // is exactly what follows it, so there is something to replay.
+        let mut resumed = Box::pin(
+            ring.stream(&["daemon"], 1, Duration::from_secs(60))
+                .expect("a cursor one below the window is servable"),
+        );
+        let first = resumed.next().await.expect("a stream").expect("a message");
+        assert_eq!(first.id, 2);
+        let second = resumed.next().await.expect("a stream").expect("a message");
+        assert_eq!(second.id, 3);
+
+        // `cursor == latest_id()`: nothing follows it yet, so the stream replays
+        // nothing and carries the next live event.
+        let mut current = Box::pin(
+            ring.stream(&["daemon"], 3, Duration::from_secs(60))
+                .expect("the newest identifier is servable"),
+        );
+        let published = ring.publish("daemon", EventKind::Event, "4");
+        assert_eq!(published, 4);
+        let next = current.next().await.expect("a stream").expect("a message");
+        assert_eq!(next.kind, EventKind::Event);
+        assert_eq!(next.id, 4);
+    }
+
     /// A stream opened with a cursor replays exactly the held events that
     /// follow it, in identifier order and typed `EVENT`. It carries no
     /// snapshot: the caller that resumes already holds the state a snapshot
