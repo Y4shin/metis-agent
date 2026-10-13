@@ -107,3 +107,10 @@ capability gate policy exists in two places (the harness constant and the
 runtime's `gate`); and a pre-existing `_FORTIFY_SOURCE requires compiling with
 optimization (-O)` warning appears in `cargo test` and `cargo clippy` output,
 which does not affect either exit status.
+
+Knowledge harvested at finalize: `docs/plugin-contract.md` section 5 no longer
+calls `abi_minor` advisory, and section 15 states the landed `found >= known`
+rule instead of describing the relaxation as future work; ADR 0002 carries the
+same one-directional amendment. `docs/testing.md` already recorded the harness
+compatibility checks and the second C library from the implementation, so it
+needed no further change.

@@ -189,14 +189,15 @@ streaming assumptions before anything is built on top.
   repository root.
 - The plugin boundary is real and measured: `plugin-contract` holds the
   primitives with `repr(C)` Rust as the source of truth, the generated header is
-  committed and drift-checked, and a fixture `cdylib` plus a 41-check harness
+  committed and drift-checked, and a fixture `cdylib` plus a 73-check harness
   prove the ABI through a real shared-library load, covering the append-only
   prefix, the payload envelope's failure modes, per-side buffer release
   including a dropped completion, and panic containment on both sides of the
   boundary. cbindgen needs every ABI type in its `[export] include` list and
   every out-of-surface public constant in its `exclude` list, because it emits
-  the crate's public constants regardless of that list. `plugin-compatibility`
-  and `plugin-authoring-trait` extend this layout additively.
+  the crate's public constants regardless of that list. `plugin-authoring-trait`
+  and `plugin-compatibility` both landed on this layout additively, which leaves
+  `MetisPluginTableV1` at its eight entries and 80 bytes.
 - The local transport skeleton is real: one handwritten transport module in
   `api-contracts` (`serve_stream` generic over any async bidirectional stream,
   `serve_uds`, `uds_transport`, `local_authority`), shared by the skeleton, the
@@ -229,8 +230,16 @@ streaming assumptions before anything is built on top.
 - The plugin contract revision landed as `plugin-contract-v1`: futures are the
   only call path, the authoring surface is one capability-name-routed `call`,
   `async-ffi` is not a dependency anywhere outside `spikes/`, and unload is
-  quarantine plus a reclaim on the late poll return. `plugin-compatibility` is
-  the only remaining plugin-chain ticket.
+  quarantine plus a reclaim on the late poll return.
+- The plugin chain is complete with `plugin-compatibility`. Version tolerance
+  inside major 1 is additive: `metis_read_table` compares `abi_minor` with
+  `found >= known`, so a newer minor interoperates and the retired pre-release
+  table at minor 0 is still refused with `MinorMismatch` before any entry is
+  read. A library built for another major fails at symbol resolution with
+  `MajorMismatch`, the fixture advertises an eighth capability at descriptor
+  version 2 so the per-capability gate is falsifiable end to end, the payload
+  types prove unknown fields decode, and the harness baseline is 73 checks. The
+  effort's remaining work is the transport and stream line.
 
 ## Fog
 
