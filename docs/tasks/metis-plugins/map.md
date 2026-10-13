@@ -71,6 +71,11 @@ end to end.
 
 ## Fog
 
+- Error taxonomy, partly implemented: `CallError`, `RouteError` and
+  `RegistryError` already cover the host path's failures alongside the frozen
+  status space, before the open item that would decide the taxonomy. This effort
+  may keep that surface or replace it with its own, but replacing it needs the
+  operator's agreement first.
 - Bundle format, file extension, supported target names, and single-target
   versus multi-target packaging.
 - Manifest schema and its representation.

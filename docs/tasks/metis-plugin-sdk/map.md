@@ -53,6 +53,14 @@ not a requirement.
 
 ## Fog
 
+- Error taxonomy, partly implemented: `CallError`, `RouteError` and
+  `RegistryError` are exported from `plugin-runtime` today, before the open item
+  that would decide the taxonomy. The author-facing error surface this effort
+  owns may keep that shape or replace it with its own, but replacing it needs the
+  operator's agreement first. The same question covers the capability descriptor
+  this effort re-exports: `plugin-runtime` has its own `registry::Capability`
+  alongside `plugin-contract`'s `CapabilityDescriptor` (see O19 in
+  `docs/plugin-registry-handoff.md`).
 - Which core plugins ship first, and what they demonstrate.
 - CLI responsibilities: scaffold, build, package, install, publish, and how
   much cross-compilation the build step covers.

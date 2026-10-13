@@ -346,7 +346,11 @@ record, in `/tmp/metis-plugin-registry-round-2/legacy/FINDINGS-round2-legacy.md`
 **O8. Error taxonomy against the frozen status space.** The registry must
 distinguish a bad request, a version refusal, an unregistered capability, a
 plugin-response violation, and a plugin failure, which the frozen statuses cannot
-express distinctly. ADR-shaped.
+express distinctly. ADR-shaped. **Partly implemented already, ahead of any
+decision:** `MetisAbiError` in `plugin-contract`, and `CallError`, `RouteError`
+and `RegistryError` in `plugin-runtime`. The efforts that own this item may keep
+that surface or replace it with their own taxonomy, but replacing it needs the
+operator's agreement first.
 
 **O9. Effort ownership.** Confirm which effort owns the registry, edge validation,
 the SDK's typed facades and schema derivation, and the async executor.
@@ -381,10 +385,28 @@ that blocks `metis-plugin-sdk` pinning author-facing API.
 unique, who qualifies the capability names, what happens to in-flight calls when
 an instance is unregistered, and whether the plugin ever sees the instance name.
 
-**O18. Architecture-spec debt.** The effort's `arch-spec.md` still labels
-`plugin-authoring-trait` a pending ticket, and none of the answers above are
-reflected in it. Reconcile with the spec-reconciler when the plugin decisions
-settle.
+**O18. Architecture-spec debt.** Addressed: the spec-reconciler reconciled
+`arch-spec.md` with the landed code after `plugin-contract-v1`, marked
+`plugin-abi-core` and `plugin-authoring-trait` as landed and superseded in part,
+and recorded the landed surface. Stays here as the record of the debt.
+
+**O19. The duplicated capability declaration.** Two types describe the same
+five-field declaration: `plugin-contract::authoring::CapabilityDescriptor` (typed
+`CapabilityKind`, `schemars::Schema` fields) and
+`plugin-runtime::registry::Capability` (`kind: String`, `serde_json::Value`
+fields), with a test asserting they agree against the real fixture. They do not
+conflict: the JSON keys and shapes are identical, and the split exists because
+`plugin-runtime` deliberately does not enable `plugin-contract`'s `authoring`
+feature, which is what keeps the host on the primitives and the payload envelope
+and keeps `schemars` out of the daemon. Unifying would therefore mean moving the
+declaration out of the `authoring` feature into the crate's always-on surface,
+which costs the primitives crate its zero-dependency build (`serde` and
+`serde_json` always on) or pulls `schemars` in too, which is worse. The host's
+untyped `kind` also has a use: a strict shared enum would fail the whole
+declaration on a future kind, where the host wants to refuse one capability.
+Recommendation: keep the duplication and the tie test. Either way it is a
+decision for the operator, and `metis-plugin-sdk` meets the same question when it
+re-exports an author-facing descriptor.
 
 ## Next round (not started)
 

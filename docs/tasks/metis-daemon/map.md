@@ -89,6 +89,11 @@ end and work can land as vertical slices rather than as an untested layer.
 
 ## Fog
 
+- Error taxonomy, partly implemented: the errors a plugin produces reach the
+  daemon today as `CallError`, `RouteError` and `RegistryError` from
+  `plugin-runtime`, before the open item that would decide the taxonomy. The
+  plugin adapters this effort owns may keep that mapping or define their own, but
+  replacing it needs the operator's agreement first.
 - Authentication between surfaces and the daemon: scheme, credential issuance
   and storage, per-surface scopes, and what local IPC trust means. The
   boundary between the client's credential transport and the daemon's policy
