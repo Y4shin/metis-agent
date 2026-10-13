@@ -320,6 +320,24 @@ impl Plugin for GivesUpLate {
 }
 
 #[test]
+fn the_adapter_lists_the_capabilities_the_plugin_declares() {
+    let _serial = serial();
+    let host = HostAdapter::new();
+    let handle = instance::<Probe>(&host);
+
+    let mut buffer = plugin_contract::abi::MetisBuffer::empty();
+    let status = unsafe { (table_for::<Probe>().list_capabilities)(handle, &mut buffer) };
+    let body = host
+        .read_and_release(buffer)
+        .expect("the capability list is a plugin buffer the host releases");
+    let list: plugin_contract::authoring::CapabilityList =
+        serde_json::from_slice(&body).expect("the capability list deserialises");
+
+    assert_eq!(status, MetisStatus::Ok);
+    assert_eq!(list.capabilities, Probe.capabilities());
+}
+
+#[test]
 fn the_trait_adapter_always_completes_through_the_host_callback() {
     let _serial = serial();
     let table = table_for::<Probe>();

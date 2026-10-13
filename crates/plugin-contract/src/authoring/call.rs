@@ -258,11 +258,6 @@ impl Call {
         self.token.clone()
     }
 
-    /// The instance-level host routes.
-    pub fn host(&self) -> &Host {
-        &self.host
-    }
-
     /// Emits progress for this pending call.
     pub fn progress<T>(&self, progress: &T) -> Result<(), PluginError>
     where

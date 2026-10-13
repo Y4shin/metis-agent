@@ -247,12 +247,19 @@ fn main() -> ExitCode {
         return checks.report();
     }
     checks.check(
-        state.saw_log("fixture: instance created"),
+        state.saw_log("instance created"),
         "callback.log_observed",
         format!(
             "{} log lines through the host table",
             state.log_line_count()
         ),
+    );
+    // The capability-originated event arrives at creation time, from the
+    // lifecycle hook the adapter runs inside `create_instance` (D15).
+    checks.check(
+        state.saw_event("fixture.ready"),
+        "event.started_emits",
+        format!("events={:?}", state.event_topics()),
     );
     checks.check(
         state.event_callbacks.load(SeqCst) == 1,
@@ -358,28 +365,42 @@ fn main() -> ExitCode {
         );
     }
 
-    // --- inline invoke (D11) ----------------------------------------------
+    // --- the trait path is always pending (D15) ---------------------------
 
+    // `tool.echo` is the capability that used to finish inline. Through the
+    // trait it is pending like every other arm, and its result arrives through
+    // the host's `complete` callback, which is what this check observes. The ABI
+    // keeps its inline path for a plugin that implements the table directly, and
+    // nothing in this tree exercises it any more.
     let request = HostRequest::new(&state, &request_body);
     let mut out = MetisBuffer::empty();
+    state.register_pending(1);
     let status = unsafe { call_invoke(&state, 1, "tool.echo", request.buffer(), &mut out) };
-    let inline_body = state.read_and_release(out);
     drop(request);
-    let echo: Option<EchoResponse> = inline_body
+    let completed = state.wait_for_completion(1, COMPLETION_TIMEOUT);
+    let echo: Option<EchoResponse> = completed
         .as_ref()
-        .ok()
-        .and_then(|body| serde_json::from_slice(body).ok());
+        .and_then(|completed| serde_json::from_slice(&completed.body).ok());
     checks.check(
-        status == MetisStatus::Ok
+        status == MetisStatus::Pending
+            && out.ptr.is_null()
+            && matches!(&completed, Some(completed) if completed.status == MetisStatus::Ok)
             && matches!(&echo, Some(response) if response.echo == "hihi" && response.bytes == 4),
-        "invoke.inline_result",
+        "invoke.always_pending_completion",
         format!(
-            "status={} body={}",
+            "status={} out is null={} outcome={:?} body={echo:?}",
             status.as_str(),
-            inline_body
-                .map(|body| String::from_utf8_lossy(&body).into_owned())
-                .unwrap_or_else(|err| err)
+            out.ptr.is_null(),
+            completed
+                .as_ref()
+                .map(|completed| completed.status.as_str())
         ),
+    );
+    // The capability half of the event route: an event from inside a call.
+    checks.check(
+        state.saw_event("fixture.answered"),
+        "event.capability_emits",
+        format!("events={:?}", state.event_topics()),
     );
 
     let request = HostRequest::new(&state, &request_body);
@@ -487,18 +508,53 @@ fn main() -> ExitCode {
         ),
     );
     let suppressed = state.wait_until(COMPLETION_TIMEOUT, |state| {
-        state.saw_log("suppressed completion for cancelled request 5")
+        state.saw_log("completion suppressed for cancelled request 5")
     });
     checks.check(
         suppressed,
         "cancel.plugin_suppressed_completion",
-        "the plugin logged the suppression instead of completing",
+        "the adapter logged the suppression instead of completing",
+    );
+    // Promptly means the token's waker reached the parked arm rather than a
+    // later poll: the arm has no budget it could have waited out, so the number
+    // it reports is the cancel's own latency.
+    let observed = state.logged_millis("fixture: cancellable observed the cancel");
+    checks.check(
+        suppressed && observed.is_some_and(|ms| ms < 250),
+        "cancel.parked_call_is_woken_promptly",
+        format!("the arm reported the token after {observed:?}ms"),
     );
     let no_completion = !state.completed.lock().unwrap().contains_key(&5);
     checks.check(
         no_completion,
         "cancel.no_completion_after_cancel",
         format!("completed entries for request 5 present={}", !no_completion),
+    );
+
+    // The other half of the cancelled-completion rule: the same `Cancelled`
+    // value returned without a successful cancel still completes, so a host is
+    // never parked on a completion that will not arrive. This arm gives up on
+    // its own budget instead of on a cancel.
+    let request = HostRequest::new(&state, &request_body);
+    let mut out = MetisBuffer::empty();
+    state.register_pending(9);
+    let status = unsafe { call_invoke(&state, 9, "tool.cancellable", request.buffer(), &mut out) };
+    drop(request);
+    let completed = state.wait_for_completion(9, COMPLETION_TIMEOUT);
+    let gave_up = state.saw_log("fixture: cancellable gave up without a cancel");
+    checks.check(
+        status == MetisStatus::Pending
+            && matches!(&completed, Some(completed) if completed.status == MetisStatus::Cancelled)
+            && gave_up
+            && !state.saw_log("completion suppressed for cancelled request 9"),
+        "cancel.cancelled_without_a_cancel_still_completes",
+        format!(
+            "invoke={} outcome={:?} gave up={gave_up}",
+            status.as_str(),
+            completed
+                .as_ref()
+                .map(|completed| completed.status.as_str())
+        ),
     );
 
     let unknown_cancel = unsafe { call_cancel(&state, 4242) };
@@ -544,12 +600,22 @@ fn main() -> ExitCode {
 
     let request = HostRequest::new(&state, &request_body);
     let mut out = MetisBuffer::empty();
+    state.register_pending(7);
     let status = unsafe { call_invoke(&state, 7, "tool.panic", request.buffer(), &mut out) };
     drop(request);
+    let completed = state.wait_for_completion(7, COMPLETION_TIMEOUT);
     checks.check(
-        status == MetisStatus::Internal && state.saw_log("panic caught at the boundary"),
-        "panic.exported_function_is_internal",
-        format!("status={} (the plugin logged the catch)", status.as_str()),
+        status == MetisStatus::Pending
+            && matches!(&completed, Some(completed) if completed.status == MetisStatus::Internal)
+            && state.saw_log("capability panicked"),
+        "panic.capability_panics_into_an_internal_completion",
+        format!(
+            "invoke={} outcome={:?} (the worker caught the panic and logged it)",
+            status.as_str(),
+            completed
+                .as_ref()
+                .map(|completed| completed.status.as_str())
+        ),
     );
 
     let request = HostRequest::new(
@@ -561,17 +627,18 @@ fn main() -> ExitCode {
         .expect("the request serialises"),
     );
     let mut out = MetisBuffer::empty();
+    state.register_pending(8);
     let status = unsafe { call_invoke(&state, 8, "tool.echo", request.buffer(), &mut out) };
-    let after_panic = state
-        .read_and_release(out)
-        .ok()
-        .and_then(|body| serde_json::from_slice::<EchoResponse>(&body).ok());
     drop(request);
+    let completed = state.wait_for_completion(8, COMPLETION_TIMEOUT);
+    let after_panic = completed
+        .as_ref()
+        .and_then(|completed| serde_json::from_slice::<EchoResponse>(&completed.body).ok());
     checks.check(
-        status == MetisStatus::Ok
+        status == MetisStatus::Pending
             && matches!(&after_panic, Some(response) if response.echo == "zzz"),
         "panic.instance_still_serves_the_next_call",
-        format!("status={} body={after_panic:?}", status.as_str()),
+        format!("invoke={} body={after_panic:?}", status.as_str()),
     );
 
     // --- shutdown and the two ledgers (D6) --------------------------------
@@ -886,6 +953,7 @@ struct HostState {
     host_callback_panics: AtomicUsize,
 
     logs: Mutex<Vec<(i32, String)>>,
+    events: Mutex<Vec<(String, Vec<u8>)>>,
     rejections: Mutex<Vec<String>>,
 }
 
@@ -910,6 +978,7 @@ impl HostState {
             dropped_buffers_released: AtomicUsize::new(0),
             host_callback_panics: AtomicUsize::new(0),
             logs: Mutex::new(Vec::new()),
+            events: Mutex::new(Vec::new()),
             rejections: Mutex::new(Vec::new()),
         }
     }
@@ -1023,6 +1092,41 @@ impl HostState {
         self.log_lines().iter().any(|line| line.contains(needle))
     }
 
+    /// The millisecond count in the first log line containing `after Nms`.
+    ///
+    /// The fixture measures its own wait, so a promptness claim does not depend
+    /// on when the harness's thread happened to look.
+    fn logged_millis(&self, needle: &str) -> Option<u128> {
+        let line = self
+            .log_lines()
+            .into_iter()
+            .find(|line| line.contains(needle))?;
+        line.split("after ")
+            .nth(1)?
+            .split("ms")
+            .next()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// The topics of the events the plugin sent.
+    fn event_topics(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(topic, _)| topic.clone())
+            .collect()
+    }
+
+    /// Whether an event with this topic arrived, with a JSON body.
+    fn saw_event(&self, topic: &str) -> bool {
+        self.events.lock().unwrap().iter().any(|(sent, body)| {
+            sent == topic && serde_json::from_slice::<serde_json::Value>(body).is_ok()
+        })
+    }
+
     /// Parses the fixture's accounting line, which is logged through the host's
     /// own `log` callback at shutdown.
     fn fixture_ledger(&self) -> Option<HashMap<String, usize>> {
@@ -1134,6 +1238,7 @@ unsafe extern "C" fn host_emit_event(
             METIS_LOG_INFO,
             format!("host: event {topic}: {}", String::from_utf8_lossy(&body)),
         ));
+        state.events.lock().unwrap().push((topic, body));
     }));
     if caught.is_err() {
         let state = unsafe { &*(user_data as *const HostState) };
