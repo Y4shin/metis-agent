@@ -7,8 +7,9 @@ Protobuf documents here are hand-written; the Rust they produce lives in
 ## Layout
 
 - `proto/metis/v1/daemon.proto` -- package `metis.v1`, service
-  `DaemonService`. One ordinary RPC for now: `Echo`. Later tickets append an
-  event stream and cancellation calls to the same service and package.
+  `DaemonService`. `Echo`, `Pair`, and the server-streaming `StreamEvents` with
+  its `Event` message and `EventKind` enum. Later tickets append cancellation
+  calls to the same service and package.
 - `../buf.yaml` -- the repository's one buf configuration. It declares the
   module at `contracts/proto`, `buf lint` in STANDARD mode, and
   `buf breaking` in FILE mode, and every buf command reads it.
@@ -47,7 +48,11 @@ The CI job runs, in the existing `devenv shell --` style, all from the
 repository root:
 
 - `buf lint`: the contract is lint-clean in STANDARD mode. The root `buf.yaml`
-  declares the module, so lint covers exactly `contracts/proto`.
+  declares the module, so lint covers exactly `contracts/proto`. One rule is
+  excepted, and only for the file that needs it: `RPC_RESPONSE_STANDARD_NAME`
+  for `contracts/proto/metis/v1/daemon.proto`, because `StreamEvents` answers
+  with the `Event` the stream carries rather than with a named response
+  wrapper. The exception is the `ignore_only` entry of the root `buf.yaml`.
 - `buf breaking --against '.git#branch=main' --against-config buf.yaml`: the
   contract compared with the branch is not broken. Adding RPCs and messages is
   allowed; changing or removing what is already declared is not.
@@ -61,7 +66,9 @@ repository root:
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
   cover the generated Rust as well, because it is compiled as part of
   `api-contracts`. It carries two module-level allows rather than being excluded
-  from the gates.
+  from the gates, and both are load-bearing: `clippy::match_single_binding` from
+  the first service, and `clippy::derivable_impls` from the contract's first
+  enum, `EventKind`, whose generated `Default` impl is a write-out of the derive.
 
 ## Caveats
 

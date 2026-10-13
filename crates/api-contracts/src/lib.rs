@@ -23,6 +23,7 @@
 
 pub mod auth;
 pub mod connect;
+pub mod events;
 pub mod identity;
 pub mod keychain;
 pub mod proto;

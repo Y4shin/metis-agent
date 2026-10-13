@@ -8,11 +8,15 @@
 use std::sync::Arc;
 
 use api_contracts::connect::metis::v1::{
-    DAEMON_SERVICE_SERVICE_NAME, DaemonService, DaemonServiceExt,
+    DAEMON_SERVICE_SERVICE_NAME, DAEMON_SERVICE_STREAM_EVENTS_SPEC, DaemonService, DaemonServiceExt,
 };
-use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse, PairRequest, PairResponse};
+use api_contracts::proto::metis::v1::{
+    EchoRequest, EchoResponse, Event, EventKind, PairRequest, PairResponse, StreamEventsRequest,
+};
 use buffa::Message;
-use connectrpc::{RequestContext, Response, Router, ServiceRequest, ServiceResult};
+use connectrpc::{
+    RequestContext, Response, Router, ServiceRequest, ServiceResult, ServiceStream, StreamType,
+};
 
 /// The name the contract declares: package `metis.v1`, service `DaemonService`.
 const DAEMON_SERVICE_NAME: &str = "metis.v1.DaemonService";
@@ -22,6 +26,9 @@ const ECHO_PATH: &str = "metis.v1.DaemonService/Echo";
 
 /// The Pair procedure path the contract declares.
 const PAIR_PATH: &str = "metis.v1.DaemonService/Pair";
+
+/// The StreamEvents procedure path the contract declares.
+const STREAM_EVENTS_PATH: &str = "metis.v1.DaemonService/StreamEvents";
 
 #[test]
 fn echo_request_matches_the_declared_wire_format() {
@@ -88,6 +95,80 @@ fn pair_messages_round_trip_through_the_generated_message_api() {
     assert_eq!(decoded, response);
 }
 
+/// The streaming request keeps its declared field numbering: the selected
+/// channels are repeated field 1 and the cursor is field 2, and a `0` cursor
+/// is the protobuf default and therefore absent from the wire.
+#[test]
+fn stream_events_request_carries_the_channels_and_the_cursor() {
+    let request = StreamEventsRequest {
+        channels: vec!["daemon".to_owned()],
+        last_event_id: 0,
+        ..Default::default()
+    };
+    // Field 1, wire type 2 (length-delimited): 0x0a, then the length and the
+    // bytes. The absent cursor encodes nothing, because 0 is the default.
+    assert_eq!(request.encode_to_vec(), b"\x0a\x06daemon");
+
+    let with_cursor = StreamEventsRequest {
+        channels: vec!["daemon".to_owned(), "session:7".to_owned()],
+        last_event_id: 3,
+        ..Default::default()
+    };
+    let mut expected = b"\x0a\x06daemon".to_vec();
+    expected.extend_from_slice(b"\x0a\x09session:7");
+    // Field 2, wire type 0 (varint): 0x10, then the id.
+    expected.extend_from_slice(b"\x10\x03");
+    assert_eq!(with_cursor.encode_to_vec(), expected);
+
+    let decoded = StreamEventsRequest::decode(&mut with_cursor.encode_to_vec().as_slice())
+        .expect("StreamEventsRequest decodes what it encoded");
+    assert_eq!(decoded, with_cursor);
+}
+
+/// The event message keeps its declared field numbering: the identifier, the
+/// kind, the channel, and the structured payload, in that order. The kinds are
+/// the contract's first enum, and their wire values are part of the contract.
+#[test]
+fn event_messages_round_trip_through_the_generated_message_api() {
+    let event = Event {
+        id: 1,
+        kind: EventKind::Event.into(),
+        channel: "daemon".to_owned(),
+        payload: "{}".to_owned(),
+        ..Default::default()
+    };
+    // Field 1 varint 1, field 2 varint 3 (`EVENT`), field 3 length-delimited
+    // `daemon`, field 4 length-delimited `{}`.
+    let mut expected = b"\x08\x01".to_vec();
+    expected.extend_from_slice(b"\x10\x03");
+    expected.extend_from_slice(b"\x1a\x06daemon");
+    expected.extend_from_slice(b"\x22\x02{}");
+    assert_eq!(event.encode_to_vec(), expected);
+
+    let decoded = Event::decode(&mut event.encode_to_vec().as_slice())
+        .expect("Event decodes what it encoded");
+    assert_eq!(decoded, event);
+
+    assert_eq!(EventKind::Event as i32, 3);
+    assert_eq!(EventKind::Snapshot as i32, 1);
+    assert_eq!(EventKind::Heartbeat as i32, 2);
+    assert_eq!(EventKind::Unspecified as i32, 0);
+}
+
+/// The streaming RPC is declared as server streaming: one request in, a stream
+/// of events out, on the service's own procedure path.
+#[test]
+fn stream_events_is_declared_as_a_server_stream() {
+    assert_eq!(
+        DAEMON_SERVICE_STREAM_EVENTS_SPEC.procedure,
+        "/metis.v1.DaemonService/StreamEvents"
+    );
+    assert_eq!(
+        DAEMON_SERVICE_STREAM_EVENTS_SPEC.stream_type,
+        StreamType::ServerStream
+    );
+}
+
 /// A stand-in service implementation. Nothing serves it here; this proves the
 /// generated trait is implementable from outside the crate.
 struct DummyDaemon;
@@ -118,6 +199,22 @@ impl DaemonService for DummyDaemon {
             ..Default::default()
         })
     }
+
+    /// One event and a clean end: enough to prove the streaming method is
+    /// implementable from outside the crate.
+    async fn stream_events(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, StreamEventsRequest>,
+    ) -> ServiceResult<ServiceStream<Event>> {
+        Response::stream_ok(futures_util::stream::iter([Ok(Event {
+            id: 1,
+            kind: EventKind::Event.into(),
+            channel: "daemon".to_owned(),
+            payload: "{}".to_owned(),
+            ..Default::default()
+        })]))
+    }
 }
 
 #[test]
@@ -127,12 +224,14 @@ fn generated_service_trait_registers_its_route_on_a_router() {
     // The router starts empty, so the routes below come from registration.
     assert!(!Router::new().has_method(ECHO_PATH));
     assert!(!Router::new().has_method(PAIR_PATH));
+    assert!(!Router::new().has_method(STREAM_EVENTS_PATH));
 
     let router = Arc::new(DummyDaemon).register(Router::new());
 
     assert!(router.has_method(ECHO_PATH));
     assert!(router.has_method(PAIR_PATH));
+    assert!(router.has_method(STREAM_EVENTS_PATH));
     let mut methods = router.methods().collect::<Vec<_>>();
     methods.sort_unstable();
-    assert_eq!(methods, vec![ECHO_PATH, PAIR_PATH]);
+    assert_eq!(methods, vec![ECHO_PATH, PAIR_PATH, STREAM_EVENTS_PATH]);
 }

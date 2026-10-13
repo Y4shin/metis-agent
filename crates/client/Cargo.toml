@@ -16,9 +16,17 @@ connectrpc.workspace = true
 # `api-contracts`.
 tokio.workspace = true
 
+# The event stream's response body is the transport's own body type. It is a
+# private field of `EventStream`, so no caller names it.
+hyper.workspace = true
+
+# The refusal vocabulary is read from response headers, on the stream's own
+# response as well as on a failed call, so the header map type is named here.
+http = "1"
+
+
 [dev-dependencies]
 # The loop-seam test drives a duplex stream through the generated client, so it
 # needs the connector shape itself.
-http = "1"
 hyper-util.workspace = true
 tower.workspace = true
