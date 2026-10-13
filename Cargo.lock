@@ -224,6 +224,7 @@ dependencies = [
  "api-contracts",
  "connectrpc",
  "http",
+ "hyper",
  "hyper-util",
  "tokio",
  "tower",
