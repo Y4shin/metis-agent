@@ -12,6 +12,7 @@
 //! stream. Generated code stays mounted and untouched.
 
 use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use connectrpc::{ConnectRpcService, Router};
@@ -102,4 +103,216 @@ pub fn uds_transport(path: impl Into<std::path::PathBuf>) -> connectrpc::client:
 #[must_use]
 pub fn local_authority() -> http::Uri {
     "http://localhost".parse().expect("static authority")
+}
+
+/// The environment variable that names the remote bind address.
+///
+/// Naming an `IP:port` literal enables the remote listener; an absent or empty
+/// value leaves it off. There is no default address, so remote access cannot be
+/// enabled by accident.
+pub const REMOTE_ADDR_ENV: &str = "METIS_TCP_ADDR";
+
+/// The configuration could not be applied.
+///
+/// The first configuration error in the repository. It is non-exhaustive
+/// because the transport tickets that follow add their own settings.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ConfigError {
+    /// The variable names something that is not an `IP:port` literal.
+    InvalidRemoteAddr {
+        /// The variable that was read.
+        variable: &'static str,
+        /// The value it held.
+        value: String,
+        /// The address parse failure.
+        source: std::net::AddrParseError,
+    },
+    /// The configured remote bind address could not be bound.
+    RemoteBind {
+        /// The address that was refused.
+        addr: SocketAddr,
+        /// The bind failure.
+        source: io::Error,
+    },
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRemoteAddr {
+                variable, value, ..
+            } => write!(f, "{variable} is not an `IP:port` literal: {value:?}"),
+            Self::RemoteBind { addr, source } => {
+                write!(f, "cannot bind the remote listener to {addr}: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidRemoteAddr { source, .. } => Some(source),
+            Self::RemoteBind { source, .. } => Some(source),
+        }
+    }
+}
+
+/// Resolve the remote bind address from the environment.
+///
+/// An absent or empty [`REMOTE_ADDR_ENV`] is `None`, which is the whole of off
+/// by default. An `IP:port` literal is `Some`; anything else, a bare hostname
+/// included, is a [`ConfigError`] naming the variable and the value, never a
+/// silent disable. The literal is parsed here and bound later, so resolution
+/// happens at bind time.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::InvalidRemoteAddr`] when the variable holds anything
+/// that is not an `IP:port` literal.
+pub fn resolve_remote_addr() -> Result<Option<SocketAddr>, ConfigError> {
+    let Some(value) = std::env::var_os(REMOTE_ADDR_ENV) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let value = value.to_string_lossy().into_owned();
+    value
+        .parse::<SocketAddr>()
+        .map(Some)
+        .map_err(|source| ConfigError::InvalidRemoteAddr {
+            variable: REMOTE_ADDR_ENV,
+            value,
+            source,
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{REMOTE_ADDR_ENV, resolve_remote_addr};
+    use std::ffi::OsString;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// Serialises the environment in this test binary: `std::env` is process
+    /// wide and the harness runs the tests on threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Holds one value of `METIS_TCP_ADDR` for the duration of a test and
+    /// restores the previous value on drop, so a panic cannot leak the value
+    /// into another test. The lock it carries serialises every environment
+    /// test in this binary.
+    struct RemoteAddrEnv {
+        previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl RemoteAddrEnv {
+        fn set(value: &str) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+            let previous = std::env::var_os(REMOTE_ADDR_ENV);
+            // Edition 2024 makes mutating the process environment unsafe
+            // because it is not thread-safe. Every test that touches the
+            // variable holds `ENV_LOCK`, so nothing races this write.
+            unsafe { std::env::set_var(REMOTE_ADDR_ENV, value) };
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+
+        fn unset() -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+            let previous = std::env::var_os(REMOTE_ADDR_ENV);
+            // SAFETY: see `set`.
+            unsafe { std::env::remove_var(REMOTE_ADDR_ENV) };
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for RemoteAddrEnv {
+        fn drop(&mut self) {
+            // SAFETY: see `set`; the lock is held until this guard is dropped.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(REMOTE_ADDR_ENV, value),
+                    None => std::env::remove_var(REMOTE_ADDR_ENV),
+                }
+            }
+        }
+    }
+
+    /// An absent variable and an empty one both mean "no remote listener",
+    /// which is the whole of off by default: there is no address to fall back
+    /// to.
+    #[test]
+    fn an_absent_or_empty_remote_addr_disables_the_listener() {
+        let absent = RemoteAddrEnv::unset();
+        assert_eq!(
+            resolve_remote_addr().expect("an absent variable is not an error"),
+            None
+        );
+        drop(absent);
+
+        let empty = RemoteAddrEnv::set("");
+        assert_eq!(
+            resolve_remote_addr().expect("an empty value is treated as unset"),
+            None
+        );
+        drop(empty);
+    }
+
+    /// Naming an `IP:port` literal is the enablement, for both address
+    /// families, and a port of `0` is allowed so the operating system can pick
+    /// one at bind time.
+    #[test]
+    fn an_ip_literal_with_a_port_is_the_bind_address() {
+        let env = RemoteAddrEnv::set("127.0.0.1:0");
+        assert_eq!(
+            resolve_remote_addr().expect("an IPv4 literal with a port parses"),
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        );
+
+        // SAFETY: `env` holds `ENV_LOCK` for the rest of this test.
+        unsafe { std::env::set_var(REMOTE_ADDR_ENV, "127.0.0.1:8443") };
+        assert_eq!(
+            resolve_remote_addr().expect("an IPv4 literal parses"),
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8443))
+        );
+
+        // SAFETY: `env` holds `ENV_LOCK` for the rest of this test.
+        unsafe { std::env::set_var(REMOTE_ADDR_ENV, "[::1]:8443") };
+        assert_eq!(
+            resolve_remote_addr().expect("an IPv6 literal parses"),
+            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8443))
+        );
+
+        drop(env);
+    }
+
+    /// Anything that is not an `IP:port` literal is a typed error naming the
+    /// variable and the value. Never a silent disable: a misspelled address
+    /// must not look like an intentional one.
+    #[test]
+    fn a_value_that_is_not_an_ip_port_literal_is_a_typed_error() {
+        for value in ["127.0.0.1", "example.com:80", "not an address", "127.0.0.1:port"] {
+            let env = RemoteAddrEnv::set(value);
+            let error = resolve_remote_addr().expect_err("a non-literal value is refused");
+            let message = error.to_string();
+            assert!(
+                message.contains(REMOTE_ADDR_ENV),
+                "the error names the variable: {message}"
+            );
+            assert!(
+                message.contains(value),
+                "the error names the value: {message}"
+            );
+            drop(env);
+        }
+    }
 }
