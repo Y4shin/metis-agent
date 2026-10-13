@@ -19,6 +19,12 @@ pub type OwnedStreamEventsRequestView = ::buffa::view::OwnedView<
 /// Shorthand for `OwnedView<EventView<'static>>`.
 pub type OwnedEventView =
     ::buffa::view::OwnedView<crate::proto::metis::v1::__buffa::view::EventView<'static>>;
+/// Shorthand for `OwnedView<CancelRequestView<'static>>`.
+pub type OwnedCancelRequestView =
+    ::buffa::view::OwnedView<crate::proto::metis::v1::__buffa::view::CancelRequestView<'static>>;
+/// Shorthand for `OwnedView<CancelResponseView<'static>>`.
+pub type OwnedCancelResponseView =
+    ::buffa::view::OwnedView<crate::proto::metis::v1::__buffa::view::CancelResponseView<'static>>;
 impl ::connectrpc::Encodable<crate::proto::metis::v1::EchoResponse>
     for crate::proto::metis::v1::__buffa::view::EchoResponseView<'_>
 {
@@ -109,6 +115,38 @@ impl ::connectrpc::Encodable<crate::proto::metis::v1::Event>
         ::connectrpc::__codegen::encode_view_body_segments(self.reborrow(), self.bytes(), codec)
     }
 }
+impl ::connectrpc::Encodable<crate::proto::metis::v1::CancelResponse>
+    for crate::proto::metis::v1::__buffa::view::CancelResponseView<'_>
+{
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<crate::proto::metis::v1::CancelResponse>
+    for ::buffa::view::OwnedView<
+        crate::proto::metis::v1::__buffa::view::CancelResponseView<'static>,
+    >
+{
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(self.reborrow(), self.bytes(), codec)
+    }
+}
 /// Full service name for this service.
 pub const DAEMON_SERVICE_SERVICE_NAME: &str = "metis.v1.DaemonService";
 /// Static [`Spec`](::connectrpc::Spec) for the `Echo` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
@@ -127,6 +165,12 @@ pub const DAEMON_SERVICE_PAIR_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::ser
 pub const DAEMON_SERVICE_STREAM_EVENTS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
     "/metis.v1.DaemonService/StreamEvents",
     ::connectrpc::StreamType::ServerStream,
+)
+.with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `Cancel` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const DAEMON_SERVICE_CANCEL_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+    "/metis.v1.DaemonService/Cancel",
+    ::connectrpc::StreamType::Unary,
 )
 .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
 /// The daemon's first service version.
@@ -242,6 +286,28 @@ pub trait DaemonService: Send + Sync + 'static {
             >,
         >,
     > + Send;
+    /// Stop the in-flight work a caller started under the request identifier it
+    /// declared. The call is idempotent: it stops what is in flight and reports
+    /// whether anything was, so a caller that repeats it is answered rather than
+    /// refused. Work is keyed by the declaring surface and the identifier, so a
+    /// cancel stops only work its own surface started.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn cancel<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, crate::proto::metis::v1::CancelRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<crate::proto::metis::v1::CancelResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
 }
 /// Extension trait for registering a service implementation with a Router.
 ///
@@ -340,6 +406,29 @@ impl<S: DaemonService> DaemonServiceExt for S {
                 }),
             )
             .with_spec(DAEMON_SERVICE_STREAM_EVENTS_SPEC)
+            .route_view(DAEMON_SERVICE_SERVICE_NAME, "Cancel", {
+                let svc = ::std::sync::Arc::clone(&self);
+                ::connectrpc::view_handler_fn(
+                    move |ctx,
+                          req: ::buffa::view::OwnedView<
+                        crate::proto::metis::v1::__buffa::view::CancelRequestView<'static>,
+                    >,
+                          format| {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                crate::proto::metis::v1::CancelRequest,
+                            >::from_parts(
+                                req.reborrow(), req.bytes()
+                            );
+                            svc.cancel(ctx, sreq)
+                                .await?
+                                .encode::<crate::proto::metis::v1::CancelResponse>(format)
+                        }
+                    },
+                )
+            })
+            .with_spec(DAEMON_SERVICE_CANCEL_SPEC)
     }
 }
 /// Type-inference marker used by [`Router::add_service`](::connectrpc::Router::add_service).
@@ -404,6 +493,10 @@ impl<T: DaemonService> ::connectrpc::Dispatcher for DaemonServiceServer<T> {
                 ::connectrpc::dispatcher::codegen::MethodDescriptor::server_streaming()
                     .with_spec(DAEMON_SERVICE_STREAM_EVENTS_SPEC),
             ),
+            "Cancel" => Some(
+                ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                    .with_spec(DAEMON_SERVICE_CANCEL_SPEC),
+            ),
             _ => None,
         }
     }
@@ -455,6 +548,25 @@ impl<T: DaemonService> ::connectrpc::Dispatcher for DaemonServiceServer<T> {
                     svc.pair(ctx, req)
                         .await?
                         .encode::<crate::proto::metis::v1::PairResponse>(format)
+                })
+            }
+            "Cancel" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        crate::proto::metis::v1::CancelRequest,
+                    >(request.encoded()?, format)?;
+                    let req: crate::proto::metis::v1::__buffa::view::CancelRequestView<'_> =
+                        ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                            &body,
+                            ctx.decode_options(),
+                        )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        crate::proto::metis::v1::CancelRequest,
+                    >::from_parts(&req, &body);
+                    svc.cancel(ctx, req)
+                        .await?
+                        .encode::<crate::proto::metis::v1::CancelResponse>(format)
                 })
             }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
@@ -713,6 +825,43 @@ where
             &self.transport,
             &self.config,
             DAEMON_SERVICE_STREAM_EVENTS_SPEC.with_origin(::connectrpc::SpecOrigin::Client),
+            request,
+            options,
+        )
+        .await
+    }
+    /// Call the Cancel RPC. Sends a request to /metis.v1.DaemonService/Cancel.
+    pub async fn cancel(
+        &self,
+        request: crate::proto::metis::v1::CancelRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<
+                crate::proto::metis::v1::__buffa::view::CancelResponseView<'static>,
+            >,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.cancel_with_options(request, ::connectrpc::client::CallOptions::default())
+            .await
+    }
+    /// Call the Cancel RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn cancel_with_options(
+        &self,
+        request: crate::proto::metis::v1::CancelRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<
+                crate::proto::metis::v1::__buffa::view::CancelResponseView<'static>,
+            >,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+            &self.transport,
+            &self.config,
+            DAEMON_SERVICE_CANCEL_SPEC.with_origin(::connectrpc::SpecOrigin::Client),
             request,
             options,
         )

@@ -148,6 +148,149 @@ impl ::buffa::Enumeration for EventKind {
         ]
     }
 }
+/// What a cancel call did.
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[repr(i32)]
+pub enum CancelOutcome {
+    /// Not set. A receiver treats it as an answer it cannot act on.
+    CANCEL_OUTCOME_UNSPECIFIED = 0i32,
+    /// An in-flight request under that identifier was found and is being stopped.
+    /// What the work already published stays published: cancellation stops work,
+    /// it does not undo it.
+    CANCEL_OUTCOME_CANCELLED = 1i32,
+    /// Nothing was in flight under that identifier: the work finished, was already
+    /// cancelled, or was never seen. A caller reads this as "already finished",
+    /// which is what makes a repeated cancel idempotent and what keeps the answer
+    /// from telling a caller whether an identifier it does not own exists.
+    CANCEL_OUTCOME_ALREADY_FINISHED = 2i32,
+}
+impl CancelOutcome {
+    /// Idiomatic alias for [`Self::CANCEL_OUTCOME_UNSPECIFIED`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Unspecified: Self = Self::CANCEL_OUTCOME_UNSPECIFIED;
+    /// Idiomatic alias for [`Self::CANCEL_OUTCOME_CANCELLED`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Cancelled: Self = Self::CANCEL_OUTCOME_CANCELLED;
+    /// Idiomatic alias for [`Self::CANCEL_OUTCOME_ALREADY_FINISHED`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const AlreadyFinished: Self = Self::CANCEL_OUTCOME_ALREADY_FINISHED;
+}
+impl ::core::default::Default for CancelOutcome {
+    fn default() -> Self {
+        Self::CANCEL_OUTCOME_UNSPECIFIED
+    }
+}
+impl ::serde::Serialize for CancelOutcome {
+    fn serialize<S: ::serde::Serializer>(&self, s: S) -> ::core::result::Result<S::Ok, S::Error> {
+        s.serialize_str(::buffa::Enumeration::proto_name(self))
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for CancelOutcome {
+    fn deserialize<D: ::serde::Deserializer<'de>>(d: D) -> ::core::result::Result<Self, D::Error> {
+        struct _V;
+        impl ::serde::de::Visitor<'_> for _V {
+            type Value = CancelOutcome;
+            fn expecting(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                f.write_str(concat!(
+                    "a string, integer, or null for ",
+                    stringify!(CancelOutcome)
+                ))
+            }
+            fn visit_str<E: ::serde::de::Error>(
+                self,
+                v: &str,
+            ) -> ::core::result::Result<CancelOutcome, E> {
+                <CancelOutcome as ::buffa::Enumeration>::from_proto_name(v)
+                    .ok_or_else(|| ::serde::de::Error::unknown_variant(v, &[]))
+            }
+            fn visit_i64<E: ::serde::de::Error>(
+                self,
+                v: i64,
+            ) -> ::core::result::Result<CancelOutcome, E> {
+                let v32 = i32::try_from(v).map_err(|_| {
+                    ::serde::de::Error::custom(::buffa::alloc::format!(
+                        "enum value {v} out of i32 range"
+                    ))
+                })?;
+                <CancelOutcome as ::buffa::Enumeration>::from_i32(v32).ok_or_else(|| {
+                    ::serde::de::Error::custom(::buffa::alloc::format!("unknown enum value {v32}"))
+                })
+            }
+            fn visit_u64<E: ::serde::de::Error>(
+                self,
+                v: u64,
+            ) -> ::core::result::Result<CancelOutcome, E> {
+                let v32 = i32::try_from(v).map_err(|_| {
+                    ::serde::de::Error::custom(::buffa::alloc::format!(
+                        "enum value {v} out of i32 range"
+                    ))
+                })?;
+                <CancelOutcome as ::buffa::Enumeration>::from_i32(v32).ok_or_else(|| {
+                    ::serde::de::Error::custom(::buffa::alloc::format!("unknown enum value {v32}"))
+                })
+            }
+            fn visit_unit<E: ::serde::de::Error>(self) -> ::core::result::Result<CancelOutcome, E> {
+                ::core::result::Result::Ok(::core::default::Default::default())
+            }
+        }
+        d.deserialize_any(_V)
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for CancelOutcome {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+impl ::buffa::Enumeration for CancelOutcome {
+    fn from_i32(value: i32) -> ::core::option::Option<Self> {
+        match value {
+            0i32 => ::core::option::Option::Some(Self::CANCEL_OUTCOME_UNSPECIFIED),
+            1i32 => ::core::option::Option::Some(Self::CANCEL_OUTCOME_CANCELLED),
+            2i32 => ::core::option::Option::Some(Self::CANCEL_OUTCOME_ALREADY_FINISHED),
+            _ => ::core::option::Option::None,
+        }
+    }
+    fn to_i32(&self) -> i32 {
+        *self as i32
+    }
+    fn proto_name(&self) -> &'static str {
+        match self {
+            Self::CANCEL_OUTCOME_UNSPECIFIED => "CANCEL_OUTCOME_UNSPECIFIED",
+            Self::CANCEL_OUTCOME_CANCELLED => "CANCEL_OUTCOME_CANCELLED",
+            Self::CANCEL_OUTCOME_ALREADY_FINISHED => "CANCEL_OUTCOME_ALREADY_FINISHED",
+        }
+    }
+    fn from_proto_name(name: &str) -> ::core::option::Option<Self> {
+        match name {
+            "CANCEL_OUTCOME_UNSPECIFIED" => {
+                ::core::option::Option::Some(Self::CANCEL_OUTCOME_UNSPECIFIED)
+            }
+            "CANCEL_OUTCOME_CANCELLED" => {
+                ::core::option::Option::Some(Self::CANCEL_OUTCOME_CANCELLED)
+            }
+            "CANCEL_OUTCOME_ALREADY_FINISHED" => {
+                ::core::option::Option::Some(Self::CANCEL_OUTCOME_ALREADY_FINISHED)
+            }
+            _ => ::core::option::Option::None,
+        }
+    }
+    fn values() -> &'static [Self] {
+        &[
+            Self::CANCEL_OUTCOME_UNSPECIFIED,
+            Self::CANCEL_OUTCOME_CANCELLED,
+            Self::CANCEL_OUTCOME_ALREADY_FINISHED,
+        ]
+    }
+}
 #[derive(Clone, PartialEq, Default, ::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct EchoRequest {
@@ -830,6 +973,263 @@ pub const __STREAM_EVENTS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry
         type_url: "type.googleapis.com/metis.v1.StreamEventsRequest",
         to_json: ::buffa::type_registry::any_to_json::<StreamEventsRequest>,
         from_json: ::buffa::type_registry::any_from_json::<StreamEventsRequest>,
+        is_wkt: false,
+    };
+/// The request identifier whose work should stop.
+#[derive(Clone, PartialEq, Default, ::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct CancelRequest {
+    /// The identifier the work declared as request metadata, in the spelling the
+    /// `metis-request-id` header carries: at most 64 bytes, every byte in
+    /// `0x21..=0x7E`. An identifier this daemon cannot act on is refused as an
+    /// invalid argument rather than treated as work that was never seen.
+    ///
+    /// Field 1: `request_id`
+    #[serde(
+        rename = "requestId",
+        alias = "request_id",
+        with = "::buffa::json_helpers::proto_string",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
+    )]
+    pub request_id: ::buffa::alloc::string::String,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for CancelRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CancelRequest")
+            .field("request_id", &self.request_id)
+            .finish()
+    }
+}
+impl CancelRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/metis.v1.CancelRequest";
+}
+::buffa::impl_default_instance!(CancelRequest);
+impl ::buffa::MessageName for CancelRequest {
+    const PACKAGE: &'static str = "metis.v1";
+    const NAME: &'static str = "CancelRequest";
+    const FULL_NAME: &'static str = "metis.v1.CancelRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/metis.v1.CancelRequest";
+}
+impl ::buffa::Message for CancelRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if !self.request_id.is_empty() {
+            size += 1u64 + ::buffa::types::string_encoded_len(&self.request_id) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(&self, _cache: &mut ::buffa::SizeCache, buf: &mut impl ::buffa::EncodeSink) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if !self.request_id.is_empty() {
+            ::buffa::types::put_string_field(1u32, &self.request_id, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(&mut self.request_id, buf)?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.request_id.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for CancelRequest {
+    const PROTO_FQN: &'static str = "metis.v1.CancelRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for CancelRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __CANCEL_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
+    ::buffa::type_registry::JsonAnyEntry {
+        type_url: "type.googleapis.com/metis.v1.CancelRequest",
+        to_json: ::buffa::type_registry::any_to_json::<CancelRequest>,
+        from_json: ::buffa::type_registry::any_from_json::<CancelRequest>,
+        is_wkt: false,
+    };
+/// What a cancel call did.
+#[derive(Clone, PartialEq, Default, ::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct CancelResponse {
+    /// Whether anything was in flight under the identifier.
+    ///
+    /// Field 1: `outcome`
+    #[serde(
+        rename = "outcome",
+        with = "::buffa::json_helpers::proto_enum",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_default_enum_value"
+    )]
+    pub outcome: ::buffa::EnumValue<CancelOutcome>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for CancelResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CancelResponse")
+            .field("outcome", &self.outcome)
+            .finish()
+    }
+}
+impl CancelResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/metis.v1.CancelResponse";
+}
+::buffa::impl_default_instance!(CancelResponse);
+impl ::buffa::MessageName for CancelResponse {
+    const PACKAGE: &'static str = "metis.v1";
+    const NAME: &'static str = "CancelResponse";
+    const FULL_NAME: &'static str = "metis.v1.CancelResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/metis.v1.CancelResponse";
+}
+impl ::buffa::Message for CancelResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        {
+            let val = self.outcome.to_i32();
+            if val != 0 {
+                size += 1u64 + ::buffa::types::int32_encoded_len(val) as u64;
+            }
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(&self, _cache: &mut ::buffa::SizeCache, buf: &mut impl ::buffa::EncodeSink) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        {
+            let val = self.outcome.to_i32();
+            if val != 0 {
+                ::buffa::types::put_int32_field(1u32, val, buf);
+            }
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(tag, ::buffa::encoding::WireType::Varint)?;
+                self.outcome = ::buffa::EnumValue::from(::buffa::types::decode_int32(buf)?);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.outcome = ::buffa::EnumValue::from(0);
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for CancelResponse {
+    const PROTO_FQN: &'static str = "metis.v1.CancelResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for CancelResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __CANCEL_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
+    ::buffa::type_registry::JsonAnyEntry {
+        type_url: "type.googleapis.com/metis.v1.CancelResponse",
+        to_json: ::buffa::type_registry::any_to_json::<CancelResponse>,
+        from_json: ::buffa::type_registry::any_from_json::<CancelResponse>,
         is_wkt: false,
     };
 /// One message on an event stream: the snapshot that opens a stream with no
@@ -2408,6 +2808,531 @@ pub mod __buffa {
                 ::serde::Serialize::serialize(&self.0, __s)
             }
         }
+        /// The request identifier whose work should stop.
+        #[derive(Clone, Debug, Default)]
+        pub struct CancelRequestView<'a> {
+            /// The identifier the work declared as request metadata, in the spelling the
+            /// `metis-request-id` header carries: at most 64 bytes, every byte in
+            /// `0x21..=0x7E`. An identifier this daemon cannot act on is refused as an
+            /// invalid argument rather than treated as work that was never seen.
+            ///
+            /// Field 1: `request_id`
+            pub request_id: &'a str,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for CancelRequestView<'a> {
+            type Owned = super::super::CancelRequest;
+            fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+                let __elem = ::core::cell::Cell::new(::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT);
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.request_id = ::buffa::types::borrow_str(&mut cur)?;
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<super::super::CancelRequest, ::buffa::DecodeError>
+            {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<super::super::CancelRequest, ::buffa::DecodeError>
+            {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::CancelRequest {
+                    request_id: self.request_id.to_string(),
+                    __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for CancelRequestView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if !self.request_id.is_empty() {
+                    size += 1u64 + ::buffa::types::string_encoded_len(&self.request_id) as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if !self.request_id.is_empty() {
+                    ::buffa::types::put_string_field(1u32, &self.request_id, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
+        ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for CancelRequestView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                if !::buffa::json_helpers::skip_if::is_empty_str(self.request_id) {
+                    __map.serialize_entry("requestId", self.request_id)?;
+                }
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for CancelRequestView<'a> {
+            const PACKAGE: &'static str = "metis.v1";
+            const NAME: &'static str = "CancelRequest";
+            const FULL_NAME: &'static str = "metis.v1.CancelRequest";
+            const TYPE_URL: &'static str = "type.googleapis.com/metis.v1.CancelRequest";
+        }
+        ::buffa::impl_default_view_instance!(CancelRequestView);
+        ::buffa::impl_view_reborrow!(CancelRequestView);
+        /// Self-contained, `'static` owned view of a `CancelRequest` message.
+        ///
+        /// Wraps [`::buffa::OwnedView`]`<`[`CancelRequestView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+        ///
+        /// Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`CancelRequestView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.
+        #[derive(Clone, Debug)]
+        pub struct CancelRequestOwnedView(::buffa::OwnedView<CancelRequestView<'static>>);
+        impl CancelRequestOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(CancelRequestOwnedView(::buffa::OwnedView::decode(
+                    bytes,
+                )?))
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(CancelRequestOwnedView(
+                    ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                ))
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::CancelRequest,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(CancelRequestOwnedView(::buffa::OwnedView::from_owned(
+                    msg,
+                )?))
+            }
+            /// Borrow the full [`CancelRequestView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &CancelRequestView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::CancelRequest {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// The identifier the work declared as request metadata, in the spelling the
+            /// `metis-request-id` header carries: at most 64 bytes, every byte in
+            /// `0x21..=0x7E`. An identifier this daemon cannot act on is refused as an
+            /// invalid argument rather than treated as work that was never seen.
+            ///
+            /// Field 1: `request_id`
+            #[must_use]
+            pub fn request_id(&self) -> &'_ str {
+                self.0.reborrow().request_id
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<CancelRequestView<'static>>>
+            for CancelRequestOwnedView
+        {
+            fn from(inner: ::buffa::OwnedView<CancelRequestView<'static>>) -> Self {
+                CancelRequestOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<CancelRequestOwnedView>
+            for ::buffa::OwnedView<CancelRequestView<'static>>
+        {
+            fn from(wrapper: CancelRequestOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<CancelRequestView<'static>>>
+            for CancelRequestOwnedView
+        {
+            fn as_ref(&self) -> &::buffa::OwnedView<CancelRequestView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::CancelRequest {
+            type View<'a> = CancelRequestView<'a>;
+            type ViewHandle = CancelRequestOwnedView;
+        }
+        impl ::serde::Serialize for CancelRequestOwnedView {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                ::serde::Serialize::serialize(&self.0, __s)
+            }
+        }
+        /// What a cancel call did.
+        #[derive(Clone, Debug, Default)]
+        pub struct CancelResponseView<'a> {
+            /// Whether anything was in flight under the identifier.
+            ///
+            /// Field 1: `outcome`
+            pub outcome: ::buffa::EnumValue<super::super::CancelOutcome>,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for CancelResponseView<'a> {
+            type Owned = super::super::CancelResponse;
+            fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+                let __elem = ::core::cell::Cell::new(::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT);
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.outcome =
+                            ::buffa::EnumValue::from(::buffa::types::decode_int32(&mut cur)?);
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<super::super::CancelResponse, ::buffa::DecodeError>
+            {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<super::super::CancelResponse, ::buffa::DecodeError>
+            {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::CancelResponse {
+                    outcome: self.outcome,
+                    __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for CancelResponseView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                {
+                    let val = self.outcome.to_i32();
+                    if val != 0 {
+                        size += 1u64 + ::buffa::types::int32_encoded_len(val) as u64;
+                    }
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                {
+                    let val = self.outcome.to_i32();
+                    if val != 0 {
+                        ::buffa::types::put_int32_field(1u32, val, buf);
+                    }
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
+        ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for CancelResponseView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                if !::buffa::json_helpers::skip_if::is_default_enum_value(&self.outcome) {
+                    __map.serialize_entry("outcome", &self.outcome)?;
+                }
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for CancelResponseView<'a> {
+            const PACKAGE: &'static str = "metis.v1";
+            const NAME: &'static str = "CancelResponse";
+            const FULL_NAME: &'static str = "metis.v1.CancelResponse";
+            const TYPE_URL: &'static str = "type.googleapis.com/metis.v1.CancelResponse";
+        }
+        ::buffa::impl_default_view_instance!(CancelResponseView);
+        ::buffa::impl_view_reborrow!(CancelResponseView);
+        /// Self-contained, `'static` owned view of a `CancelResponse` message.
+        ///
+        /// Wraps [`::buffa::OwnedView`]`<`[`CancelResponseView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+        ///
+        /// Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`CancelResponseView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.
+        #[derive(Clone, Debug)]
+        pub struct CancelResponseOwnedView(::buffa::OwnedView<CancelResponseView<'static>>);
+        impl CancelResponseOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(CancelResponseOwnedView(::buffa::OwnedView::decode(
+                    bytes,
+                )?))
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(CancelResponseOwnedView(
+                    ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                ))
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::CancelResponse,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(CancelResponseOwnedView(::buffa::OwnedView::from_owned(
+                    msg,
+                )?))
+            }
+            /// Borrow the full [`CancelResponseView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &CancelResponseView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::CancelResponse {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Whether anything was in flight under the identifier.
+            ///
+            /// Field 1: `outcome`
+            #[must_use]
+            pub fn outcome(&self) -> ::buffa::EnumValue<super::super::CancelOutcome> {
+                self.0.reborrow().outcome
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<CancelResponseView<'static>>>
+            for CancelResponseOwnedView
+        {
+            fn from(inner: ::buffa::OwnedView<CancelResponseView<'static>>) -> Self {
+                CancelResponseOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<CancelResponseOwnedView>
+            for ::buffa::OwnedView<CancelResponseView<'static>>
+        {
+            fn from(wrapper: CancelResponseOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<CancelResponseView<'static>>>
+            for CancelResponseOwnedView
+        {
+            fn as_ref(&self) -> &::buffa::OwnedView<CancelResponseView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::CancelResponse {
+            type View<'a> = CancelResponseView<'a>;
+            type ViewHandle = CancelResponseOwnedView;
+        }
+        impl ::serde::Serialize for CancelResponseOwnedView {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                ::serde::Serialize::serialize(&self.0, __s)
+            }
+        }
         /// One message on an event stream: the snapshot that opens a stream with no
         /// cursor, an event a stream replays or carries live, or a heartbeat.
         #[derive(Clone, Debug, Default)]
@@ -2772,11 +3697,21 @@ pub mod __buffa {
         reg.register_json_any(super::__PAIR_REQUEST_JSON_ANY);
         reg.register_json_any(super::__PAIR_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__STREAM_EVENTS_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__CANCEL_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__CANCEL_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__EVENT_JSON_ANY);
     }
 }
 #[doc(inline)]
 pub use self::__buffa::register_types;
+#[doc(inline)]
+pub use self::__buffa::view::CancelRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::CancelRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::CancelResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::CancelResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::EchoRequestOwnedView;
 #[doc(inline)]
