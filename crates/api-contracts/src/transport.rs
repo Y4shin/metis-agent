@@ -94,6 +94,74 @@ pub fn uds_transport(path: impl Into<std::path::PathBuf>) -> connectrpc::client:
     connectrpc::client::Http2Connection::lazy_with_connector(connector, local_authority())
 }
 
+/// Serve a Connect router over a TCP socket.
+///
+/// The listener is bound here, so a requested port of `0` is resolved by the
+/// operating system. Each accepted stream is handed to [`serve_stream`] on its
+/// own task, with a clone of the one router. The transport is plaintext: TLS
+/// and the proxy trust rule belong to their own tickets.
+///
+/// # Errors
+///
+/// Returns the bind or accept error. Accepting runs until the task is dropped.
+pub async fn serve_tcp(addr: SocketAddr, router: Router) -> io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_tcp_listener(listener, router).await
+}
+
+/// Serve a Connect router over an already bound TCP listener.
+///
+/// This is the same accept loop [`serve_tcp`] runs, not a second one. The split
+/// exists for a caller that must report the address the operating system
+/// assigned to a port of `0`: it binds first, reads `local_addr`, and hands the
+/// listener on. `client::skeleton::serve_remote` is that caller.
+///
+/// # Errors
+///
+/// Returns the accept error. Accepting runs until the task is dropped.
+pub async fn serve_tcp_listener(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> io::Result<()> {
+    let router = Arc::new(router);
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let router = Arc::clone(&router);
+        tokio::spawn(async move {
+            if let Err(err) = serve_stream(stream, router).await {
+                eprintln!("remote connection ended with error: {err}");
+            }
+        });
+    }
+}
+
+/// Build an h2c client connection over TCP, lazily on first use.
+///
+/// The connector is the shape [`uds_transport`] uses: a plain
+/// `tower::service_fn` that opens the socket. The authority is `http://<addr>`.
+pub fn tcp_transport(addr: SocketAddr) -> connectrpc::client::Http2Connection {
+    let connector = tower::service_fn(move |_uri: http::Uri| async move {
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        Ok::<_, io::Error>(TokioIo::new(stream))
+    });
+    connectrpc::client::Http2Connection::lazy_with_connector(connector, remote_authority(addr))
+}
+
+/// The `:authority` value used for a TCP transport to `addr`.
+///
+/// The connector and the generated client both name it, so a request carries
+/// the address the connection was opened to.
+///
+/// # Panics
+///
+/// Never in practice: a socket address literal is a valid authority.
+#[must_use]
+pub fn remote_authority(addr: SocketAddr) -> http::Uri {
+    format!("http://{addr}")
+        .parse()
+        .expect("a socket address is a valid authority")
+}
+
 /// The `:authority` value used for the local IPC transport. The server does not
 /// validate it.
 ///
