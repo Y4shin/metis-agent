@@ -6,8 +6,9 @@ status: stable
 
 ## Deviation report: state-store
 
-Implemented on `ticket/state-store` (HEAD `f8331b5`, twelve `wip:` checkpoints
-off `main` at `e88b055`). Compared against the `## Pending ticket: state-store`
+Implemented on `ticket/state-store` (HEAD `f8331b5`, eleven checkpoints off
+`main` at `e88b055`, ten of them `wip:` and one a docs commit (`ec93b77`)).
+Compared against the `## Pending ticket: state-store`
 section of `docs/tasks/metis-foundations/arch-spec.md` and the ticket doc's
 acceptance criteria. I re-ran the gates on `f8331b5`: `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo test -p daemon -p
