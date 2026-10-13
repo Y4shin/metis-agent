@@ -1472,12 +1472,14 @@ harness and no new test protocol.
 - The plaintext warning the map's constraints require belongs to the daemon's
   startup policy and to `reverse-proxy-mode`; this ticket records the residual
   instead of inventing a policy surface for it.
-- The realtime stream over TCP is not asserted here: no streaming RPC exists
-  until `event-stream` lands, and `serve_stream` serves any Connect service over
+- The realtime stream over TCP was not asserted here: no streaming RPC existed
+  until `event-stream` landed, and `serve_stream` serves any Connect service over
   the stream it is handed. This is the acceptance-criterion narrowing the
   operator approved before the chain: criterion 4 asserts the echo RPC only, and
-  the stream-over-TCP assertion is carried by `event-stream`, the ticket that
-  owns the first stream.
+  the stream-over-TCP assertion was carried by `event-stream`, the ticket that
+  owns the first stream. Closed by `event-stream` (merge `0727964`):
+  `crates/daemon/tests/stream.rs` asserts the stream over
+  `serve_tcp_listener_service` with a paired token.
 
 ### Residual, recorded rather than resolved
 
@@ -1725,11 +1727,11 @@ existing contract and ABI gates for seam 5.
   superseded, because this ticket adds no credential.
 - `remote-pairing` carries the same three headers plus
   the credential over TCP. `event-stream` carries them on the stream request, and
-  its `StreamEvents` handler must call `identity::from_headers` too, because the
-  recording is per handler and the landed `RecordingDaemon` implements only the
-  one RPC the contract has. No new refusal format appears anywhere: both ends of
-  the version-refusal channel live in `api_contracts::identity` under the names
-  above.
+  its `StreamEvents` handler calls `identity::from_headers` too (landed in
+  `event-stream`, merge `0727964`), because the recording is per handler and the
+  landed `RecordingDaemon` implemented only the one RPC the contract had then. No
+  new refusal format appears anywhere: both ends of the version-refusal channel
+  live in `api_contracts::identity` under the names above.
 - The endpoint default changes the path both the daemon and the client use, while
   `METIS_ENDPOINT` remains the override for operators and tests. The effort map's
   fog entry about the `/tmp` conflict is closed by this rule, and so is the open
@@ -1753,10 +1755,11 @@ existing contract and ABI gates for seam 5.
   integration-tested: creating a directory owned by another uid needs root, so
   only the symlink, non-directory, wider-mode and unknown-group refusals are
   asserted.
-- The recording is per handler. `RecordingDaemon` implements the one RPC the
-  contract has today, so `event-stream`'s `StreamEvents` handler must call
-  `identity::from_headers` too, or streaming calls are unrecorded rather than
-  refused. The daemon effort inherits the same obligation.
+- The recording is per handler. `RecordingDaemon` implemented the one RPC the
+  contract had then, so `event-stream`'s `StreamEvents` handler had to call
+  `identity::from_headers` too, or streaming calls would be unrecorded rather than
+  refused. It does, in the recording skeleton's handler and in the daemon's own
+  (merge `0727964`), and the daemon effort inherits the same obligation.
 - A daemon restarted without `METIS_SOCKET_GROUP` after a run with it meets a 770
   directory that its 700 rule refuses. Refusing is what the rule asks for, so an
   operator who removes the group must also remove the directory.
@@ -2319,11 +2322,13 @@ with 0 failed.
   landed `serve-tcp-service` mounts the factory's `ConnectRpcService` through
   `serve_tcp_service`.
 - `event-stream` inherits authorization through `intercept_streaming`, so its
-  `StreamEvents` handler does not call the check itself; the obligation is the
-  interceptor's, which is why this ticket removes that residual from
-  `local-identity-and-acl`. The streaming half has no wire test yet, because the
-  contract declares no streaming RPC: it is proven by construction through the
-  one shared `admit`, and `event-stream` owns the wire test.
+  `StreamEvents` handler does not call the credential check itself; the obligation
+  is the interceptor's, which is why this ticket removes that residual from
+  `local-identity-and-acl`. That handler does check the identity declaration,
+  which is a separate obligation. The streaming half had no wire test, because
+  the contract declared no streaming RPC: it was proven by construction through
+  the one shared `admit`, and `event-stream` has since supplied the wire test
+  (merge `0727964`).
 - A dependent that maps a credential refusal reads `api_contracts::auth`
   (`CredentialRefusal`, `AUTH_ERROR_HEADER`, `bearer_token`), not the daemon's
   own spelling; `daemon::auth` re-exports both header names for its refusals
@@ -2338,8 +2343,10 @@ with 0 failed.
 
 Recorded residuals:
 
-- The streaming half of the interceptor has no wire test, because the contract
-  declares no streaming RPC yet; `event-stream` exercises it.
+- The streaming half of the interceptor had no wire test, because the contract
+  declared no streaming RPC; `event-stream` exercises it now, refusing a stream
+  with no credential and serving one with a paired token over TCP (merge
+  `0727964`).
 - A store fault during verification fails closed as `CredentialRejected {
   Invalid }`, because `AuthError` carries the two planned causes; the enum is
   non-exhaustive, so a store-fault variant stays additive.
@@ -2542,9 +2549,10 @@ seams 4 and 5.
   the service-taking TCP front-end has no test coverage on non-Unix targets even
   though TCP is the first transport every target has. A dedicated test binary is
   the fix if that coverage is wanted.
-- The parity assertion covers the unary path only, because the contract declares
+- The parity assertion covers the unary path only, because the contract declared
   no streaming RPC; `event-stream` owns the stream, both in the contract and at
-  the wire.
+  the wire, and it landed the wire half over `serve_tcp_listener_service` (merge
+  `0727964`). The parity comparison itself is still unary-only.
 - `serve_tcp_listener`'s body changed from holding the accept loop to delegating
   to it, so the landed function keeps its signature and its observable behaviour
   but is no longer byte-identical to what `tcp-listener` landed. Criterion 3 read
@@ -2760,8 +2768,10 @@ tests are Unix-gated, and these two inherit that.
 - The two new tests live in `crates/daemon/tests/auth.rs`, whose `#![cfg(unix)]`
   gates the whole binary, so remote pairing has no test coverage on non-Unix
   targets. That is the gate `serve-tcp-service` recorded and it is unchanged.
-- The event-stream half of criterion 2 is unproven by design: the contract declares
-  no streaming RPC, and `event-stream` owns that wire test.
+- The event-stream half of criterion 2 was unproven by design: the contract
+  declared no streaming RPC, and `event-stream` owned that wire test. It has
+  landed it (merge `0727964`), asserting the refusal and the paired-token stream
+  over TCP.
 - Closing pairing revokes nothing, as approved and asserted: a surface paired
   before the key was removed keeps serving until its token row is deleted.
 - Pairing over a network-reachable listener has no rate limit and no lockout, and
@@ -2778,12 +2788,42 @@ tests are Unix-gated, and these two inherit that.
 
 ---
 
-## Pending ticket: `event-stream`
+## Landed ticket: `event-stream`
 
-Blocked by the landed skeleton. The first ticket of the realtime line and the
-largest: appends the server-streaming events RPC to `metis.v1`, adds the
-daemon-wide event ring and the snapshot that opens every stream, and gives the
-client a stream it can drain.
+Landed on `task/event-stream` as the merge commit `0727964`, parents `4235803`
+(the landing branch, created at `main`'s tip because it did not exist before this
+landing, the convention this spec records) and `64bd7d5` (the working branch
+`ticket/event-stream`, seven `wip:` commits off `main` at `4235803`, deleted after
+the merge); the docs commit `f765728` carries the ticket note and the committed
+deviation report. The merge was clean and `git diff 64bd7d5 HEAD` is empty, so the
+landing tree is byte for byte the tree the verify worker gated and no gate was
+re-run at landing. The gates were green on `64bd7d5` through `devenv shell --`:
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, the workspace
+`cargo test` (163 passed, 0 failed), `cargo test -p api-contracts` (42 passed),
+`cargo test -p daemon --test stream` and `cargo test -p client --test stream` (3
+and 2 passed), `buf lint` with the one scoped exception,
+`buf breaking --against '.git#branch=main' --against-config buf.yaml`, both drift
+checks (`scripts/regenerate-contracts.sh --check` and
+`scripts/regenerate-abi-header.sh --check`), the ABI harness (`[result] PASS
+(73 checks)`) and `cargo run -p client --example events` (`[result] PASS`). The
+first attempt's chain timed out in tdd because the plugin-resolving drift check
+was refused by the BSR's anonymous rate limit, the failure the
+`contract-pipeline` section records; the operator installed a BSR credential and
+the retry re-verified the unchanged, already-complete tree, which is why that
+step needs `BUF_TOKEN` in practice as well as in CI.
+
+The realtime path, and the first ticket of the realtime line: the contract's
+first streaming RPC and its first enum, the daemon-wide event ring and the
+snapshot that opens every stream, and a client stream that can be drained. It
+pays two landed debts: the streaming half of the interceptor, which
+`pairing-and-tokens` could prove only by construction, and the stream-over-TCP
+assertion `tcp-listener`'s acceptance criterion 4 deferred.
+
+The surfaces below are the measured ones. The divergences from the plan are
+folded in below: the delegated payload choice (`string payload = 4`), the prefixed
+`EventKind` constants, the ring's extra members and the `Ring::stream` assembly,
+the `Service` surface, the client's stream helpers and its wider dependency
+footprint, and the example landing as a new file beside `echo.rs`.
 
 ### Exports
 
@@ -2793,65 +2833,168 @@ client a stream it can drain.
   - `StreamEventsRequest { repeated string channels = 1; uint64 last_event_id =
     2; }`, where `0` means no cursor and ids start at 1, so the field needs no
     `optional`.
-  - `Event { uint64 id = 1; EventKind kind = 2; string channel = 3; <payload> = 4; }`,
-    carrying the event's channel, kind and identifier. **The payload field's wire
-    type is deliberately left to the implementing agent, per the operator's
-    decision**, constrained by: it must carry the event's structured content, it
-    must not pull a well-known-type or schema dependency into generation unless
-    that buys more than it costs, and JSON text in a `string` is the accepted
-    fallback. Whatever it picks is recorded in the deviation report and
-    reconciled here, because `buf breaking` runs in FILE mode and changing the
-    type afterwards is expensive.
-  - `enum EventKind { EVENT_KIND_UNSPECIFIED = 0; SNAPSHOT = 1; HEARTBEAT = 2;
-    EVENT = 3; }`, the contract's first enum, which is what makes the buffa
-    mount's dormant `clippy::derivable_impls` allow load-bearing.
+  - `Event { uint64 id = 1; EventKind kind = 2; string channel = 3; string
+    payload = 4; }`, carrying the event's channel, kind and identifier. **The
+    payload field landed as `string payload = 4` carrying JSON text**, the
+    operator-delegated choice and the plan's accepted fallback, recorded here as
+    the plan required. A `string` pulls no well-known type or schema dependency
+    into generation, and both the ring and the client treat the payload as opaque
+    text. The lock-in is the one the plan named: `buf breaking` runs in FILE mode
+    and this is field 4 of a committed message, so a later native encoding is a
+    breaking change. `stream-resume-and-expiry`,
+    `cancellation-and-slow-consumers` and the daemon's real event sources encode
+    payloads as JSON text.
+  - `enum EventKind { EVENT_KIND_UNSPECIFIED = 0; EVENT_KIND_SNAPSHOT = 1;
+    EVENT_KIND_HEARTBEAT = 2; EVENT_KIND_EVENT = 3; }`, the contract's first enum,
+    declared with the idiomatic prefixed proto constants rather than the
+    unprefixed spelling this section first carried. buffa additionally emits the
+    short Rust aliases `EventKind::Snapshot` and `EventKind::Heartbeat` under
+    `#[allow(non_upper_case_globals)]`. **The spelling `EventKind::SNAPSHOT` does
+    not exist**: a caller writes `EventKind::Snapshot` or
+    `EventKind::EVENT_KIND_SNAPSHOT`, and a kind this build does not know reads as
+    `EventKind::Unspecified` through `Event::from_message`.
+    `cancellation-and-slow-consumers` adds kinds in this spelling. The enum is the
+    contract's first, the one the buffa mount's dormant
+    `clippy::derivable_impls` allow was reserved for.
   - `Cancel` is **not** in this ticket; `cancellation-and-slow-consumers` appends
     it.
 - `buf.yaml`: the `RPC_RESPONSE_STANDARD_NAME` exception this file already
   reserves for the streaming message, scoped as tightly as buf v2 allows, with
   `buf lint` green. Regeneration through `scripts/regenerate-contracts.sh`, so the
   committed trees and the drift check move with it.
-- `crates/api-contracts/src/events.rs`: the ring, in the shared crate because the
-  daemon serves it and the client's in-process test service and example also need
-  one, and this is the only crate both reach.
-  - `Event { id: u64, kind: EventKind, channel: String, payload: ... }` as the
-    Rust mirror of the message.
-  - `Ring::new(capacity)`, `publish(channel, kind, payload) -> u64`,
-    `snapshot(&[&str]) -> Vec<Event>`, `since(id, &[&str]) -> Vec<Event>`,
-    `earliest_resumable()`, and a live subscription handle for the serving side.
-  - One daemon-wide monotonic counter across channels, and a bounded capacity
-    that drops the oldest event and advances the earliest resumable id.
-- `crates/daemon/src/service.rs`: the `stream_events` implementation: the
-  snapshot first, then live events for the selected channels, with heartbeats as
-  ordinary messages. `Service::new(store, preshared, heartbeat: Duration)` with
-  `HEARTBEAT_DEFAULT` at 15 seconds, so a test can set a short interval instead of
-  waiting.
-- `crates/client/src/lib.rs`: `pub async fn stream_events(&self, channels:
-  &[&str], last_event_id: u64) -> Result<EventStream, ClientError>`, where
-  `EventStream` yields typed events and the wrapper still names no transport and
-  no generated stub type.
+- `crates/api-contracts/src/events.rs`, mounted as `pub mod events;`: the ring, in
+  the shared crate because the daemon serves it and the client's in-process test
+  service and example also need one, and this is the only crate both reach. The
+  crate's manifest gained `futures-util` for it.
+  - `pub struct Event { id: u64, kind: EventKind, channel: String, payload:
+    String }`, the Rust mirror of the message. `kind` is the generated enum, so
+    the two sides cannot drift on what a snapshot, a heartbeat, or an event is,
+    and the payload is text. `Event::to_message()` and
+    `Event::from_message(&v1::Event)` convert between the mirror and the wire
+    message.
+  - `Ring` is `Clone`, so the daemon can publish into the ring its service serves
+    and a test can hold a second handle. `Ring::new(capacity)` raises a capacity
+    of `0` to `1`, because a window that holds nothing cannot carry an
+    identifier.
+  - `publish(channel, kind, payload) -> u64`, `snapshot(&[&str]) -> Vec<Event>`,
+    `since(id, &[&str]) -> Vec<Event>`, `earliest_resumable()`, `latest_id()`,
+    `subscribe() -> Subscription`, and `Ring::stream(channels, cursor, heartbeat)
+    -> impl Stream<Item = Result<v1::Event, ConnectError>> + Send + 'static`.
+    `latest_id()` and `earliest_resumable()` answer `0` on an empty ring, which is
+    the "nothing has been assigned an identifier yet" value the cursor rule
+    already used.
+  - One daemon-wide monotonic counter across channels, starting at `1`, and a
+    bounded capacity that drops the oldest event and advances the earliest
+    resumable id. `snapshot` is the head of each selected channel in identifier
+    order, a channel named twice contributes once, and an empty selection selects
+    nothing; `since` returns every held event after an identifier.
+  - `Ring::stream` is the one assembly of a stream's shape: the snapshot first
+    (one empty snapshot message, naming no channel and carrying the ring's latest
+    identifier, when no selected channel holds anything), then the live
+    subscription, with heartbeats on an idle stretch. The subscription is taken
+    before the snapshot, so an event published between the two is not lost, and
+    the daemon's service and the client's in-process test service both call it, so
+    the snapshot-then-live-then-heartbeat order cannot drift between them. The
+    item is a `Result` so a later drop policy can refuse in-stream without a
+    signature change; nothing fails today.
+  - The cursor floor is the placeholder `stream-resume-and-expiry` replaces:
+    `floor = cursor.max(head identifiers)`, and only live events above the floor
+    are carried.
+- `crates/daemon/src/service.rs`: `Service::new(store, preshared, heartbeat:
+  Duration)`, the planned signature with the two-argument constructor
+  `remote-pairing` landed widened by the interval, which is why
+  `crates/daemon/tests/auth.rs` moves in the same commit. `HEARTBEAT_DEFAULT` is
+  15 seconds, and the interval belongs to the service rather than to the serving
+  loop, so a test sets a short one instead of waiting. `Service::ring() -> Ring`
+  is the handle the daemon publishes its real events into, and `Service::mount(self:
+  Arc<Self>, policy) -> ConnectRpcService<Router>` builds the interceptor-carrying
+  service; the factory `service(store, preshared, policy)` now delegates to it, so
+  a caller that needs another interval builds the `Service` and mounts it itself.
+  A private `EVENT_CAPACITY` here is 1024.
+  - `stream_events`: the snapshot first, then live events for the selected
+    channels, with heartbeats as ordinary messages, answered as
+    `Response::stream(self.ring.stream(&channels, request.last_event_id,
+    self.heartbeat))`. The channels are copied out of the request body first,
+    because the stream outlives that borrow. The handler checks the declaration
+    itself with `identity::from_headers(ctx.headers())` and refuses one it cannot
+    act on with the same typed refusal and header the handlers behind the
+    interceptor produce, because the recording `local-identity-and-acl` landed is
+    per handler.
+- `crates/client/src/lib.rs`: `pub async fn stream_events(&self, channels: &[&str],
+  last_event_id: u64) -> Result<EventStream, ClientError>`, as planned, and the
+  wrapper still names no transport and no generated stub type. One measured
+  addition the plan did not name: a Connect streaming response carries its status
+  inside the stream, so `stream_events` reads the refusal headers on the response
+  the stream was established with, and an unauthorized stream fails at the call
+  that opened it instead of at the first event. The two `pub(crate)` helpers
+  `refusal(err) -> ClientError` and
+  `typed_refusal(&HeaderMap) -> Option<ClientError>` are where that read lives, and
+  the unary, pairing and stream paths all go through them.
+- `crates/client/src/stream.rs::EventStream`: `message() -> Result<Option<Event>,
+  ClientError>`, yielding `api_contracts::events::Event` and nothing else. It holds
+  `ServerStream<hyper::body::Incoming, EventView<'static>>` privately, so no caller
+  names the transport, the generated client, or a buffa view. The module is private
+  and the type is re-exported (`pub use stream::EventStream;`).
 - `crates/client/src/skeleton.rs`: the stream method too, so the in-process
-  service stays the one the wrapper tests and the example drive.
-- The example prints the snapshot and one event and exits non-zero on failure, and
-  `docs/testing.md` gains the stream run commands.
+  service stays the one the wrapper tests and the example drive. `SkeletonDaemon`
+  changed shape from a unit struct to a struct over a ring and a heartbeat
+  interval, built with `new()` (its own ring at `HEARTBEAT_DEFAULT`) and the
+  additive `with_ring(ring, heartbeat)`; `Default` delegates to `new()`. Its
+  stream delegates to `Ring::stream`, and `RecordingDaemon` records and checks the
+  declaration on the stream handler as well. The additive `serve_uds_with(path,
+  ring, heartbeat)` and `router_with(ring, heartbeat)` are the start path a stream
+  test and the example drive. `HEARTBEAT_DEFAULT` is the daemon's 15 seconds here
+  as well, while the private `EVENT_CAPACITY` here is 64, deliberately smaller than
+  the daemon's window so a drop is reachable from a test.
+- `crates/client/examples/events.rs` is new; `crates/client/examples/echo.rs` is
+  untouched. It serves the skeleton over a ring holding one event on the resolved
+  endpoint, opens the stream through the wrapper, prints `[snapshot]`, publishes a
+  second event, prints `[event]`, prints `[result] PASS`, and exits non-zero on
+  failure.
+- Manifests: `crates/client/Cargo.toml` takes `hyper` as a runtime dependency
+  (the private stream body type) and moves `http` from `[dev-dependencies]` to
+  `[dependencies]` (the refusal header map), so the wrapper's dependency footprint
+  is wider than the generated client and `connectrpc` alone. The root
+  `[workspace.dependencies]` gains
+  `futures-util = { version = "0.3", default-features = false, features = ["std"] }`,
+  `tokio`'s feature set gains `sync` for the ring's fan-out, and `api-contracts`
+  names `futures-util` itself.
+- `crates/api-contracts/tests/contract.rs` extended beyond the plan's letter: the
+  `StreamEvents` procedure path, the byte-level field numbering of
+  `StreamEventsRequest`, `StreamType::ServerStream`, and message round trips,
+  consistent with the file's existing style and with the spec's contract seam.
+- `docs/testing.md` gains an `Event stream` section with the four run commands (the
+  ring unit tests, the daemon stream tests, the client stream test, and the
+  `events` example) and the authorization property; `contracts/README.md` gains a
+  sentence about the scoped lint exception. The plan named `docs/testing.md` only.
 
 ### Existing abstractions to use
 
-- `serve_stream` and the private `serve_connection`, plus `connectrpc`'s native
-  server-streaming support: the connection is already wrapped, so the stream needs
-  no new transport path.
-- `AuthPolicy` and `AuthInterceptor`: the stream is authorized at establishment
-  through `intercept_streaming`, which is exactly the half `pairing-and-tokens`
-  could not test. This ticket supplies that wire test.
-- The landed test helpers, including `TempSocket`, `reserve_loopback_port`,
-  `serve_over_tcp` and the paired-token fixture.
-- `crates/client/examples/echo.rs` as the walkthrough pattern, and
-  `docs/testing.md`'s command-list convention.
+Used as specified: yes.
+
+- `serve_stream` and the private `serve_connection`, with `connectrpc`'s native
+  server-streaming support: no new transport path was added, and
+  `serve_tcp_listener_service` serves the stream over TCP, which is where the
+  deferred assertion landed.
+- `AuthPolicy` and `AuthInterceptor` with `intercept_streaming`: the stream is
+  refused without a credential and served with a paired token over a real TCP
+  listener, which supplies the streaming half `pairing-and-tokens` recorded as
+  untested and the stream-over-TCP assertion `tcp-listener`'s criterion 4
+  deferred.
+- The landed test helpers and fixtures, unchanged: the transport helpers, the
+  paired-token fixture and the private-path ACL helpers. The daemon stream test
+  carries its own `Fixture`, `serve` and `serve_over_tcp`, and the client stream
+  test its own private temporary socket base.
+- `crates/client/examples/echo.rs` as the walkthrough pattern, with
+  `docs/testing.md`'s command-list convention; the landed walkthrough is the new
+  `crates/client/examples/events.rs`.
+- `identity::from_headers` in both streaming handlers with the shared typed
+  refusal, which the downstream-contracts outline required of this ticket.
 
 ### Do NOT reimplement
 
 - Do not add resume or expiry policy, a slow-consumer policy, or the `Cancel`
-  RPC. This ticket carries a cursor; `stream-resume-and-expiry` and
+  RPC. This ticket carried a cursor only; `stream-resume-and-expiry` and
   `cancellation-and-slow-consumers` give it meaning.
 - Do not add a second event loop, a second ring, or a per-channel counter.
 - Do not put the ring in SQLite: it is in-memory and bounded, which is the
@@ -2863,52 +3006,102 @@ client a stream it can drain.
 ### Seams
 
 1. **Contract seam.** The generated server-streaming trait method and client
-   method exist, `buf lint` is green with the one scoped exception, and
-   `regenerate-contracts.sh --check` reports no drift.
-2. **Ring seam.** Ids are monotonic and daemon-wide across channels, the ring is
-   bounded with the oldest dropped past capacity and `earliest_resumable`
-   following it, `snapshot` returns the current head per selected channel, and
-   `since` returns what follows an id. Unit-tested, including the drop case.
+   method exist, `buf lint` is green with the one scoped exception, `buf breaking`
+   against `main` is green, and `regenerate-contracts.sh --check` reports no drift.
+   `crates/api-contracts/tests/contract.rs` asserts the procedure path, the
+   byte-level field numbering of `StreamEventsRequest`, `StreamType::ServerStream`,
+   and the message round trips.
+2. **Ring seam.** Ids are monotonic and daemon-wide across channels and start at
+   `1`, the ring is bounded with the oldest dropped past capacity and
+   `earliest_resumable` following the event that opened the window, `latest_id()`
+   and `earliest_resumable()` answer `0` on an empty ring, `snapshot` returns the
+   current head per selected channel, `since` returns what follows an id, a
+   subscription delivers what was published after it, and `Ring::stream` opens
+   with the snapshot and then follows the ring. Unit-tested in
+   `crates/api-contracts/src/events.rs` as nine tests, six `#[test]` and three
+   `#[tokio::test]` (the tdd report's "seven unit tests" was a miscount, and it
+   spelled the `EventKind` members unprefixed; the landed names are above).
 3. **Stream seam.** Over a temporary socket, the first message is the snapshot, a
-   published event follows with a greater id, heartbeats arrive as ordinary
-   `HEARTBEAT` events, and the identifiers never decrease. This is criterion 5.
-4. **Authorization seam.** With `TokenRequired` mounted, the stream is refused
-   without a credential and served with a paired token, which closes the
-   streaming-interceptor gap the pairing tickets recorded.
-5. **Example seam.** The example prints the snapshot and one event and exits
-   non-zero when the stream fails.
+   published event follows with a greater id, a channel the stream did not select
+   contributes nothing, heartbeats arrive as ordinary `HEARTBEAT` events carrying
+   the latest identifier, and the identifiers never decrease. This is criterion 5.
+   Driven by three tests in `crates/daemon/tests/stream.rs`, which serve the
+   daemon's own service the way a listener serves it, and by two tests in
+   `crates/client/tests/stream.rs`, which drive the wrapper over the skeleton's
+   socket without naming a transport or a generated stub.
+4. **Authorization seam.** With `TokenRequired` mounted on a TCP listener, the
+   stream is refused without a credential and served with a paired token, which
+   closes the streaming-interceptor gap the pairing tickets recorded. The refusal
+   reaches the client as the typed `ClientError::CredentialMissing` read from
+   `AUTH_ERROR_HEADER` at the call that opened the stream, so it can only come from
+   the interceptor; the landed test is
+   `the_stream_is_refused_without_a_credential_and_served_with_a_paired_token`,
+   and it carries the stream-over-TCP assertion over
+   `serve_tcp_listener_service` as well.
+5. **Example seam.** The example prints the snapshot and one event, prints
+   `[result] PASS`, and exits non-zero when the stream fails.
 6. **Additivity seam.** The ABI layout and plugin crates are untouched, the
-   harness stays at 73 checks, and the existing RPCs keep their signatures.
+   harness stays at 73 checks, `Echo` and `Pair` keep their signatures and
+   behaviour, and `bash scripts/regenerate-abi-header.sh --check` reports no
+   drift.
 
 Test types: unit tests in `api-contracts` for the ring; integration tests in
-`crates/daemon/tests/` over a real socket for the stream and authorization seams;
-the example for its own seam; the contract and workspace gates for the rest.
+`crates/daemon/tests/stream.rs` and `crates/client/tests/stream.rs` over a real
+socket for the stream and authorization seams; the example for its own seam; the
+contract and workspace gates for the rest.
 
 ### Interface contract
 
-- `stream-resume-and-expiry` consumes `last_event_id`, `since` and
-  `earliest_resumable`; the rule that `0` means "no cursor" is this ticket's
-  placeholder, and that ticket replaces it with real resume and expiry semantics.
-- `cancellation-and-slow-consumers` appends the `Cancel` RPC and owns the drop
-  policy for a slow consumer.
-- The daemon effort publishes real events into the ring; the skeleton's events
-  are test support and stay minimal.
-- Recorded residuals: heartbeats are unconditional rather than idle-detected, the
-  ring is per-process and lost on restart, the payload encoding is the
-  implementer's choice as recorded above, and slow-consumer behaviour is the
-  library default until the cancellation ticket lands.
+- `stream-resume-and-expiry` consumes `last_event_id`, `since`,
+  `earliest_resumable` and `latest_id()`; the rule that `0` means "no cursor" and
+  the cursor floor `floor = cursor.max(head identifiers)`, which suppresses live
+  events only, are this ticket's placeholders, and that ticket replaces them with
+  real resume and expiry semantics. The proto field's doc and `Ring::stream`'s doc
+  both name the placeholder, so the replacement is a documented change rather than
+  a surprise.
+- `cancellation-and-slow-consumers` appends the `Cancel` RPC, adds `EventKind`
+  members in the landed prefixed spelling, and owns the drop policy for a slow
+  consumer. Today the live fan-out is a `tokio::sync::broadcast` channel whose
+  capacity is the ring's, and a subscriber that fell behind skips exactly what the
+  ring dropped; that is the channel's own behaviour without a policy, and the
+  ticket replaces it deliberately.
+- The daemon effort publishes real events into the ring through `Service::ring()`
+  and encodes payloads as JSON text. The skeleton's events are test support and
+  stay minimal, and `client::skeleton::SkeletonDaemon` is the landed test-support
+  surface whose shape changed here (`new()` and `with_ring()`); every in-tree
+  caller moved in the same commit and the workspace is green.
+- `windows-named-pipe` and `reverse-proxy-mode` inherit the stream: `serve_stream`
+  serves it over their front-ends and `Ring::stream` is the one assembly, so
+  neither adds framing or a second streaming mechanism.
+- The three identity headers travel on the stream request, both streaming handlers
+  call `identity::from_headers` and refuse with the shared typed refusal, and no
+  new refusal format appears anywhere, so `local-identity-and-acl`'s per-handler
+  recording obligation is paid and the daemon effort inherits a handler that
+  already checks.
+- Recorded residuals: heartbeats are unconditional rather than idle-detected; the
+  ring is per-process and lost on restart; the slow-consumer policy is the
+  library's; `last_event_id` floor-suppresses live events only; the payload
+  encoding is JSON text in a `string`, a convention rather than a schema, and a
+  later native encoding is a FILE-mode breaking change; the ring capacity is not
+  configurable and is declared once per crate (1024 in `daemon::service`, 64 in
+  `client::skeleton`, deliberately smaller there); `HEARTBEAT_DEFAULT` is declared
+  twice, in `daemon::service` and `client::skeleton`, both at 15 seconds, and the
+  two can drift in value; the stream tests are timing dependent (a 25 ms
+  heartbeat against 5 s bounds, with no flake in three repeats); and
+  `crates/client/Cargo.toml` carries a cosmetic double blank line that no gate
+  reads.
 
 ---
 
 ## Downstream interface contracts (outline)
 
-The tickets still pending in this effort are `event-stream`, `reverse-proxy-mode`
-and `windows-named-pipe`. Their sections are added when their chains reach the
-frontier, apart from `event-stream`, whose pending section is above; the tickets
+The tickets still pending in this effort are `reverse-proxy-mode` and
+`windows-named-pipe`. Their sections are added when their chains reach the
+frontier; `event-stream` has landed and its measured section is above. The tickets
 below also name `stream-resume-and-expiry` and `cancellation-and-slow-consumers`,
 which are not pending yet, and the commitments below are what the landed tickets
 must already support, including the surfaces `local-identity-and-acl`,
-`state-store`, `pairing-and-tokens` and `remote-pairing` landed.
+`state-store`, `pairing-and-tokens`, `remote-pairing` and `event-stream` landed.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
@@ -2916,15 +3109,16 @@ must already support, including the surfaces `local-identity-and-acl`,
   messages, and correlation ids in request metadata. The
   `RPC_RESPONSE_STANDARD_NAME` lint exception is added here, and the contract
   regenerates through `scripts/regenerate-contracts.sh`. `EventKind` is the
-  contract's first enum, which is what makes the buffa mount's dormant
-  `clippy::derivable_impls` allow load-bearing. It also carries the
-  stream-over-TCP assertion `tcp-listener`'s acceptance criterion 4 deferred:
-  `serve_stream` serves any Connect service over the stream it is handed, and
-  the landed TCP front-ends are the first transport that can carry a real
-  stream end to end. Its handlers carry the three landed identity headers and
-  call `identity::from_headers`, because the recording
-  `local-identity-and-acl` landed is per handler: a `StreamEvents` handler that
+  contract's first enum, the one the buffa mount's dormant
+  `clippy::derivable_impls` allow was reserved for. `event-stream` landed and
+  paid the rest of this bullet: the stream-over-TCP assertion `tcp-listener`'s
+  acceptance criterion 4 deferred, carried over the landed TCP front-ends because
+  `serve_stream` serves any Connect service over the stream it is handed, and the
+  identity declaration on the stream, because the recording
+  `local-identity-and-acl` landed is per handler and a `StreamEvents` handler that
   skips the call is unrecorded rather than refused.
+  `stream-resume-and-expiry` and `cancellation-and-slow-consumers` consume the
+  landed cursor placeholder, which is what this bullet still speaks to.
 - `windows-named-pipe`, `reverse-proxy-mode`: extend
   the same `transport` module with their own bind and connector front-ends; no
   second service implementation. `tls-and-client-trust` is deprecated (ADR
@@ -3102,6 +3296,25 @@ must already support, including the surfaces `local-identity-and-acl`,
   the effort are `event-stream`, `reverse-proxy-mode` and `windows-named-pipe`;
   the earlier notes in this section carry the pending set at their own landing
   moment, and this note carries the current set.
+- `event-stream` landed as the merge commit `0727964` on `task/event-stream`,
+  parents `4235803` (the landing branch, created at `main`'s tip because it did
+  not exist before this landing) and `64bd7d5` (the working branch
+  `ticket/event-stream`, seven `wip:` commits off `main` at `4235803`, deleted
+  after the merge), with the ticket note and the committed deviation report in
+  the docs commit `f765728`. It adds the contract's first streaming RPC and its
+  first enum, the daemon-wide event ring in `api-contracts`, and the client's
+  stream. It pays two landed debts at the wire: the streaming half of the
+  interceptor, which `pairing-and-tokens` could prove only by construction, and
+  the stream-over-TCP assertion `tcp-listener`'s criterion 4 deferred, both
+  asserted in `crates/daemon/tests/stream.rs` over a real TCP listener. Its
+  handlers check the identity declaration themselves, so the per-handler recording
+  obligation `local-identity-and-acl` recorded is paid, and its payload is JSON
+  text in a `string` field, which the two realtime tickets still to come inherit.
+  `Service::new` gained the heartbeat interval, which moved
+  `crates/daemon/tests/auth.rs` in the same commit. The tickets still pending in
+  the effort are `reverse-proxy-mode` and `windows-named-pipe`; the earlier notes
+  in this section carry the pending set at their own landing moment, and this note
+  carries the current set.
 
 ---
 
