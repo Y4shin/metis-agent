@@ -11,6 +11,14 @@
 //! This crate carries no async runtime and no serde in its C ABI surface: a
 //! plugin boundary is a byte boundary, and everything above it (serialisation
 //! shapes, the authoring trait) lives elsewhere.
+//!
+//! The Rust authoring surface (the trait, both adapters, and the minimal
+//! executor) is behind the `authoring` feature, off by default, so the plugin
+//! runtime depends on the primitives and the payload envelope alone.
 
 pub mod abi;
+
+#[cfg(feature = "authoring")]
+pub mod authoring;
+
 pub mod payload;
