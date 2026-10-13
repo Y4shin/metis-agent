@@ -1482,13 +1482,143 @@ harness and no new test protocol.
 
 ---
 
+## Pending ticket: `local-identity-and-acl`
+
+Blocked by the landed `local-transport-rpc-skeleton`. Local access control from
+the operating system, plus the identity a client declares on every call, so
+local clients need no credential and the daemon's log says which surface did
+what. Settles the endpoint default the landed transport section left in conflict
+with the ACL requirement.
+
+### Exports
+
+- `crates/client/src/lib.rs`, the endpoint rule:
+  - `pub enum EndpointError` (non-exhaustive) with `NoPrivateBase`, and
+    `default_endpoint() -> Result<PathBuf, EndpointError>`: the path moves off
+    `/tmp/metis-daemon.sock` to a private base,
+    `$XDG_RUNTIME_DIR/metis/daemon.sock` when that variable is set and non-empty,
+    else `$TMPDIR/metis/daemon.sock`, else `NoPrivateBase`. No silent `/tmp`
+    fallback, because `/tmp` cannot carry the ACL.
+  - `resolve_endpoint() -> Result<PathBuf, EndpointError>` keeps `METIS_ENDPOINT`
+    first, so an operator or a test that names an endpoint wins. Both signatures
+    gain a `Result`, and the shell callers (`local()`, `with_endpoint()`) and the
+    example map the error into `ClientError::Endpoint`.
+  - The ACL test sets `METIS_ENDPOINT` into its own temporary directory, which is
+    the base the daemon restricts, exactly as a runtime directory would be.
+- `crates/api-contracts/src/transport.rs`, the ACL, applied by the listener
+  rather than by callers:
+  - `pub const SOCKET_MODE_PRIVATE: u32 = 0o700;`,
+    `pub const SOCKET_MODE_GROUP: u32 = 0o770;`, and
+    `pub const SOCKET_GROUP_ENV: &str = "METIS_SOCKET_GROUP";`.
+  - `pub fn ensure_socket_dir(path: &Path) -> Result<(), ConfigError>`: creates
+    the socket's directory if absent and sets its mode, 700 with no group
+    configured and 770 with one, and applies the configured group. `serve_uds`
+    calls it before binding.
+  - A pre-existing directory that is a symlink, is not owned by the daemon's
+    user, or carries a wider mode than the rule allows is refused with
+    `ConfigError::SocketAcl { path, source }`, never chmodded. The daemon owns the
+    directory as its own user: no chown, and no privileged requirement.
+- `crates/api-contracts/src/identity.rs`, the declaration:
+  - `pub const PROTOCOL_VERSION: u32 = 1;` and
+    `pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1];`.
+  - `pub const PROTOCOL_VERSION_HEADER: &str = "metis-protocol-version";`,
+    `PROTOCOL_SURFACE_HEADER = "metis-surface"`, and
+    `PROTOCOL_CLIENT_VERSION_HEADER = "metis-client-version"`.
+  - `pub struct ClientIdentity { protocol_version, surface, client_version }`
+    with accessors, and `pub fn from_headers(headers: &HeaderMap) ->
+    Result<ClientIdentity, IdentityError>`.
+  - `pub enum IdentityError` (non-exhaustive): `MissingHeader { header }` and
+    `UnsupportedVersion { found: u32, supported: &'static [u32] }`, whose
+    `Display` names the supported versions. This is the typed error acceptance
+    criterion 3 names.
+- `crates/client/src/lib.rs`, the client half:
+  - `pub enum Surface { Cli, Ui, Test, Unspecified }` with `as_str()`.
+  - The three headers are set as `ClientConfig` default headers at construction,
+    so every call carries them, and `Client::with_surface(self, Surface) -> Self`
+    sets the surface through `config_mut()`. The landed `local`,
+    `with_endpoint` and `with_remote_addr` signatures stay, defaulting to
+    `Surface::Unspecified`.
+  - `ClientError` gains `Endpoint(EndpointError)` and `ProtocolVersion { found:
+    u32, supported: Vec<u32> }`, the second populated from the refusal's
+    `metis-supported-versions` response header. The typed error crosses the wire
+    as a header, never by parsing message text.
+- `crates/client/src/skeleton.rs`: the service records the declared identity and
+  refuses an unsupported version. `IdentityRecorder`, a clonable handle with
+  `last()`, and `router_recording(&IdentityRecorder) -> Router` beside the
+  existing `router()`.
+
+### Existing abstractions to use
+
+- The `connectrpc` metadata path as landed: `ClientConfig::with_default_header`
+  and `config_mut()` on the client, `RequestContext::header` on the server,
+  `ConnectError::new(ErrorCode::InvalidArgument, ...)` and
+  `ConnectError::with_headers` for the refusal. No new wire shape and no RPC.
+- `serve_uds` as the ACL hook point, `resolve_endpoint` and `default_endpoint`
+  for the rule, the non-exhaustive `ConfigError`, the `EndpointOverride` RAII
+  helper, `TempSocket`, `Client::with_endpoint`, `skeleton::router()` and
+  `SkeletonDaemon`.
+
+### Do NOT reimplement
+
+- Do not add a `Handshake` RPC or connection state. Identity travels as request
+  metadata on every call, which is the same channel `Authorization` needs later.
+- Do not add a credential, a token, or an authorization check: the declaration is
+  not authentication, and `pairing-and-tokens` owns credentials.
+- Do not add a logging framework. Recording is the seam the test reads.
+- Do not chmod or chown a path the daemon did not create, and never follow a
+  symlink while doing either.
+- Do not change the contract, the generated tree, the ABI, or the plugin crates.
+  This ticket adds no RPC.
+- Do not keep a `/tmp` default behind a fallback that silently weakens the ACL.
+
+### Seams
+
+1. **Endpoint seam.** `default_endpoint()` derives from `XDG_RUNTIME_DIR` and
+   then `TMPDIR`, and returns `NoPrivateBase` when neither is set;
+   `METIS_ENDPOINT` still wins. Unit-tested with the RAII helper.
+2. **ACL seam.** `serve_uds` on a fresh directory leaves it mode 700 owned by the
+   daemon's user; with `METIS_SOCKET_GROUP` set to a group that user belongs to,
+   mode 770 with that group. Asserted by reading the directory's metadata. A
+   pre-existing directory with a wider mode, or one that is a symlink, is
+   refused.
+3. **Declaration seam.** A wrapper call carries the three headers, and the
+   recorder sees exactly the declared surface and client version, over a real
+   socket.
+4. **Version seam.** A client declaring version 2 is refused, and the refusal
+   names version 1; a client with no version header is refused the same way.
+5. **Additivity seam.** The generated contract tree, the ABI layout and the
+   plugin crates are untouched, so the drift, layout and harness checks stay
+   green.
+
+Test types: unit tests in `client` and `api-contracts` for seams 1, 2 and the
+header parsing, plus the ACL metadata assertion; integration tests in
+`crates/client/tests/` for seams 3 and 4; the existing contract and ABI gates for
+seam 5.
+
+### Interface contract
+
+- `pairing-and-tokens` consumes the same metadata channel for
+  `Authorization: Bearer` and owns the `ClientError` credential variants. The
+  downstream outline sentence that placed those variants in this ticket is
+  superseded, because this ticket adds no credential.
+- `tls-and-client-trust` and `remote-pairing` carry the same three headers plus
+  the credential over TCP; `event-stream` carries them on the stream request, and
+  the daemon's recording must cover streaming calls.
+- The endpoint default changes the path both the daemon and the client use, while
+  `METIS_ENDPOINT` remains the override for operators and tests. The effort map's
+  fog entry about the `/tmp` conflict is closed by this rule.
+- Recorded residual: the check is called per RPC handler until the daemon applies
+  it as a layer, so a handler that forgets it is unrecorded rather than refused.
+
+---
+
 ## Downstream interface contracts (outline)
 
-These tickets are not pending yet: no ticket has a pending section today, and
-the three still pending in this effort are `event-stream`,
-`local-identity-and-acl`, and `windows-named-pipe`. Their sections are added
-when they reach the frontier, and the commitments below are what the landed
-tickets must already support.
+These tickets are not pending yet, apart from the one pending section above
+(`local-identity-and-acl`). The two other tickets still pending in this effort
+are `event-stream` and `windows-named-pipe`. Their sections are added when they
+reach the frontier, and the commitments below are what the landed tickets must
+already support.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
