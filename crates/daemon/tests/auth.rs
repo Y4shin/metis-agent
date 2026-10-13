@@ -264,6 +264,12 @@ impl Fixture {
             .expect("the stored credential is readable")
     }
 
+    /// Serve the daemon's own service with `policy` over TCP, the way a remote
+    /// listener serves it.
+    async fn serve_daemon_over_tcp(&self, policy: AuthPolicy) -> SocketAddr {
+        serve_over_tcp(service(self.store.clone(), self.secret.clone(), policy)).await
+    }
+
     /// A client that reaches `addr` over TCP and declares `surface`, which
     /// loads that surface's stored credential.
     async fn remote_client(&self, addr: SocketAddr, surface: Surface) -> Client {
@@ -901,5 +907,46 @@ async fn the_bind_and_delegate_front_end_serves_the_mounted_service() {
         served.paths(),
         vec![DAEMON_SERVICE_ECHO_SPEC.procedure.to_owned()],
         "the mounted handler served the call"
+    );
+}
+
+/// Pairing stays exempt over the TCP front-end, and the token it mints is what
+/// the calls after it carry.
+///
+/// The surface has no credential when the pairing call is made, so a call that
+/// was not exempt would be refused as missing: the exemption is what makes the
+/// first remote call possible, and the minted token is what makes the next one
+/// land.
+#[tokio::test]
+async fn pairing_stays_exempt_over_the_tcp_service_front_end() {
+    let fixture = Fixture::new("tcp-pairing").await;
+    let addr = fixture
+        .serve_daemon_over_tcp(AuthPolicy::TokenRequired)
+        .await;
+
+    let mut caller = fixture.remote_client(addr, Surface::Cli).await;
+    let backend = caller
+        .pair(PRESHARED_KEY)
+        .await
+        .expect("the pairing procedure is exempt from the credential check");
+    let Backend::File(path) = &backend else {
+        panic!("the file backend answers when no keychain tool is on PATH");
+    };
+    assert!(
+        path.file_name().is_some_and(|name| name == "cli.token"),
+        "the credential is filed under the declared surface: {}",
+        path.display()
+    );
+
+    assert_eq!(
+        caller
+            .echo("paired over the remote listener")
+            .await
+            .expect("the token the pairing call minted is served"),
+        "paired over the remote listener"
+    );
+    assert_eq!(
+        fixture.store.surfaces().await.expect("the rows read"),
+        vec!["cli".to_owned()]
     );
 }
