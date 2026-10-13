@@ -10,6 +10,13 @@
 //! The ring is deliberately in memory and bounded. It is a window on what
 //! happened, not the source of truth: past its capacity the oldest event is
 //! dropped and [`Ring::earliest_resumable`] advances, and a restart empties it.
+//!
+//! A cursor is a caller's position: the highest event identifier it has
+//! processed. A stream opened with one resumes, replaying what the window still
+//! holds after it and carrying no snapshot, and a cursor the window has moved
+//! past, or a restart has invalidated, is refused as [`CursorError::Expired`]
+//! before the stream opens. The answer to that refusal is a cursorless stream,
+//! which begins with the snapshot.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -871,11 +878,17 @@ mod tests {
         assert_eq!(first.payload, "3");
 
         // The live subscription follows the replay, so the stream stays open
-        // and carries what is published next.
+        // and carries what is published next, once.
         ring.publish("daemon", EventKind::Event, "4");
         let next = stream.next().await.expect("a stream").expect("a message");
         assert_eq!(next.kind, EventKind::Event);
         assert_eq!(next.id, 4);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), stream.next())
+                .await
+                .is_err(),
+            "the replayed and the live copy are one message, carried once"
+        );
         Ok(())
     }
 
