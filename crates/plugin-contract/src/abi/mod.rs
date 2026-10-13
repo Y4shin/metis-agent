@@ -9,9 +9,11 @@
 //! The revision is clean, not an append: `invoke` and the host `complete`
 //! callback are deleted rather than deprecated, and the entry order changed
 //! while the entry symbol and the ABI major stayed the same. `abi_minor`
-//! therefore becomes 1 and [`metis_read_table`] refuses a minor it does not
-//! know, which refuses a stale pre-release plugin instead of reading its
-//! entries through the new order.
+//! therefore becomes 1 and [`metis_read_table`] compares it additively: it
+//! accepts minor 1 and anything newer, whose extra entries are appended after
+//! the last entry it reads, and it refuses a minor older than 1, which refuses a
+//! stale pre-release plugin instead of reading its entries through the new
+//! order.
 //!
 //! The layout rules the tables rely on are asserted at the bottom of this
 //! module by `layout`, on every build, and again in C by
@@ -30,8 +32,11 @@ pub const METIS_ABI_MAJOR: u32 = 1;
 /// ABI minor version. It travels in the function table.
 ///
 /// It is 1 because this revision changed the entry order under an unchanged
-/// symbol and major. A reader refuses a minor it does not know, so a plugin
-/// built against the superseded order is refused instead of misread.
+/// symbol and major. The minor is compared additively: a reader accepts the
+/// minor it knows and any newer one, because a newer table's extra entries are
+/// appended after the last entry this build reads, and it refuses an older
+/// minor, because that table's entries are in the superseded order. A plugin
+/// built against the superseded order is therefore refused instead of misread.
 pub const METIS_ABI_MINOR: u32 = 1;
 
 /// The name of the exported entry point for ABI major 1.
@@ -397,7 +402,8 @@ pub struct MetisPluginTableV1 {
     pub size: usize,
     /// ABI major version, which must match the entry symbol's naming.
     pub abi_major: u32,
-    /// ABI minor version, which must be the one this build speaks.
+    /// ABI minor version. A reader accepts the one it speaks and any newer one,
+    /// and refuses an older one.
     pub abi_minor: u32,
     /// Instance lifecycle.
     pub create_instance: MetisCreateInstanceFn,

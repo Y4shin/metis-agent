@@ -8,6 +8,7 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use plugin_contract::abi::*;
 
@@ -128,18 +129,166 @@ fn another_major_is_refused_with_both_versions_named() {
 }
 
 #[test]
-fn a_minor_this_build_does_not_know_is_refused() {
-    // The stale pre-release plugin: same symbol and major, entries in the
-    // superseded order, so the minor is what refuses it.
-    let stale = full_table(size_of::<MetisPluginTableV1>(), 1, 0);
+fn a_newer_minor_inside_the_major_is_tolerated() {
+    // Additive tolerance: a plugin built later reports a higher minor, and its
+    // extra entries are past the last entry this build reads.
+    let newer = full_table(size_of::<MetisPluginTableV1>(), 1, METIS_ABI_MINOR + 1);
+    // SAFETY: the table is a live local.
+    let read = unsafe { metis_read_table(&newer) }.expect("a newer minor is tolerated");
+    assert_eq!(read.abi_minor, METIS_ABI_MINOR + 1);
+    assert_eq!(read.abi_major, METIS_ABI_MAJOR);
+}
+
+#[test]
+fn a_retired_minor_is_refused_before_any_table_entry_is_read() {
+    // The retired pre-release plugin: same symbol and major, entries in the
+    // superseded order, so the minor is what refuses it. The table is also too
+    // short to cover `service_complete`, which is what makes the error prove
+    // the order of the two checks: the version is refused before the size is
+    // consulted, so nothing in the table is read.
+    let short = size_of::<MetisTablePrefix>() + 7 * size_of::<usize>();
+    let stale = full_table(short, 1, 0);
     // SAFETY: the table is a live local.
     let error = refused(unsafe { metis_read_table(&stale) }); // minor 0 is the old entry order
-    assert_eq!(error, MetisAbiError::MinorMismatch { known: 1, found: 0 });
+    assert_eq!(
+        error,
+        MetisAbiError::MinorMismatch {
+            known: METIS_ABI_MINOR,
+            found: 0
+        }
+    );
 
-    let future = full_table(size_of::<MetisPluginTableV1>(), 1, 2);
+    // The same short table at this build's own minor is the size error instead,
+    // which is the other half of the same ordering.
+    let short_at_this_minor = full_table(short, 1, METIS_ABI_MINOR);
     // SAFETY: the table is a live local.
-    let error = refused(unsafe { metis_read_table(&future) }); // minor 2 is newer than this build
-    assert_eq!(error, MetisAbiError::MinorMismatch { known: 1, found: 2 });
+    let error = refused(unsafe { metis_read_table(&short_at_this_minor) });
+    assert_eq!(
+        error,
+        MetisAbiError::EntryMissing {
+            entry: "service_complete"
+        }
+    );
+}
+
+/// Counts calls into the appended entry's canary, which must stay at zero.
+static CANARY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// The stand-in for the entry a later ticket appends after this build's last
+/// one. Nothing in this build may call it.
+unsafe extern "C" fn canary_configure(_payload: MetisBuffer) -> MetisStatus {
+    CANARY_CALLS.fetch_add(1, Ordering::SeqCst);
+    MetisStatus::Internal
+}
+
+/// The table a later ticket would publish: this build's eight entries plus the
+/// entry appended after them.
+///
+/// It is `repr(C)` with the same prefix and the same first eight entries as
+/// [`MetisPluginTableV1`], so a reader that receives a pointer to it reads
+/// exactly what it would read from a real plugin, and `size` reports the longer
+/// table the newer plugin provides.
+#[repr(C)]
+struct ExtendedTableV1 {
+    size: usize,
+    abi_major: u32,
+    abi_minor: u32,
+    create_instance: MetisCreateInstanceFn,
+    destroy_instance: MetisDestroyInstanceFn,
+    list_capabilities: MetisListCapabilitiesFn,
+    invoke_future: MetisInvokeFutureFn,
+    cancel: MetisCancelFn,
+    release_buffer: MetisReleaseBufferFn,
+    shutdown: MetisShutdownFn,
+    service_complete: MetisServiceCompleteFn,
+    /// The appended entry, the entry this build knows nothing about.
+    configure: unsafe extern "C" fn(payload: MetisBuffer) -> MetisStatus,
+}
+
+#[test]
+fn an_appended_entry_and_a_newer_minor_still_interoperate() {
+    // The host and the plugin agree on the major and differ in a table entry
+    // added after this ticket lands: the plugin's table carries one more entry
+    // and reports a size that covers it.
+    let known = full_table(
+        size_of::<MetisPluginTableV1>(),
+        METIS_ABI_MAJOR,
+        METIS_ABI_MINOR,
+    );
+    let extended = ExtendedTableV1 {
+        size: size_of::<ExtendedTableV1>(),
+        abi_major: METIS_ABI_MAJOR,
+        abi_minor: METIS_ABI_MINOR + 1,
+        create_instance: known.create_instance,
+        destroy_instance: known.destroy_instance,
+        list_capabilities: known.list_capabilities,
+        invoke_future: known.invoke_future,
+        cancel: known.cancel,
+        release_buffer: known.release_buffer,
+        shutdown: known.shutdown,
+        service_complete: known.service_complete,
+        configure: canary_configure,
+    };
+
+    // The canary is armed: calling it is what records a touch, so a reader that
+    // reached the appended entry would move the counter.
+    // SAFETY: the canary is an ordinary function.
+    let _ = unsafe { canary_configure(MetisBuffer::empty()) };
+    assert_eq!(
+        CANARY_CALLS.swap(0, Ordering::SeqCst),
+        1,
+        "the canary records a call"
+    );
+
+    // SAFETY: the prefix and the first eight entries of `ExtendedTableV1` have
+    // the layout of `MetisPluginTableV1`, and the appended entry is never read.
+    let read = unsafe {
+        metis_read_table(&extended as *const ExtendedTableV1 as *const MetisPluginTableV1)
+    }
+    .expect("a newer minor inside the major, and an appended entry, are tolerated");
+
+    assert_eq!(read.abi_major, METIS_ABI_MAJOR);
+    assert_eq!(
+        read.abi_minor,
+        METIS_ABI_MINOR + 1,
+        "additive tolerance accepts the newer minor"
+    );
+    assert_eq!(
+        read.size,
+        size_of::<ExtendedTableV1>(),
+        "the size a reader checks is the size the plugin reported"
+    );
+    assert!(
+        read.size > size_of::<MetisPluginTableV1>(),
+        "the newer plugin's table is longer than this build's layout"
+    );
+
+    // Every entry this build knows is the plugin's own value, read at its own
+    // offset: the reader touches the entries its own layout covers and no
+    // further.
+    assert!(ptr::fn_addr_eq(read.create_instance, known.create_instance));
+    assert!(ptr::fn_addr_eq(
+        read.destroy_instance,
+        known.destroy_instance
+    ));
+    assert!(ptr::fn_addr_eq(
+        read.list_capabilities,
+        known.list_capabilities
+    ));
+    assert!(ptr::fn_addr_eq(read.invoke_future, known.invoke_future));
+    assert!(ptr::fn_addr_eq(read.cancel, known.cancel));
+    assert!(ptr::fn_addr_eq(read.release_buffer, known.release_buffer));
+    assert!(ptr::fn_addr_eq(read.shutdown, known.shutdown));
+    assert!(ptr::fn_addr_eq(
+        read.service_complete,
+        known.service_complete
+    ));
+
+    assert_eq!(
+        CANARY_CALLS.load(Ordering::SeqCst),
+        0,
+        "the entry appended after this build's layout was never touched"
+    );
 }
 
 #[test]

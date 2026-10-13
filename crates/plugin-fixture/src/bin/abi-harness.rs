@@ -23,6 +23,16 @@
 //! plugin's own `release_buffer`, polls the plugin's futures on threads it
 //! owns, and compares its counters with the fixture's ledger. Nothing here
 //! reimplements the ABI.
+//!
+//! It also carries the version tolerance checks, which are about compiled
+//! versions rather than about one table: a table with an entry appended after
+//! this build's last one (the reader stops at its own layout), the retired
+//! pre-release minor refused before any entry is read, a library built for
+//! another ABI major refused at symbol resolution with a typed error, one
+//! capability refused by descriptor version while the plugin keeps serving, and
+//! a request body carrying a field this build does not know. On Linux the
+//! reader's restraint is asserted by memory that cannot be read: the guarded
+//! table probes below.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -38,7 +48,9 @@ use std::time::{Duration, Instant};
 use libloading::Library;
 use plugin_contract::abi::*;
 use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
-use plugin_fixture::payload::{CapabilityKind, CapabilityList, EchoRequest, EchoResponse};
+use plugin_fixture::payload::{
+    CapabilityDescriptor, CapabilityKind, CapabilityList, EchoRequest, EchoResponse,
+};
 
 /// How long the harness waits for a call that should finish promptly.
 const POLL_DEADLINE: Duration = Duration::from_secs(2);
@@ -52,7 +64,7 @@ const WATCHDOG: Duration = Duration::from_millis(80);
 const CANCEL_WINDOW: Duration = Duration::from_millis(150);
 
 /// The capabilities the fixture advertises, in declaration order.
-const EXPECTED_CAPABILITIES: [&str; 7] = [
+const EXPECTED_CAPABILITIES: [&str; 8] = [
     "tool.echo",
     "tool.pending",
     "tool.cancellable",
@@ -60,7 +72,19 @@ const EXPECTED_CAPABILITIES: [&str; 7] = [
     "tool.panic",
     "tool.panic_drop",
     "tool.blocking",
+    REFUSED_CAPABILITY,
 ];
+
+/// The capability the fixture advertises with a descriptor version this host
+/// does not support. It is one capability, so refusing it must leave the rest
+/// of the plugin listed and serving.
+const REFUSED_CAPABILITY: &str = "tool.newer";
+
+/// The descriptor version [`REFUSED_CAPABILITY`] declares.
+const REFUSED_CAPABILITY_VERSION: u32 = 2;
+
+/// The highest capability descriptor version this host serves.
+const HOST_CAPABILITY_VERSION: u32 = 1;
 
 /// The capabilities the routing check drives to completion by name alone.
 /// `tool.cancellable` needs a cancel, and the hazard capabilities need their own
@@ -99,15 +123,16 @@ fn main() -> ExitCode {
 
     // --- the entry symbol --------------------------------------------------
 
-    let entry = unsafe { library.get::<MetisPluginEntryV1Fn>(METIS_PLUGIN_ENTRY_V1) };
-    let table_ptr = match &entry {
+    // The library's exported `metis_*` symbols are read before the entry symbol
+    // is resolved, because the resolution error names the major a library
+    // exports instead of this build's symbol.
+    let symbols = metis_dynamic_symbols(&path);
+    let exported = symbols.clone().unwrap_or_default();
+
+    let table_ptr = match resolve_entry(&library, &exported) {
         Ok(entry) => unsafe { entry() },
-        Err(err) => {
-            checks.check(
-                false,
-                "symbol.entry_v1_resolved",
-                format!("dlsym failed: {err}"),
-            );
+        Err(error) => {
+            checks.check(false, "symbol.entry_v1_resolved", error.to_string());
             return checks.report();
         }
     };
@@ -119,17 +144,7 @@ fn main() -> ExitCode {
         return checks.report();
     }
 
-    let wrong_major = unsafe { library.get::<MetisPluginEntryV1Fn>(b"metis_plugin_entry_v2\0") };
-    checks.check(
-        wrong_major.is_err(),
-        "symbol.wrong_major_absent",
-        match &wrong_major {
-            Ok(_) => "metis_plugin_entry_v2 unexpectedly resolved".to_string(),
-            Err(err) => format!("metis_plugin_entry_v2 lookup failed: {err}"),
-        },
-    );
-
-    match metis_dynamic_symbols(&path) {
+    match symbols {
         Ok(symbols) => {
             checks.check(
                 symbols == vec!["metis_plugin_entry_v1".to_string()],
@@ -214,6 +229,7 @@ fn main() -> ExitCode {
         "table.presence_is_size",
         "the presence predicate follows the reported size",
     );
+    check_guarded_tables(&mut checks, table_ptr);
 
     // --- the instance, the declaration, and the futures path ---------------
 
@@ -243,10 +259,13 @@ fn main() -> ExitCode {
     );
 
     let list = list_capabilities(&mut checks, &state, instance);
+    drive_capability_gate(&mut checks, &state, instance, list.as_ref());
     drive_capabilities(&mut checks, &state, instance, list.as_ref());
+    drive_unknown_field(&mut checks, &state, instance);
     run_hazard_checks(&mut checks, &state, instance);
 
     drive_c_plugin(&mut checks);
+    drive_other_major_plugin(&mut checks);
 
     // --- teardown: quiesce, drop, then unload ------------------------------
 
@@ -444,6 +463,322 @@ fn fixture_library_path() -> PathBuf {
     directory.join(name)
 }
 
+/// Why this build's entry symbol did not resolve from a library.
+///
+/// The loader's own error names the byte string it searched for, which is a fact
+/// about the loader and not about the plugin. A host reports what it learned
+/// about the plugin instead: the symbol name carries the ABI major, so a library
+/// that exports only another major's entry symbol is a plugin built for that
+/// major. `plugin-runtime` inherits this shape when it owns library loading;
+/// until then the probe lives here.
+#[derive(Debug)]
+enum EntryError {
+    /// The library exports no entry symbol for this build's major, and it does
+    /// export one for another major.
+    MajorMismatch {
+        /// The major this build speaks.
+        expected: u32,
+        /// The major the library exports an entry symbol for.
+        found: u32,
+    },
+    /// The library exports no `metis_plugin_entry_v*` symbol at all, so it is
+    /// not a plugin this host can load. The loader's own message is the detail.
+    NoEntrySymbol {
+        /// The major this build speaks.
+        expected: u32,
+        /// What the loader said, kept as detail rather than as the error.
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for EntryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EntryError::MajorMismatch { expected, found } => write!(
+                f,
+                "the plugin exports the entry symbol for ABI major {found}, and this build speaks major {expected}"
+            ),
+            EntryError::NoEntrySymbol { expected, detail } => write!(
+                f,
+                "the plugin exports no entry symbol for ABI major {expected}: {detail}"
+            ),
+        }
+    }
+}
+
+/// The ABI majors a library exports an entry symbol for.
+fn exported_entry_majors(exported: &[String]) -> Vec<u32> {
+    exported
+        .iter()
+        .filter_map(|name| name.strip_prefix("metis_plugin_entry_v"))
+        .filter_map(|major| major.parse().ok())
+        .collect()
+}
+
+/// Resolves this build's entry symbol, reporting a typed refusal.
+///
+/// This is the resolution half of the major check, and it runs before any table
+/// exists: a plugin built for another major exports `metis_plugin_entry_v<its
+/// major>` and not this build's symbol, so no table pointer is ever obtained and
+/// nothing in a table is read.
+fn resolve_entry(
+    library: &Library,
+    exported: &[String],
+) -> Result<MetisPluginEntryV1Fn, EntryError> {
+    // SAFETY: the caller loaded this library and keeps it alive for the call.
+    match unsafe { library.get::<MetisPluginEntryV1Fn>(METIS_PLUGIN_ENTRY_V1) } {
+        Ok(entry) => Ok(*entry),
+        Err(err) => {
+            let other = exported_entry_majors(exported)
+                .into_iter()
+                .find(|major| *major != METIS_ABI_MAJOR);
+            Err(match other {
+                Some(found) => EntryError::MajorMismatch {
+                    expected: METIS_ABI_MAJOR,
+                    found,
+                },
+                None => EntryError::NoEntrySymbol {
+                    expected: METIS_ABI_MAJOR,
+                    detail: err.to_string(),
+                },
+            })
+        }
+    }
+}
+
+/// A table whose bytes past the part this build may read sit in a page with no
+/// access at all.
+///
+/// This is the canary the prefix seam asks for. A reader that touches an entry
+/// past the size it was allowed does not get a wrong value out of a copy: it
+/// faults, and the harness stops with the fault, so "the reader touches only the
+/// entries its own size covers" is asserted by the memory rather than by a
+/// comment. Linux only, because the guard is `mmap` and a page: a platform
+/// without it prints a note and skips these three checks.
+#[cfg(target_os = "linux")]
+struct GuardedTable {
+    base: *mut u8,
+    table: *mut u8,
+}
+
+#[cfg(target_os = "linux")]
+impl GuardedTable {
+    /// Places `readable` so that its last byte is the last byte of a readable
+    /// page. Every byte after it is in a page that cannot be read.
+    fn new(readable: &[u8]) -> GuardedTable {
+        // SAFETY: the two anonymous pages belong to this guard and are released
+        // on drop, and the copy covers only bytes inside the first page.
+        unsafe {
+            let base = mmap(
+                std::ptr::null_mut(),
+                2 * PAGE,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            assert!(base != MAP_FAILED, "mmap failed for the guarded table");
+            assert_eq!(
+                mprotect(base.cast::<u8>().add(PAGE).cast(), PAGE, PROT_NONE),
+                0,
+                "mprotect failed for the guarded table"
+            );
+            let table = base.cast::<u8>().add(PAGE - readable.len());
+            assert_eq!(
+                table as usize % mem::align_of::<usize>(),
+                0,
+                "the guarded table must be aligned like the real one"
+            );
+            std::ptr::copy_nonoverlapping(readable.as_ptr(), table, readable.len());
+            GuardedTable {
+                base: base.cast::<u8>(),
+                table,
+            }
+        }
+    }
+
+    fn ptr(&self) -> *const MetisPluginTableV1 {
+        self.table.cast::<MetisPluginTableV1>()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for GuardedTable {
+    fn drop(&mut self) {
+        // SAFETY: the region is the one this guard mapped.
+        unsafe {
+            munmap(self.base.cast(), 2 * PAGE);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn mmap(
+        addr: *mut c_void,
+        len: usize,
+        prot: i32,
+        flags: i32,
+        fd: i32,
+        offset: i64,
+    ) -> *mut c_void;
+    fn mprotect(addr: *mut c_void, len: usize, prot: i32) -> i32;
+    fn munmap(addr: *mut c_void, len: usize) -> i32;
+}
+
+/// One readable page and one page with no access. The kernel's page size on the
+/// targets this probe runs on.
+#[cfg(target_os = "linux")]
+const PAGE: usize = 4096;
+#[cfg(target_os = "linux")]
+const PROT_NONE: i32 = 0;
+#[cfg(target_os = "linux")]
+const PROT_READ: i32 = 1;
+#[cfg(target_os = "linux")]
+const PROT_WRITE: i32 = 2;
+#[cfg(target_os = "linux")]
+const MAP_PRIVATE: i32 = 2;
+#[cfg(target_os = "linux")]
+const MAP_ANONYMOUS: i32 = 0x20;
+/// `MAP_FAILED` is `(void *)-1`.
+#[cfg(target_os = "linux")]
+const MAP_FAILED: *mut c_void = std::ptr::without_provenance_mut(usize::MAX);
+
+/// The bytes of this build's table, copied from the library's real one, with the
+/// prefix patched to what another plugin would report and cut to `readable`
+/// bytes.
+///
+/// A newer plugin reports a longer table and a newer minor; the retired
+/// pre-release plugin reported the seven-entry size and minor 0.
+#[cfg(target_os = "linux")]
+fn patched_table_bytes(
+    table_ptr: *const MetisPluginTableV1,
+    size: usize,
+    minor: u32,
+    readable: usize,
+) -> Vec<u8> {
+    // SAFETY: the harness has already read this table, and only bytes inside the
+    // table's own layout are copied.
+    let mut bytes = unsafe {
+        slice::from_raw_parts(table_ptr.cast::<u8>(), mem::size_of::<MetisPluginTableV1>())
+    }
+    .to_vec();
+    bytes[..mem::size_of::<usize>()].copy_from_slice(&size.to_ne_bytes());
+    let minor_at = mem::size_of::<usize>() + mem::size_of::<u32>();
+    bytes[minor_at..minor_at + mem::size_of::<u32>()].copy_from_slice(&minor.to_ne_bytes());
+    bytes.truncate(readable);
+    bytes
+}
+
+/// The prefix seam, with the memory as the canary.
+///
+/// Three tables are placed so that the first byte the reader is not allowed to
+/// touch is in a page that cannot be read:
+///
+/// - a newer plugin's table, whose reported size covers an appended entry. The
+///   reader must answer with this build's entries and stop; reaching the
+///   appended entry faults.
+/// - a table whose reported size does not cover `service_complete`, which is the
+///   entry the reader must refuse by name without reading it.
+/// - the retired pre-release table, whose every entry is unreachable: the
+///   version gate must refuse it before anything in it is read.
+#[cfg(target_os = "linux")]
+fn check_guarded_tables(checks: &mut Checks, table_ptr: *const MetisPluginTableV1) {
+    let layout = mem::size_of::<MetisPluginTableV1>();
+    let slot = mem::size_of::<*const c_void>();
+    let prefix = mem::size_of::<MetisTablePrefix>();
+    // SAFETY: the harness read this table already; it is the library's live one.
+    let real = unsafe { &*table_ptr };
+
+    // A newer plugin: its table is this build's layout plus the entry appended
+    // after it, and the appended entry is in the page with no access.
+    let longer = layout + slot;
+    let guarded = GuardedTable::new(&patched_table_bytes(
+        table_ptr,
+        longer,
+        METIS_ABI_MINOR + 1,
+        layout,
+    ));
+    match unsafe { metis_read_table(guarded.ptr()) } {
+        Ok(read) => {
+            checks.check(
+                read.size == longer
+                    && read.abi_minor == METIS_ABI_MINOR + 1
+                    && std::ptr::fn_addr_eq(read.service_complete, real.service_complete),
+                "table.appended_entry_not_read",
+                format!(
+                    "the reader took this build's {layout} bytes of the {longer}-byte table it was shown and read no further"
+                ),
+            );
+        }
+        Err(err) => {
+            checks.check(false, "table.appended_entry_not_read", err.to_string());
+        }
+    }
+
+    // A table whose reported size stops before `service_complete`: the reader
+    // has to name the entry it cannot reach, and it cannot read it either.
+    let short = prefix + 7 * slot;
+    let guarded = GuardedTable::new(&patched_table_bytes(
+        table_ptr,
+        short,
+        METIS_ABI_MINOR,
+        short,
+    ));
+    match unsafe { metis_read_table(guarded.ptr()) } {
+        Err(MetisAbiError::EntryMissing { entry }) => {
+            checks.check(
+                entry == "service_complete",
+                "table.uncovered_entry_not_read",
+                format!("a {short}-byte table does not cover {entry}, and {entry} was never read"),
+            );
+        }
+        Ok(_) => {
+            checks.check(
+                false,
+                "table.uncovered_entry_not_read",
+                "a table that stops before service_complete was accepted",
+            );
+        }
+        Err(err) => {
+            checks.check(false, "table.uncovered_entry_not_read", err.to_string());
+        }
+    }
+
+    // The retired pre-release table: minor 0 with the superseded seven-entry
+    // size, and every entry in the page with no access. Only the version may
+    // refuse it, and the refusal has to come before any entry is read.
+    let stale = prefix + 7 * slot;
+    let guarded = GuardedTable::new(&patched_table_bytes(table_ptr, stale, 0, prefix));
+    match unsafe { metis_read_table(guarded.ptr()) } {
+        Err(MetisAbiError::MinorMismatch { known, found }) => {
+            checks.check(
+                known == METIS_ABI_MINOR && found == 0,
+                "table.stale_minor_entries_not_read",
+                "a table reporting minor 0 and the superseded size is refused on the version alone",
+            );
+        }
+        Ok(_) => {
+            checks.check(
+                false,
+                "table.stale_minor_entries_not_read",
+                "a table reporting minor 0 was accepted",
+            );
+        }
+        Err(err) => {
+            checks.check(false, "table.stale_minor_entries_not_read", err.to_string());
+        }
+    }
+}
+
+/// The platforms without a page mapping run no guarded probe.
+#[cfg(not(target_os = "linux"))]
+fn check_guarded_tables(_checks: &mut Checks, _table_ptr: *const MetisPluginTableV1) {
+    println!(
+        "[order] the guarded-table probes are skipped: this platform has no page mapping here"
+    );
+}
+
 /// The `metis_*` symbols the library defines dynamically (seam: entry symbol).
 fn metis_dynamic_symbols(path: &Path) -> Result<Vec<String>, String> {
     let output = Command::new("nm")
@@ -511,7 +846,6 @@ fn list_capabilities(
     );
     let inline = list.capabilities.iter().all(|descriptor| {
         descriptor.kind == CapabilityKind::Tool.as_str()
-            && descriptor.version == 1
             && descriptor.request_schema.as_object().is_some()
             && descriptor.response_schema.as_object().is_some()
     });
@@ -521,6 +855,115 @@ fn list_capabilities(
         "every descriptor carries both schemas inline",
     );
     Some(list)
+}
+
+/// The per-capability version gate, with the plugin kept whole.
+///
+/// A capability whose descriptor version this host does not support is refused
+/// with `Unsupported` for that name alone: the plugin is loaded, its other
+/// capabilities stay listed, and they still serve. Nothing here fails the
+/// plugin, and the check that the refused capability itself serves when it is
+/// called directly is what proves the refusal is the host's gate rather than a
+/// broken plugin.
+fn drive_capability_gate(
+    checks: &mut Checks,
+    state: &HostState,
+    instance: *mut c_void,
+    list: Option<&CapabilityList>,
+) {
+    let Some(list) = list else {
+        checks.check(
+            false,
+            "gate.version_refused",
+            "the declaration was not listed, so no capability could be gated",
+        );
+        return;
+    };
+    let Some(descriptor) = list
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.name == REFUSED_CAPABILITY)
+    else {
+        checks.check(
+            false,
+            "gate.version_refused",
+            format!("no capability named {REFUSED_CAPABILITY} was declared"),
+        );
+        return;
+    };
+
+    // The declared versions: one capability above the version this host serves,
+    // every other one at or below it.
+    let versions: Vec<(&str, u32)> = list
+        .capabilities
+        .iter()
+        .map(|descriptor| (descriptor.name.as_str(), descriptor.version))
+        .collect();
+    checks.check(
+        descriptor.version == REFUSED_CAPABILITY_VERSION
+            && list.capabilities.iter().all(|descriptor| {
+                descriptor.name == REFUSED_CAPABILITY
+                    || descriptor.version <= HOST_CAPABILITY_VERSION
+            }),
+        "gate.declared_versions",
+        format!("host serves up to {HOST_CAPABILITY_VERSION}: {versions:?}"),
+    );
+
+    // The gate, applied to every capability by name.
+    let verdicts: Vec<(&str, Result<(), MetisStatus>)> = list
+        .capabilities
+        .iter()
+        .map(capability_gate)
+        .zip(list.capabilities.iter())
+        .map(|(verdict, descriptor)| (descriptor.name.as_str(), verdict))
+        .collect();
+    let refused: Vec<&str> = verdicts
+        .iter()
+        .filter(|(_, verdict)| verdict.is_err())
+        .map(|(name, _)| *name)
+        .collect();
+    checks.check(
+        refused == vec![REFUSED_CAPABILITY]
+            && verdicts
+                .iter()
+                .any(|(_, verdict)| *verdict == Err(MetisStatus::Unsupported)),
+        "gate.version_refused_for_one_capability",
+        format!("{verdicts:?}"),
+    );
+
+    // The refused capability itself is not broken: the plugin serves it when a
+    // caller skips the gate, so the `Unsupported` above is the host's policy and
+    // not the plugin's status.
+    let ungated = state.drive(instance, REFUSED_CAPABILITY, "gate", 140);
+    checks.check(
+        ungated.status == MetisStatus::Ok,
+        "gate.refusal_is_the_hosts",
+        format!(
+            "the plugin itself serves {REFUSED_CAPABILITY} with status={} when the gate is not applied",
+            ungated.status.as_str()
+        ),
+    );
+
+    // And the rest of the plugin is untouched by the refusal.
+    let after = state.drive(instance, "tool.echo", "after the refusal", 141);
+    checks.check(
+        after.status == MetisStatus::Ok && after.body == "after the refusal",
+        "gate.rest_of_plugin_still_serves",
+        format!("status={} body={:?}", after.status.as_str(), after.body),
+    );
+}
+
+/// This host's per-capability version policy.
+///
+/// A capability whose descriptor version is above the one this host serves is
+/// refused for that name alone with `Unsupported`; everything else passes.
+/// `plugin-runtime`'s registry carries the same rule for the loader, which is
+/// what this demonstration is measured against.
+fn capability_gate(descriptor: &CapabilityDescriptor) -> Result<(), MetisStatus> {
+    if descriptor.version > HOST_CAPABILITY_VERSION {
+        return Err(MetisStatus::Unsupported);
+    }
+    Ok(())
 }
 
 /// Drives every routed capability by name.
@@ -613,6 +1056,26 @@ fn drive_capabilities(
         missed.missed_deadline && missed.status == MetisStatus::Ok,
         "cancel.missed_deadline_recorded",
         format!("{:?}", missed.status),
+    );
+}
+
+/// A request body carrying a field this build does not know.
+///
+/// The payload types never deny an unknown field and a field added later is
+/// optional with a default, so a plugin built later and a host built earlier
+/// still interoperate. The body is written here byte for byte because that is
+/// the only place such a field can come from: no type in this build has it.
+fn drive_unknown_field(checks: &mut Checks, state: &HostState, instance: *mut c_void) {
+    let body = br#"{"echo":"from a newer build","repeat":2,"added_after_this_build":true}"#;
+    let outcome = state.drive_body(instance, "tool.echo", body, 210);
+    checks.check(
+        outcome.status == MetisStatus::Ok && outcome.body == "from a newer build".repeat(2),
+        "payload.unknown_field_tolerated",
+        format!(
+            "status={} body={:?} (the known fields kept their meaning)",
+            outcome.status.as_str(),
+            outcome.body
+        ),
     );
 }
 
@@ -709,11 +1172,7 @@ impl Default for WatchdogOutcome {
 /// through the same host driver as the fixture, and the C side's own ledger has
 /// to agree with the host's counters at the end.
 fn drive_c_plugin(checks: &mut Checks) {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|crates| crates.parent())
-        .expect("the repository root")
-        .to_path_buf();
+    let root = repo_root();
     let script = root.join("scripts/build-c-plugin.sh");
     let compiled = Command::new("bash").arg(&script).output();
     match compiled {
@@ -941,6 +1400,90 @@ fn drive_c_plugin(checks: &mut Checks) {
     state.order("the C library unloaded after destroy");
 }
 
+/// A plugin built for another ABI major.
+///
+/// The symbol name carries the major, so this host cannot resolve a v2 plugin's
+/// entry symbol at all: there is no table pointer to read, and the refusal names
+/// the major the plugin exports instead of the loader's own byte string. The
+/// library is the one `scripts/build-c-plugin.sh` compiles, which is the same
+/// step the C section above runs, so this section follows it.
+fn drive_other_major_plugin(checks: &mut Checks) {
+    let path = repo_root().join("target/c-plugin/libother-major.so");
+    if !checks.check(
+        path.exists(),
+        "symbol.other_major_library_present",
+        path.display(),
+    ) {
+        return;
+    }
+    // SAFETY: the harness built this library from the tree it is testing.
+    let library = match unsafe { Library::new(&path) } {
+        Ok(library) => library,
+        Err(err) => {
+            checks.check(
+                false,
+                "symbol.other_major_library_loaded",
+                format!("dlopen failed: {err}"),
+            );
+            return;
+        }
+    };
+    checks.check(
+        true,
+        "symbol.other_major_library_loaded",
+        "the library built for major 2 loads",
+    );
+
+    let symbols = match metis_dynamic_symbols(&path) {
+        Ok(symbols) => symbols,
+        Err(err) => {
+            checks.check(false, "symbol.other_major_exactly_one_symbol", err);
+            return;
+        }
+    };
+    checks.check(
+        symbols == vec!["metis_plugin_entry_v2".to_string()],
+        "symbol.other_major_exactly_one_symbol",
+        format!("nm -D --defined-only reports {symbols:?}"),
+    );
+
+    // The refusal: typed, naming both majors, and reached without a table.
+    match resolve_entry(&library, &symbols) {
+        Err(
+            error @ EntryError::MajorMismatch {
+                expected: 1,
+                found: 2,
+            },
+        ) => {
+            checks.check(true, "symbol.other_major_typed_error", format!("{error}"));
+        }
+        Ok(_) => {
+            checks.check(
+                false,
+                "symbol.other_major_typed_error",
+                "the v1 entry symbol resolved in a plugin built for another major",
+            );
+        }
+        Err(other) => {
+            checks.check(
+                false,
+                "symbol.other_major_typed_error",
+                format!("the refusal is not the typed major mismatch: {other}"),
+            );
+        }
+    }
+    drop(library);
+}
+
+/// The repository root, which is where the build scripts and their outputs live.
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|crates| crates.parent())
+        .expect("the repository root")
+        .to_path_buf()
+}
+
 /// The outcome of one driven call.
 #[derive(Debug, Clone)]
 struct CallOutcome {
@@ -1109,17 +1652,30 @@ impl HostState {
         body: &str,
         request_id: u64,
     ) -> Option<MetisFutureHandle> {
+        let request = serde_json::to_vec(&EchoRequest {
+            echo: body.to_string(),
+            repeat: 1,
+        })
+        .unwrap_or_default();
+        self.invoke_body(instance, capability, &request, request_id)
+    }
+
+    /// Starts one call whose request body the caller wrote itself.
+    ///
+    /// A body carrying a field this build does not know cannot come from a type
+    /// this build has, so the bytes are the only place it can come from.
+    fn invoke_body(
+        &self,
+        instance: *mut c_void,
+        capability: &str,
+        body: &[u8],
+        request_id: u64,
+    ) -> Option<MetisFutureHandle> {
         if self.quarantined.load(SeqCst) {
             println!("[order] a new future was refused: the instance is quarantined");
             return None;
         }
-        let request = metis_encode_payload(
-            &serde_json::to_vec(&EchoRequest {
-                echo: body.to_string(),
-                repeat: 1,
-            })
-            .unwrap_or_default(),
-        );
+        let request = metis_encode_payload(body);
         let mut handle = MetisFutureHandle::null();
         // SAFETY: the instance is live, the request buffer is host-owned and
         // valid for this call, and the out parameter is a live local.
@@ -1195,8 +1751,24 @@ impl HostState {
         body: &str,
         request_id: u64,
     ) -> CallOutcome {
+        let request = serde_json::to_vec(&EchoRequest {
+            echo: body.to_string(),
+            repeat: 1,
+        })
+        .unwrap_or_default();
+        self.drive_body(instance, capability, &request, request_id)
+    }
+
+    /// Drives one call whose request body the caller wrote itself.
+    fn drive_body(
+        &self,
+        instance: *mut c_void,
+        capability: &str,
+        body: &[u8],
+        request_id: u64,
+    ) -> CallOutcome {
         let mut outcome = CallOutcome::default();
-        let Some(handle) = self.invoke(instance, capability, body, request_id) else {
+        let Some(handle) = self.invoke_body(instance, capability, body, request_id) else {
             outcome.status = MetisStatus::Internal;
             return outcome;
         };
