@@ -20,6 +20,25 @@
 //! detectable at load; the residual is recorded rather than paid for on every
 //! poll.
 //!
+//! # Ownership
+//!
+//! Per entry, one allocator and one freer, and the rules are the contract's
+//! section 11 rather than an implementation detail:
+//!
+//! - a ready buffer is **plugin-allocated** and is freed by the host through
+//!   the plugin's `release_buffer`;
+//! - a request payload is **host-owned** and is valid for the call only, so the
+//!   plugin copies what it needs and never frees it;
+//! - a `service_request` payload is **plugin-owned** and is freed by the host
+//!   through `release_buffer`, including from inside that callback, where the
+//!   entry is reentrant;
+//! - a `service_complete` payload is **host-owned** and borrowed for the call,
+//!   so the plugin copies it and the host frees it when the call returns;
+//! - nothing else crosses: no host ever calls `free` into plugin memory, and no
+//!   plugin ever frees a buffer it did not allocate.
+//!
+//! # The authoring surface
+//!
 //! The Rust authoring surface (the routed trait and the future adapter) is
 //! behind the `authoring` feature, off by default, so the plugin runtime
 //! depends on the primitives and the payload envelope alone.
