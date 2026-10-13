@@ -210,7 +210,11 @@ fn an_appended_entry_and_a_newer_minor_still_interoperate() {
     // The host and the plugin agree on the major and differ in a table entry
     // added after this ticket lands: the plugin's table carries one more entry
     // and reports a size that covers it.
-    let known = full_table(size_of::<MetisPluginTableV1>(), METIS_ABI_MAJOR, METIS_ABI_MINOR);
+    let known = full_table(
+        size_of::<MetisPluginTableV1>(),
+        METIS_ABI_MAJOR,
+        METIS_ABI_MINOR,
+    );
     let extended = ExtendedTableV1 {
         size: size_of::<ExtendedTableV1>(),
         abi_major: METIS_ABI_MAJOR,
@@ -263,13 +267,22 @@ fn an_appended_entry_and_a_newer_minor_still_interoperate() {
     // offset: the reader touches the entries its own layout covers and no
     // further.
     assert!(ptr::fn_addr_eq(read.create_instance, known.create_instance));
-    assert!(ptr::fn_addr_eq(read.destroy_instance, known.destroy_instance));
-    assert!(ptr::fn_addr_eq(read.list_capabilities, known.list_capabilities));
+    assert!(ptr::fn_addr_eq(
+        read.destroy_instance,
+        known.destroy_instance
+    ));
+    assert!(ptr::fn_addr_eq(
+        read.list_capabilities,
+        known.list_capabilities
+    ));
     assert!(ptr::fn_addr_eq(read.invoke_future, known.invoke_future));
     assert!(ptr::fn_addr_eq(read.cancel, known.cancel));
     assert!(ptr::fn_addr_eq(read.release_buffer, known.release_buffer));
     assert!(ptr::fn_addr_eq(read.shutdown, known.shutdown));
-    assert!(ptr::fn_addr_eq(read.service_complete, known.service_complete));
+    assert!(ptr::fn_addr_eq(
+        read.service_complete,
+        known.service_complete
+    ));
 
     assert_eq!(
         CANARY_CALLS.load(Ordering::SeqCst),
