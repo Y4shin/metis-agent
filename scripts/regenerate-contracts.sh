@@ -2,11 +2,14 @@
 # Regenerate the committed Rust for the wire contract, or check that the
 # committed trees still match the contract.
 #
-# Both codegen plugins are BSR remote plugins pinned by tag in
-# `contracts/buf.gen.yaml`, so generation needs `buf` and nothing else: no local
-# plugin binary, no `protoc`, no JVM. The committed trees are the plugin output
-# after the rustfmt post-step below. That is why the everyday build needs
-# neither `buf` nor a generator: the generated Rust is already in the tree.
+# Both codegen plugins are BSR remote plugins pinned by tag in the root
+# `buf.gen.yaml`, so generation needs `buf` and nothing else: no local plugin
+# binary, no `protoc`, no JVM. The committed trees are the plugin output after
+# the rustfmt post-step below. That is why the everyday build needs neither
+# `buf` nor a generator: the generated Rust is already in the tree.
+#
+# The module and the template both live at the repository root, so every buf
+# command runs from there and reads one configuration.
 #
 # Usage, from the repository root:
 #   bash scripts/regenerate-contracts.sh           # regenerate in place
@@ -14,8 +17,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-contracts_dir="$repo_root/contracts"
 generated_dir="$repo_root/crates/api-contracts/generated"
+cd "$repo_root"
 
 # Format one generated tree in place.
 #
@@ -44,10 +47,10 @@ if [ "${1:-}" = "--check" ]; then
 
   # The same template, pointed at the scratch tree, so a drift check never
   # writes to the committed files.
-  sed "s#\.\./crates/api-contracts/generated#$scratch#" \
-    "$contracts_dir/buf.gen.yaml" > "$scratch/buf.gen.yaml"
+  sed "s#crates/api-contracts/generated#$scratch#" \
+    "$repo_root/buf.gen.yaml" > "$scratch/buf.gen.yaml"
 
-  (cd "$contracts_dir" && buf generate --template "$scratch/buf.gen.yaml")
+  buf generate --template "$scratch/buf.gen.yaml"
   format_tree "$scratch/buffa"
   format_tree "$scratch/connect"
 
@@ -66,7 +69,7 @@ if [ "${1:-}" = "--check" ]; then
   exit 0
 fi
 
-(cd "$contracts_dir" && buf generate)
+buf generate
 format_tree "$generated_dir/buffa"
 format_tree "$generated_dir/connect"
 echo "regenerated crates/api-contracts/generated"
