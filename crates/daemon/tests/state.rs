@@ -6,7 +6,8 @@
 
 use std::path::PathBuf;
 
-use daemon::state::Store;
+use daemon::state::{Store, Verify};
+use daemon::token::mint;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
 
@@ -40,6 +41,103 @@ impl Drop for TempDir {
     }
 }
 
+/// An independent connection to the file the store created, opened the way an
+/// operator's sqlite client would open it. It is never the store's own pool, so
+/// what it reads is what is on disk.
+async fn open_raw(path: &std::path::Path) -> SqlitePool {
+    SqlitePool::connect_with(SqliteConnectOptions::new().filename(path))
+        .await
+        .expect("the database the store created opens")
+}
+
+/// Every byte the daemon keeps for this database: the file and, when the
+/// journal is beside it, the journal too.
+fn database_bytes(path: &std::path::Path) -> Vec<u8> {
+    let mut bytes = std::fs::read(path).expect("the database file is readable");
+    for suffix in ["-wal", "-journal"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        if let Ok(extra) = std::fs::read(PathBuf::from(sidecar)) {
+            bytes.extend(extra);
+        }
+    }
+    bytes
+}
+
+/// Whether `haystack` holds `needle` at any offset.
+fn holds(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+/// A token row round-trips: the store keeps the hash and verifies it, and the
+/// row never holds the token itself. Verification reports an outcome and never
+/// hands the stored hash back to its caller.
+#[tokio::test]
+async fn a_token_row_stores_the_hash_and_verifies_it() {
+    let base = TempDir::new();
+    let database = base.join("state/metis.db");
+    let store = Store::open(&database).await.expect("a fresh path opens");
+    let (token, hash) = mint();
+
+    store
+        .insert_token("desktop", &hash)
+        .await
+        .expect("the surface pairs");
+    assert_eq!(
+        store
+            .verify_token("desktop", &hash)
+            .await
+            .expect("the database answers"),
+        Verify::Verified,
+        "the token the surface was given verifies"
+    );
+
+    // Another token of the same shape, and a surface that was never paired:
+    // the answer is the outcome, not the stored row.
+    let (_, other) = mint();
+    assert_eq!(
+        store
+            .verify_token("desktop", &other)
+            .await
+            .expect("the database answers"),
+        Verify::Mismatch,
+        "a different token is refused"
+    );
+    assert_eq!(
+        store
+            .verify_token("laptop", &hash)
+            .await
+            .expect("the database answers"),
+        Verify::UnknownSurface,
+        "an unpaired surface has no row"
+    );
+    drop(store);
+
+    // The row itself, read with an independent connection: the surface name and
+    // the 32-byte digest, and nothing else.
+    let raw = open_raw(&database).await;
+    let (surface, stored): (String, Vec<u8>) = sqlx::query_as("SELECT surface, hash FROM tokens")
+        .fetch_one(&raw)
+        .await
+        .expect("the row is readable");
+    assert_eq!(surface, "desktop", "the row names the surface");
+    assert_eq!(
+        stored,
+        hash.as_bytes().to_vec(),
+        "the row holds the SHA-256 of the token"
+    );
+    raw.close().await;
+
+    // And nowhere in what the daemon keeps is the token itself.
+    assert!(
+        !holds(&database_bytes(&database), token.as_str().as_bytes()),
+        "the token text is not in the file the daemon keeps"
+    );
+}
+
 /// The mode a path carries, read the way an operator reads it.
 #[cfg(unix)]
 fn mode_of(path: &std::path::Path) -> u32 {
@@ -49,15 +147,6 @@ fn mode_of(path: &std::path::Path) -> u32 {
         .expect("the path exists")
         .mode()
         & 0o7777
-}
-
-/// An independent connection to the file the store created, opened the way an
-/// operator's sqlite client would open it. It is never the store's own pool, so
-/// what it reads is what is on disk.
-async fn open_raw(path: &std::path::Path) -> SqlitePool {
-    SqlitePool::connect_with(SqliteConnectOptions::new().filename(path))
-        .await
-        .expect("the database the store created opens")
 }
 
 /// A fresh file is usable without a separate migration step: opening it applies

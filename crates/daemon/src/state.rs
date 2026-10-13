@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use api_contracts::transport;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
+use subtle::ConstantTimeEq;
+
+use crate::token::TokenHash;
 
 /// The environment variable that names the database file directly.
 pub const STATE_DB_ENV: &str = "METIS_STATE_DB";
@@ -86,6 +89,21 @@ impl std::error::Error for StateError {
     }
 }
 
+/// The outcome of verifying a presented token against the store.
+///
+/// The answer is the outcome alone: the stored hash is never part of it, so a
+/// caller that verifies can never end up holding a credential it could replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Verify {
+    /// The surface has a row, and the presented hash is the one it holds.
+    Verified,
+    /// The surface has no row: it was never paired, or its token was revoked.
+    UnknownSurface,
+    /// The surface has a row, and the presented hash is a different one.
+    Mismatch,
+}
+
 /// The daemon's persistent state: one SQLite database.
 ///
 /// The connection pool is private: the store is the boundary, so a caller
@@ -135,6 +153,58 @@ impl Store {
             .await
             .map_err(|source| StateError::Database(source.into()))?;
         Ok(Self { pool })
+    }
+
+    /// Insert the token hash for `surface`.
+    ///
+    /// The token itself is neither taken nor written: the caller hashes what it
+    /// minted and hands over the digest, which is all the store ever holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Database`] when the row cannot be written.
+    pub async fn insert_token(&self, surface: &str, hash: &TokenHash) -> Result<(), StateError> {
+        sqlx::query(
+            "INSERT INTO tokens (surface, hash, paired_at) \
+             VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        )
+        .bind(surface)
+        .bind(hash.as_bytes().as_slice())
+        .execute(&self.pool)
+        .await
+        .map_err(StateError::Database)?;
+        Ok(())
+    }
+
+    /// Verify a presented token against the surface's row.
+    ///
+    /// The comparison is constant time, and the answer carries no hash: the
+    /// caller learns whether the surface is paired and whether the token is its
+    /// own, and nothing it could replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Database`] when the row cannot be read.
+    pub async fn verify_token(
+        &self,
+        surface: &str,
+        hash: &TokenHash,
+    ) -> Result<Verify, StateError> {
+        let stored: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT hash FROM tokens WHERE surface = ?")
+                .bind(surface)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StateError::Database)?;
+        let Some(stored) = stored else {
+            return Ok(Verify::UnknownSurface);
+        };
+        let matches: bool = stored.as_slice().ct_eq(hash.as_bytes().as_slice()).into();
+        Ok(if matches {
+            Verify::Verified
+        } else {
+            Verify::Mismatch
+        })
     }
 }
 
