@@ -185,6 +185,16 @@ streaming assumptions before anything is built on top.
   compile. `buf breaking` reads buf's built-in default configuration rather than
   `contracts/buf.yaml`'s `breaking` block, because the CI command runs from the
   repository root.
+- The plugin boundary is real and measured: `plugin-contract` holds the
+  primitives with `repr(C)` Rust as the source of truth, the generated header is
+  committed and drift-checked, and a fixture `cdylib` plus a 41-check harness
+  prove the ABI through a real shared-library load, covering the append-only
+  prefix, the payload envelope's failure modes, per-side buffer release
+  including a dropped completion, and panic containment on both sides of the
+  boundary. cbindgen needs every ABI type in its `[export] include` list and
+  every out-of-surface public constant in its `exclude` list, because it emits
+  the crate's public constants regardless of that list. `plugin-compatibility`
+  and `plugin-authoring-trait` extend this layout additively.
 
 ## Fog
 
