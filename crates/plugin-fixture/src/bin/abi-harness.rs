@@ -1,5 +1,5 @@
-//! The ABI harness: it loads the fixture cdylib and drives every primitive of
-//! the version 1 function table through `plugin-contract`.
+//! The ABI harness: it loads the fixture cdylib and drives the revised v1 table
+//! through `plugin-contract`.
 //!
 //! Run it with:
 //!
@@ -15,47 +15,57 @@
 //! Output is one `[ok]` or `[fail]` line per check, then a `[result] PASS` or
 //! `[result] FAIL` line, and the process exits non-zero when anything failed.
 //! Every check prints as it runs, so a hang names the step that did not finish.
+//! The teardown ordering prints as it happens, because the ordering is itself a
+//! check.
 //!
 //! The harness is a real host: it loads the real library, allocates its own
 //! request buffers, releases every plugin buffer it receives through the
-//! plugin's own `release_buffer`, and checks its accounting against the
-//! fixture's ledger. Nothing here reimplements the ABI.
+//! plugin's own `release_buffer`, polls the plugin's futures on threads it
+//! owns, and compares its counters with the fixture's ledger. Nothing here
+//! reimplements the ABI.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem;
-use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::slice;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering::SeqCst};
-use std::sync::{Condvar, Mutex};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering::SeqCst};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use libloading::Library;
 use plugin_contract::abi::*;
-use plugin_contract::payload::{
-    metis_encode_payload, metis_encode_payload_with, metis_payload_body,
-};
+use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
 use plugin_fixture::payload::{CapabilityKind, CapabilityList, EchoRequest, EchoResponse};
 
-/// How long a pending request may take before the harness calls it missing. An
-/// unbounded wait on a completion that never arrives hangs forever, which is
-/// exactly what a missing callback looks like from the outside (D11).
-const COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the harness waits for a call that should finish promptly.
+const POLL_DEADLINE: Duration = Duration::from_secs(2);
 
-/// The request whose completion the harness panics inside, to prove that a
-/// panic in a host callback is caught at the boundary instead of unwinding
-/// through plugin frames (D7).
-const HOST_PANIC_REQUEST_ID: u64 = 4;
+/// How long the watchdog waits before it calls a poll abandoned. The fixture's
+/// blocking capability blocks for longer than this on purpose.
+const WATCHDOG: Duration = Duration::from_millis(80);
 
-/// The capabilities this host expects to discover.
-const EXPECTED_CAPABILITIES: [(&str, CapabilityKind, u32); 4] = [
-    ("tool.echo", CapabilityKind::Tool, 1),
-    ("tool.pending", CapabilityKind::Tool, 1),
-    ("tool.cancellable", CapabilityKind::Tool, 1),
-    ("tool.panic", CapabilityKind::Tool, 1),
+/// How long the harness waits for a cancel to be honoured before it records a
+/// missed deadline. The stubborn capability never honours one.
+const CANCEL_WINDOW: Duration = Duration::from_millis(150);
+
+/// The capabilities the fixture advertises, in declaration order.
+const EXPECTED_CAPABILITIES: [&str; 7] = [
+    "tool.echo",
+    "tool.pending",
+    "tool.cancellable",
+    "tool.stubborn",
+    "tool.panic",
+    "tool.panic_drop",
+    "tool.blocking",
 ];
+
+/// The capabilities the routing check drives to completion by name alone.
+/// `tool.cancellable` needs a cancel, and the hazard capabilities need their own
+/// handling, so each of them is driven by its own check below.
+const ROUTED_CAPABILITIES: [&str; 3] = ["tool.echo", "tool.pending", "tool.stubborn"];
 
 fn main() -> ExitCode {
     install_panic_hook();
@@ -71,9 +81,9 @@ fn main() -> ExitCode {
         return checks.report();
     }
 
-    // SAFETY: the harness controls the library it just built, and it keeps the
-    // library loaded until after `shutdown` has joined every plugin worker, so
-    // no plugin thread can call back into unloaded code.
+    // SAFETY: the harness controls the library it just built. It stays loaded
+    // until after every future and waker clone has been released, so no plugin
+    // code can run inside an unloaded library.
     let library = match unsafe { Library::new(&path) } {
         Ok(library) => library,
         Err(err) => {
@@ -87,7 +97,7 @@ fn main() -> ExitCode {
     };
     checks.check(true, "fixture.library_loaded", path.display());
 
-    // --- the entry symbol (D8) --------------------------------------------
+    // --- the entry symbol --------------------------------------------------
 
     let entry = unsafe { library.get::<MetisPluginEntryV1Fn>(METIS_PLUGIN_ENTRY_V1) };
     let table_ptr = match &entry {
@@ -109,7 +119,6 @@ fn main() -> ExitCode {
         return checks.report();
     }
 
-    // A differing major fails at resolution, before any struct is interpreted.
     let wrong_major = unsafe { library.get::<MetisPluginEntryV1Fn>(b"metis_plugin_entry_v2\0") };
     checks.check(
         wrong_major.is_err(),
@@ -120,9 +129,6 @@ fn main() -> ExitCode {
         },
     );
 
-    // Exactly one versioned entry symbol: this is the seam the loader depends
-    // on, so the check reads the dynamic symbol table rather than trusting the
-    // names the harness happens to try.
     match metis_dynamic_symbols(&path) {
         Ok(symbols) => {
             checks.check(
@@ -136,610 +142,191 @@ fn main() -> ExitCode {
         }
     }
 
-    // --- the table prefix (D8) --------------------------------------------
+    // --- the version gate and the presence rule ----------------------------
 
-    match unsafe { metis_read_prefix(table_ptr) } {
-        Some(prefix) => {
+    match unsafe { metis_read_table(table_ptr) } {
+        Ok(read) => {
             checks.check(
-                prefix.size == mem::size_of::<MetisPluginTableV1>(),
+                read.size == mem::size_of::<MetisPluginTableV1>(),
                 "table.size_matches_layout",
                 format!(
                     "plugin reports size={} this build's layout is {}",
-                    prefix.size,
+                    read.size,
                     mem::size_of::<MetisPluginTableV1>()
                 ),
             );
             checks.check(
-                prefix.abi_major == METIS_ABI_MAJOR && prefix.abi_minor == METIS_ABI_MINOR,
-                "table.version_is_1_0",
+                read.abi_major == METIS_ABI_MAJOR && read.abi_minor == METIS_ABI_MINOR,
+                "table.version_is_1_1",
                 format!(
                     "abi {}.{} (expected {}.{})",
-                    prefix.abi_major, prefix.abi_minor, METIS_ABI_MAJOR, METIS_ABI_MINOR
+                    read.abi_major, read.abi_minor, METIS_ABI_MAJOR, METIS_ABI_MINOR
                 ),
             );
         }
-        None => {
-            checks.check(
-                false,
-                "table.size_matches_layout",
-                "the table prefix is unreadable",
-            );
-            checks.check(
-                false,
-                "table.version_is_1_0",
-                "the table prefix is unreadable",
-            );
+        Err(err) => {
+            checks.check(false, "table.size_matches_layout", err);
+            checks.check(false, "table.version_is_1_1", err);
         }
     }
 
-    // A table that claims to be shorter than the prefix must be refused, not
-    // read past its end.
-    #[repr(C)]
-    struct ShortTable {
-        size: usize,
-        abi_major: u32,
-        abi_minor: u32,
-    }
-    let short = ShortTable {
-        size: mem::size_of::<usize>(),
-        abi_major: METIS_ABI_MAJOR,
-        abi_minor: METIS_ABI_MINOR,
-    };
+    // The stale pre-release plugin: the same symbol and major, the superseded
+    // entry order, and a minor this build does not know.
+    let mut probe = unsafe { std::ptr::read(table_ptr) };
+    probe.abi_minor = 0;
     checks.check(
-        unsafe { metis_read_prefix(&short as *const ShortTable as *const MetisPluginTableV1) }
-            .is_none(),
-        "table.short_table_rejected",
-        "a table reporting size=8 is refused instead of read",
+        matches!(
+            unsafe { metis_read_table(&probe) },
+            Err(MetisAbiError::MinorMismatch { known: 1, found: 0 })
+        ),
+        "table.stale_minor_refused",
+        "a plugin reporting minor 0 is refused before its entries are read",
     );
-
-    // An older host knows only the prefix and the first entries. It must read
-    // exactly those from a table that has grown since (D8).
-    #[repr(C)]
-    struct OlderHostView {
-        size: usize,
-        abi_major: u32,
-        abi_minor: u32,
-        create_instance: MetisCreateInstanceFn,
-        destroy_instance: MetisDestroyInstanceFn,
-    }
-    let older_view = unsafe { &*(table_ptr as *const OlderHostView) };
-    let prefix_agrees = older_view.size >= mem::size_of::<OlderHostView>()
-        && matches!(
-            (older_view.create_instance, unsafe { (*table_ptr).create_instance }),
-            (a, b) if std::ptr::fn_addr_eq(a, b)
-        )
-        && matches!(
-            (older_view.destroy_instance, unsafe { (*table_ptr).destroy_instance }),
-            (a, b) if std::ptr::fn_addr_eq(a, b)
-        );
+    probe.abi_minor = METIS_ABI_MINOR;
+    probe.abi_major = 2;
     checks.check(
-        prefix_agrees,
-        "table.older_host_reads_its_prefix",
-        "the prefix an older host knows agrees with the full table",
+        matches!(
+            unsafe { metis_read_table(&probe) },
+            Err(MetisAbiError::MajorMismatch {
+                expected: 1,
+                found: 2
+            })
+        ),
+        "table.other_major_refused",
+        "a plugin reporting major 2 is refused with both versions named",
+    );
+    let short_size = mem::size_of::<MetisTablePrefix>() + 7 * mem::size_of::<usize>();
+    probe.abi_major = METIS_ABI_MAJOR;
+    probe.size = short_size;
+    checks.check(
+        matches!(
+            unsafe { metis_read_table(&probe) },
+            Err(MetisAbiError::EntryMissing {
+                entry: "service_complete"
+            })
+        ),
+        "table.short_table_entry_named",
+        format!("a table of {short_size} bytes does not cover service_complete"),
+    );
+    checks.check(
+        !metis_plugin_table_has_service_complete(short_size)
+            && metis_plugin_table_has_service_complete(mem::size_of::<MetisPluginTableV1>()),
+        "table.presence_is_size",
+        "the presence predicate follows the reported size",
     );
 
-    // --- host table, instance lifecycle, callbacks (D1, D11) ---------------
+    // --- the instance, the declaration, and the futures path ---------------
 
-    let state = Box::new(HostState::new(table_ptr));
-    let host_api = Box::new(MetisHostApiV1 {
-        size: mem::size_of::<MetisHostApiV1>(),
-        user_data: &*state as *const HostState as *mut c_void,
-        complete: host_complete,
-        progress: host_progress,
-        emit_event: host_emit_event,
-        log: host_log,
-    });
-    state.host_api.store(
-        &*host_api as *const MetisHostApiV1 as *mut MetisHostApiV1,
-        SeqCst,
-    );
+    let state = HostState::new(table_ptr);
+    state.order("library loaded");
 
     let mut instance: *mut c_void = std::ptr::null_mut();
-    let create = unsafe { (*table_ptr).create_instance };
-    let create_status = unsafe { create(state.host_api(), &mut instance) };
+    let create_status = unsafe { ((*table_ptr).create_instance)(state.api(), &mut instance) };
     state.instance.store(instance, SeqCst);
     checks.check(
         create_status == MetisStatus::Ok && !instance.is_null(),
         "instance.create_ok",
-        format!("status={} instance={:p}", create_status.as_str(), instance),
+        format!("status={} instance={instance:p}", create_status.as_str()),
     );
     if create_status != MetisStatus::Ok || instance.is_null() {
         return checks.report();
     }
     checks.check(
         state.saw_log("instance created"),
-        "callback.log_observed",
-        format!(
-            "{} log lines through the host table",
-            state.log_line_count()
-        ),
+        "instance.started_ran",
+        "the lifecycle hook ran and the adapter logged it",
     );
-    // The capability-originated event arrives at creation time, from the
-    // lifecycle hook the adapter runs inside `create_instance` (D15).
     checks.check(
         state.saw_event("fixture.ready"),
-        "event.started_emits",
-        format!("events={:?}", state.event_topics()),
-    );
-    checks.check(
-        state.event_callbacks.load(SeqCst) == 1,
-        "callback.emit_event_from_create",
-        format!("event callbacks={}", state.event_callbacks.load(SeqCst)),
+        "instance.start_event",
+        "the lifecycle hook reached the host event route",
     );
 
-    // --- capability discovery (D9) ----------------------------------------
+    let list = list_capabilities(&mut checks, &state, instance);
+    drive_capabilities(&mut checks, &state, instance, list.as_ref());
+    run_hazard_checks(&mut checks, &state, instance);
 
-    let list_capabilities = unsafe { (*table_ptr).list_capabilities };
-    let mut caps_buffer = MetisBuffer::empty();
-    let caps_status = unsafe { list_capabilities(instance, &mut caps_buffer) };
-    let descriptors = match state.read_and_release(caps_buffer) {
-        Ok(body) => match serde_json::from_slice::<CapabilityList>(&body) {
-            Ok(list) => list.capabilities,
-            Err(err) => {
-                checks.check(
-                    false,
-                    "capabilities.listed",
-                    format!("capability payload did not parse: {err}"),
-                );
-                Vec::new()
-            }
-        },
-        Err(err) => {
-            checks.check(false, "capabilities.listed", err);
-            Vec::new()
-        }
-    };
-    let listed: Vec<(&str, CapabilityKind, u32)> = descriptors
-        .iter()
-        .map(|descriptor| {
-            (
-                descriptor.name.as_str(),
-                descriptor.kind,
-                descriptor.version,
-            )
-        })
-        .collect();
-    let all_expected = listed.len() == EXPECTED_CAPABILITIES.len()
-        && EXPECTED_CAPABILITIES
-            .iter()
-            .all(|expected| listed.contains(expected));
-    checks.check(
-        caps_status == MetisStatus::Ok && all_expected,
-        "capabilities.listed",
-        format!("status={} descriptors={listed:?}", caps_status.as_str()),
-    );
-    let schemas_named = descriptors
-        .iter()
-        .all(|descriptor| !descriptor.schema.is_empty());
-    checks.check(
-        schemas_named,
-        "capabilities.descriptors_carry_a_schema",
-        format!(
-            "schemas={:?}",
-            descriptors
-                .iter()
-                .map(|descriptor| descriptor.schema.as_str())
-                .collect::<Vec<_>>()
-        ),
-    );
-    // Per-capability version gating is deliberately not exercised here: it is
-    // `plugin-compatibility`'s subject, and this fixture advertises no version a
-    // host would have to refuse.
+    // --- teardown: quiesce, drop, then unload ------------------------------
 
-    // --- the envelope across the boundary (D4) ----------------------------
-
-    let request_body = serde_json::to_vec(&EchoRequest {
-        echo: "hi".to_string(),
-        repeat: 2,
-    })
-    .expect("the request serialises");
-    for (label, header, expected) in [
-        (
-            "envelope.reserved_bits_invalid_argument",
-            0x81_u8,
-            MetisStatus::InvalidArgument,
-        ),
-        (
-            "envelope.bad_format_version_invalid_argument",
-            0x02,
-            MetisStatus::InvalidArgument,
-        ),
-        (
-            "envelope.unknown_codec_unsupported",
-            0x11,
-            MetisStatus::Unsupported,
-        ),
-    ] {
-        let request = HostRequest::with_header(&state, header, &request_body);
-        let mut out = MetisBuffer::empty();
-        let status = unsafe { call_invoke(&state, 900, "tool.echo", request.buffer(), &mut out) };
-        drop(request);
-        checks.check(
-            status == expected,
-            label,
-            format!(
-                "header {header:#04x} returned {} (expected {})",
-                status.as_str(),
-                expected.as_str()
-            ),
-        );
-    }
-
-    // --- the trait path is always pending (D15) ---------------------------
-
-    // `tool.echo` is the capability that used to finish inline. Through the
-    // trait it is pending like every other arm, and its result arrives through
-    // the host's `complete` callback, which is what this check observes. The ABI
-    // keeps its inline path for a plugin that implements the table directly, and
-    // nothing in this tree exercises it any more.
-    let request = HostRequest::new(&state, &request_body);
-    let mut out = MetisBuffer::empty();
-    state.register_pending(1);
-    let status = unsafe { call_invoke(&state, 1, "tool.echo", request.buffer(), &mut out) };
-    drop(request);
-    let completed = state.wait_for_completion(1, COMPLETION_TIMEOUT);
-    let echo: Option<EchoResponse> = completed
-        .as_ref()
-        .and_then(|completed| serde_json::from_slice(&completed.body).ok());
     checks.check(
-        status == MetisStatus::Pending
-            && out.ptr.is_null()
-            && matches!(&completed, Some(completed) if completed.status == MetisStatus::Ok)
-            && matches!(&echo, Some(response) if response.echo == "hihi" && response.bytes == 4),
-        "invoke.always_pending_completion",
-        format!(
-            "status={} out is null={} outcome={:?} body={echo:?}",
-            status.as_str(),
-            out.ptr.is_null(),
-            completed
-                .as_ref()
-                .map(|completed| completed.status.as_str())
-        ),
+        state.in_flight_is_empty(),
+        "teardown.no_future_in_flight",
+        format!("{} futures still held by the host", state.in_flight().len()),
     );
-    // The capability half of the event route: an event from inside a call.
+    let shutdown = unsafe { ((*table_ptr).shutdown)(instance) };
+    state.order("shutdown after every future was dropped");
     checks.check(
-        state.saw_event("fixture.answered"),
-        "event.capability_emits",
-        format!("events={:?}", state.event_topics()),
+        shutdown == MetisStatus::Ok,
+        "teardown.shutdown_ok",
+        format!("status={}", shutdown.as_str()),
     );
-
-    let request = HostRequest::new(&state, &request_body);
-    let mut out = MetisBuffer::empty();
-    let status = unsafe { call_invoke(&state, 2, "tool.nope", request.buffer(), &mut out) };
-    drop(request);
-    checks.check(
-        status == MetisStatus::NotFound,
-        "invoke.unknown_capability_not_found",
-        format!("status={}", status.as_str()),
-    );
-
-    // --- pending invoke, progress, completion (D11) -----------------------
-
-    let request = HostRequest::new(&state, &request_body);
-    let mut out = MetisBuffer::empty();
-    state.register_pending(3);
-    let status = unsafe { call_invoke(&state, 3, "tool.pending", request.buffer(), &mut out) };
-    drop(request);
-    checks.check(
-        status == MetisStatus::Pending && out.ptr.is_null(),
-        "invoke.pending_returned",
-        format!("status={} out buffer is null", status.as_str()),
-    );
-    let completed = state.wait_for_completion(3, COMPLETION_TIMEOUT);
-    let pending_body: Option<EchoResponse> = completed
-        .as_ref()
-        .and_then(|completed| serde_json::from_slice(&completed.body).ok());
-    checks.check(
-        matches!(&completed, Some(completed) if completed.status == MetisStatus::Ok)
-            && matches!(&pending_body, Some(response) if response.echo == "async" && response.bytes == 5),
-        "invoke.pending_completion_via_callback",
-        format!(
-            "outcome={:?} body={:?}",
-            completed.as_ref().map(|completed| completed.status.as_str()),
-            pending_body
-        ),
-    );
-    checks.check(
-        state.progress_callbacks.load(SeqCst) == 1,
-        "invoke.pending_progress_callback",
-        format!(
-            "progress callbacks={}",
-            state.progress_callbacks.load(SeqCst)
-        ),
-    );
-
-    // --- a panic inside a host callback (D7) ------------------------------
-
-    let request = HostRequest::new(&state, &request_body);
-    let mut out = MetisBuffer::empty();
-    state.register_pending(HOST_PANIC_REQUEST_ID);
-    let status = unsafe {
-        call_invoke(
-            &state,
-            HOST_PANIC_REQUEST_ID,
-            "tool.pending",
-            request.buffer(),
-            &mut out,
-        )
-    };
-    drop(request);
-    let completed = state.wait_for_completion(HOST_PANIC_REQUEST_ID, COMPLETION_TIMEOUT);
-    checks.check(
-        status == MetisStatus::Pending
-            && matches!(&completed, Some(completed) if completed.status == MetisStatus::Internal),
-        "callback.host_callback_panic_is_internal",
-        format!(
-            "invoke={} outcome={:?} (the harness panicked inside its complete callback)",
-            status.as_str(),
-            completed
-                .as_ref()
-                .map(|completed| completed.status.as_str())
-        ),
-    );
-    checks.check(
-        state.host_callback_panics.load(SeqCst) == 1,
-        "callback.host_callback_panic_caught_once",
-        format!(
-            "host callback panics caught={}",
-            state.host_callback_panics.load(SeqCst)
-        ),
-    );
-
-    // --- cancel (D11, D12) ------------------------------------------------
-
-    let request = HostRequest::new(&state, &request_body);
-    let mut out = MetisBuffer::empty();
-    state.register_pending(5);
-    let status = unsafe { call_invoke(&state, 5, "tool.cancellable", request.buffer(), &mut out) };
-    drop(request);
-    let cancel_status = unsafe { call_cancel(&state, 5) };
-    state.cancelled.lock().unwrap().insert(5);
-    // No completion is guaranteed after a successful cancel, so the host
-    // retires its own pending entry (D12): ignoring late callbacks alone would
-    // leak one record per cancelled request.
-    state.pending.lock().unwrap().remove(&5);
-    checks.check(
-        status == MetisStatus::Pending && cancel_status == MetisStatus::Ok,
-        "cancel.accepted",
-        format!(
-            "invoke={} cancel={}",
-            status.as_str(),
-            cancel_status.as_str()
-        ),
-    );
-    let suppressed = state.wait_until(COMPLETION_TIMEOUT, |state| {
-        state.saw_log("completion suppressed for cancelled request 5")
-    });
-    checks.check(
-        suppressed,
-        "cancel.plugin_suppressed_completion",
-        "the adapter logged the suppression instead of completing",
-    );
-    // Promptly means the token's waker reached the parked arm rather than a
-    // later poll: the arm has no budget it could have waited out, so the number
-    // it reports is the cancel's own latency.
-    let observed = state.logged_millis("fixture: cancellable observed the cancel");
-    checks.check(
-        suppressed && observed.is_some_and(|ms| ms < 250),
-        "cancel.parked_call_is_woken_promptly",
-        format!("the arm reported the token after {observed:?}ms"),
-    );
-    let no_completion = !state.completed.lock().unwrap().contains_key(&5);
-    checks.check(
-        no_completion,
-        "cancel.no_completion_after_cancel",
-        format!("completed entries for request 5 present={}", !no_completion),
-    );
-
-    // The other half of the cancelled-completion rule: the same `Cancelled`
-    // value returned without a successful cancel still completes, so a host is
-    // never parked on a completion that will not arrive. This arm gives up on
-    // its own budget instead of on a cancel.
-    let request = HostRequest::new(&state, &request_body);
-    let mut out = MetisBuffer::empty();
-    state.register_pending(9);
-    let status = unsafe { call_invoke(&state, 9, "tool.cancellable", request.buffer(), &mut out) };
-    drop(request);
-    let completed = state.wait_for_completion(9, COMPLETION_TIMEOUT);
-    let gave_up = state.saw_log("fixture: cancellable gave up without a cancel");
-    checks.check(
-        status == MetisStatus::Pending
-            && matches!(&completed, Some(completed) if completed.status == MetisStatus::Cancelled)
-            && gave_up
-            && !state.saw_log("completion suppressed for cancelled request 9"),
-        "cancel.cancelled_without_a_cancel_still_completes",
-        format!(
-            "invoke={} outcome={:?} gave up={gave_up}",
-            status.as_str(),
-            completed
-                .as_ref()
-                .map(|completed| completed.status.as_str())
-        ),
-    );
-
-    let unknown_cancel = unsafe { call_cancel(&state, 4242) };
-    checks.check(
-        unknown_cancel == MetisStatus::NotFound,
-        "cancel.unknown_request_not_found",
-        format!("status={}", unknown_cancel.as_str()),
-    );
-
-    // `tool.pending` never honours a cancel, so its completion arrives anyway.
-    // The host drops that completion and still releases the buffer it carried,
-    // so a cancel cannot leak plugin memory (D6, D12).
-    let request = HostRequest::new(&state, &request_body);
-    let mut out = MetisBuffer::empty();
-    state.register_pending(6);
-    let status = unsafe { call_invoke(&state, 6, "tool.pending", request.buffer(), &mut out) };
-    drop(request);
-    let cancel_status = unsafe { call_cancel(&state, 6) };
-    state.cancelled.lock().unwrap().insert(6);
-    state.pending.lock().unwrap().remove(&6);
-    let dropped = state.wait_until(COMPLETION_TIMEOUT, |state| {
-        state.dropped_completions.load(SeqCst) == 1
-    });
-    checks.check(
-        status == MetisStatus::Pending && cancel_status == MetisStatus::Ok && dropped,
-        "cancel.host_dropped_late_completion",
-        format!(
-            "invoke={} cancel={} dropped={}",
-            status.as_str(),
-            cancel_status.as_str(),
-            dropped
-        ),
-    );
-    let released = state.dropped_buffers_released.load(SeqCst);
-    let late_recorded = state.completed.lock().unwrap().contains_key(&6);
-    checks.check(
-        released == 1 && !late_recorded,
-        "cancel.dropped_payload_still_released",
-        format!("dropped payloads released={released} a completion was recorded={late_recorded}"),
-    );
-
-    // --- a panic inside an exported function (D7) -------------------------
-
-    let request = HostRequest::new(&state, &request_body);
-    let mut out = MetisBuffer::empty();
-    state.register_pending(7);
-    let status = unsafe { call_invoke(&state, 7, "tool.panic", request.buffer(), &mut out) };
-    drop(request);
-    let completed = state.wait_for_completion(7, COMPLETION_TIMEOUT);
-    checks.check(
-        status == MetisStatus::Pending
-            && matches!(&completed, Some(completed) if completed.status == MetisStatus::Internal)
-            && state.saw_log("capability panicked"),
-        "panic.capability_panics_into_an_internal_completion",
-        format!(
-            "invoke={} outcome={:?} (the worker caught the panic and logged it)",
-            status.as_str(),
-            completed
-                .as_ref()
-                .map(|completed| completed.status.as_str())
-        ),
-    );
-
-    let request = HostRequest::new(
-        &state,
-        &serde_json::to_vec(&EchoRequest {
-            echo: "z".to_string(),
-            repeat: 3,
-        })
-        .expect("the request serialises"),
-    );
-    let mut out = MetisBuffer::empty();
-    state.register_pending(8);
-    let status = unsafe { call_invoke(&state, 8, "tool.echo", request.buffer(), &mut out) };
-    drop(request);
-    let completed = state.wait_for_completion(8, COMPLETION_TIMEOUT);
-    let after_panic = completed
-        .as_ref()
-        .and_then(|completed| serde_json::from_slice::<EchoResponse>(&completed.body).ok());
-    checks.check(
-        status == MetisStatus::Pending
-            && matches!(&after_panic, Some(response) if response.echo == "zzz"),
-        "panic.instance_still_serves_the_next_call",
-        format!("invoke={} body={after_panic:?}", status.as_str()),
-    );
-
-    // --- shutdown and the two ledgers (D6) --------------------------------
-
-    let shutdown_status = unsafe { call_shutdown(&state) };
-    checks.check(
-        shutdown_status == MetisStatus::Ok,
-        "instance.shutdown_ok",
-        format!("status={}", shutdown_status.as_str()),
-    );
-    let destroy_after_shutdown = unsafe { call_destroy(&state) };
-    checks.check(
-        destroy_after_shutdown == MetisStatus::NotFound,
-        "instance.destroy_after_shutdown_not_found",
-        format!(
-            "releasing the handle twice returns {}",
-            destroy_after_shutdown.as_str()
-        ),
-    );
-
-    let ledger = state.fixture_ledger();
-    match &ledger {
+    match state.fixture_ledger() {
         Some(ledger) => {
             let balanced =
                 ledger.get("allocs") == ledger.get("frees") && ledger.get("live") == Some(&0);
             checks.check(
                 balanced,
-                "ownership.plugin_ledger_balanced",
-                format!(
-                    "allocs={:?} frees={:?} live={:?}",
-                    ledger.get("allocs"),
-                    ledger.get("frees"),
-                    ledger.get("live")
-                ),
+                "ownership.fixture_ledger_balanced",
+                format!("{ledger:?}"),
+            );
+            // Exactly one violation is expected, and it is the deliberate
+            // second drop of one future: the ledger has to record it rather
+            // than become wrong.
+            checks.check(
+                ledger.get("violations") == Some(&1),
+                "ownership.only_the_deliberate_violation",
+                format!("{ledger:?}"),
             );
             checks.check(
-                ledger.get("violations") == Some(&0) && ledger.get("suppressed") == Some(&1),
-                "ownership.plugin_ledger_clean",
+                ledger.get("frees").copied() == Some(state.released()),
+                "ownership.host_released_every_buffer",
                 format!(
-                    "violations={:?} suppressed={:?}",
-                    ledger.get("violations"),
-                    ledger.get("suppressed")
-                ),
-            );
-            let received = state.plugin_buffers_released.load(SeqCst);
-            checks.check(
-                ledger.get("allocs") == Some(&received),
-                "ownership.ledger_agrees_with_harness",
-                format!(
-                    "plugin allocs={:?} harness releases={received}",
-                    ledger.get("allocs")
+                    "the host released {} buffers and the fixture freed {}",
+                    state.released(),
+                    ledger.get("frees").copied().unwrap_or_default()
                 ),
             );
         }
         None => {
             checks.check(
                 false,
-                "ownership.plugin_ledger_balanced",
-                "the fixture logged no ledger line",
-            );
-            checks.check(
-                false,
-                "ownership.plugin_ledger_clean",
-                "the fixture logged no ledger line",
-            );
-            checks.check(
-                false,
-                "ownership.ledger_agrees_with_harness",
-                "the fixture logged no ledger line",
+                "ownership.fixture_ledger_balanced",
+                "the fixture reported no ledger",
             );
         }
     }
-
-    let host_allocs = state.host_allocs.load(SeqCst);
-    let host_frees = state.host_frees.load(SeqCst);
     checks.check(
-        host_allocs == host_frees && host_allocs > 0,
-        "ownership.host_allocations_freed_by_host",
-        format!("host allocs={host_allocs} frees={host_frees}"),
+        state.waker_clones() == state.waker_drops(),
+        "waker.every_clone_released",
+        format!(
+            "{} clones, {} releases",
+            state.waker_clones(),
+            state.waker_drops()
+        ),
     );
 
-    let foreign = state.foreign_free_attempts.load(SeqCst);
-    let rejections = state.rejections.lock().unwrap().clone();
+    let destroy = unsafe { ((*table_ptr).destroy_instance)(instance) };
     checks.check(
-        foreign == 0 && rejections.is_empty(),
-        "ownership.no_foreign_or_rejected_releases",
-        format!("a buffer the host did not allocate was never offered: attempts={foreign} rejections={rejections:?}"),
+        destroy == MetisStatus::Ok,
+        "teardown.destroy_ok",
+        format!("status={}", destroy.as_str()),
     );
-
-    let pending_left = state.pending.lock().unwrap().len();
-    checks.check(
-        pending_left == 0,
-        "ownership.pending_registry_empty",
-        format!("pending entries left={pending_left}"),
-    );
-
-    // The library may only be unloaded once no plugin thread can call back,
-    // which `shutdown` guaranteed by joining them (D12).
-    drop(host_api);
-    drop(state);
+    // The library stays resident until here: nothing may be inside plugin code
+    // when it is unloaded, and the ordering ledger above records that.
     drop(library);
+    state.order("library unloaded after destroy");
+    let order = state.ordering();
+    let first_unload = order
+        .iter()
+        .position(|event| event.starts_with("library unloaded"));
+    let shutdown_at = order
+        .iter()
+        .position(|event| event.starts_with("shutdown after"));
+    checks.check(
+        matches!((shutdown_at, first_unload), (Some(s), Some(u)) if s < u),
+        "ordering.quiesce_drop_unload",
+        "quiescence is recorded before the unload",
+    );
 
     checks.report()
 }
@@ -801,8 +388,6 @@ fn install_panic_hook() {
         println!("[info] a deliberate panic was caught at the boundary: {message}");
     }));
 }
-
-// --- rebuilding and locating the fixture -----------------------------------
 
 /// Rebuilds the fixture cdylib and reports whether it succeeded.
 ///
@@ -876,345 +461,801 @@ fn metis_dynamic_symbols(path: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-// --- host-allocated request payloads (D6) ---------------------------------
-
-/// A request payload the host allocated, so the host frees it.
-///
-/// Its buffer is tagged `METIS_BUFFER_OWNER_HOST` and is valid only for the call
-/// that receives it; the pointer is never handed to the plugin's
-/// `release_buffer`.
-struct HostRequest<'a> {
-    state: &'a HostState,
-    bytes: Vec<u8>,
+/// Lists the capabilities the fixture declares and checks the declaration.
+fn list_capabilities(
+    checks: &mut Checks,
+    state: &HostState,
+    instance: *mut c_void,
+) -> Option<CapabilityList> {
+    let mut payload = MetisBuffer::empty();
+    // SAFETY: the instance is live and the out parameter is a live local.
+    let status = unsafe { ((*state.table).list_capabilities)(instance, &mut payload) };
+    if status != MetisStatus::Ok {
+        checks.check(
+            false,
+            "capabilities.listed",
+            format!("list_capabilities returned {}", status.as_str()),
+        );
+        return None;
+    }
+    let bytes = state.take_plugin_buffer(payload);
+    let list: CapabilityList = match metis_payload_body(&bytes)
+        .ok()
+        .and_then(|body| serde_json::from_slice(body).ok())
+    {
+        Some(list) => list,
+        None => {
+            checks.check(false, "capabilities.listed", "the list is not a payload");
+            return None;
+        }
+    };
+    let names: Vec<&str> = list
+        .capabilities
+        .iter()
+        .map(|descriptor| descriptor.name.as_str())
+        .collect();
+    checks.check(
+        names == EXPECTED_CAPABILITIES.to_vec(),
+        "capabilities.listed",
+        format!("{names:?}"),
+    );
+    checks.check(
+        list.capabilities.len() > 4,
+        "capabilities.more_than_four",
+        format!(
+            "{} capabilities, which the four-arm vocabulary could not name",
+            names.len()
+        ),
+    );
+    let inline = list.capabilities.iter().all(|descriptor| {
+        descriptor.kind == CapabilityKind::Tool
+            && descriptor.version == 1
+            && descriptor.request_schema.as_object().is_some()
+            && descriptor.response_schema.as_object().is_some()
+    });
+    checks.check(
+        inline,
+        "capabilities.inline_schemas",
+        "every descriptor carries both schemas inline",
+    );
+    Some(list)
 }
 
-impl<'a> HostRequest<'a> {
-    fn new(state: &'a HostState, body: &[u8]) -> Self {
-        state.host_allocs.fetch_add(1, SeqCst);
-        HostRequest {
-            state,
-            bytes: metis_encode_payload(body),
-        }
+/// Drives every routed capability by name.
+fn drive_capabilities(
+    checks: &mut Checks,
+    state: &HostState,
+    instance: *mut c_void,
+    list: Option<&CapabilityList>,
+) {
+    let declared = match list {
+        Some(list) => list
+            .capabilities
+            .iter()
+            .map(|descriptor| descriptor.name.clone())
+            .collect::<Vec<_>>(),
+        None => EXPECTED_CAPABILITIES
+            .iter()
+            .map(|name| name.to_string())
+            .collect(),
+    };
+    let mut dispatched = Vec::new();
+    for (index, capability) in ROUTED_CAPABILITIES.iter().enumerate() {
+        let request_id = 100 + index as u64;
+        let outcome = state.drive(instance, capability, "route", request_id);
+        dispatched.push((capability.to_string(), outcome.status));
     }
+    checks.check(
+        dispatched
+            .iter()
+            .all(|(_, status)| *status == MetisStatus::Ok),
+        "capabilities.every_capability_dispatched",
+        format!("{dispatched:?}"),
+    );
+    checks.check(
+        declared.len() == EXPECTED_CAPABILITIES.len(),
+        "capabilities.declared_count",
+        format!("{} declared", declared.len()),
+    );
 
-    /// A request with an arbitrary header byte, for the envelope checks.
-    fn with_header(state: &'a HostState, header: u8, body: &[u8]) -> Self {
-        state.host_allocs.fetch_add(1, SeqCst);
-        HostRequest {
-            state,
-            bytes: metis_encode_payload_with(header, body),
-        }
-    }
+    let absent = state.drive(instance, "tool.absent", "route", 199);
+    checks.check(
+        absent.status == MetisStatus::NotFound,
+        "capabilities.unknown_name_not_found",
+        format!("status={}", absent.status.as_str()),
+    );
 
-    fn buffer(&self) -> MetisBuffer {
-        MetisBuffer {
-            ptr: self.bytes.as_ptr() as *mut u8,
-            len: self.bytes.len(),
-            cap: self.bytes.capacity(),
-            owner: METIS_BUFFER_OWNER_HOST,
-            reserved: 0,
-        }
-    }
+    // Ready on the first poll, and the capability's event reached the host.
+    let echo = state.drive(instance, "tool.echo", "hello", 200);
+    checks.check(
+        echo.status == MetisStatus::Ok && echo.polls == 1,
+        "futures.ready_on_first_poll",
+        format!("status={} polls={}", echo.status.as_str(), echo.polls),
+    );
+    checks.check(
+        !echo.body.is_empty() && echo.events,
+        "futures.capability_emitted_event",
+        "the capability answered and its event reached the host",
+    );
+
+    // The host-answered timer: the first poll parks, the host answers
+    // `service_complete`, the woken future answers.
+    let pending = state.drive(instance, "tool.pending", "wait", 201);
+    checks.check(
+        pending.status == MetisStatus::Ok && pending.polls >= 2,
+        "futures.host_answered_timer",
+        format!("status={} polls={}", pending.status.as_str(), pending.polls),
+    );
+    checks.check(
+        pending.saw_timer_request,
+        "futures.service_request_payload",
+        "the plugin asked for a timer with a plugin-owned payload",
+    );
+    checks.check(
+        pending.body.contains("timer"),
+        "futures.service_answer_reached_capability",
+        format!("the capability decoded the host's answer: {}", pending.body),
+    );
+
+    // A cancel that resolves as Cancelled.
+    let cancel = state.cancel_call(instance, "tool.cancellable", 202);
+    checks.check(
+        cancel.status == MetisStatus::Cancelled,
+        "cancel.resolves_as_cancelled",
+        format!("status={}", cancel.status.as_str()),
+    );
+
+    // A cancel the plugin never honours.
+    let missed = state.cancel_call(instance, "tool.stubborn", 203);
+    checks.check(
+        missed.missed_deadline && missed.status == MetisStatus::Ok,
+        "cancel.missed_deadline_recorded",
+        format!("{:?}", missed.status),
+    );
 }
 
-impl Drop for HostRequest<'_> {
-    fn drop(&mut self) {
-        self.state.host_frees.fetch_add(1, SeqCst);
-    }
+/// The hazard checks: panics at both boundaries, a blocking poll, a double
+/// drop, and the reclaim a late poll return performs.
+fn run_hazard_checks(checks: &mut Checks, state: &HostState, instance: *mut c_void) {
+    let panic = state.drive(instance, "tool.panic", "boom", 300);
+    checks.check(
+        panic.status == MetisStatus::Internal,
+        "hazard.panic_in_poll",
+        format!("status={}", panic.status.as_str()),
+    );
+
+    let drop_panic = state.panic_in_drop(instance, "tool.panic_drop", 301);
+    checks.check(
+        drop_panic,
+        "hazard.panic_in_drop",
+        "the destructor panicked, the drop was contained, and the process is still here",
+    );
+
+    let callback = state.callback_panic(instance, "tool.pending", 302);
+    checks.check(
+        callback,
+        "hazard.panic_in_host_callback",
+        "the callback's own frame caught the panic and the plugin saw a status",
+    );
+
+    let blocked = state.watchdog(instance, "tool.blocking", 303);
+    checks.check(
+        blocked.abandoned && blocked.quarantined,
+        "hazard.blocking_poll_watchdog",
+        format!("{blocked:?}"),
+    );
+    checks.check(
+        blocked.reclaimed,
+        "reclaim.late_poll_return",
+        "the late poll return reclaimed the context box and the waker clone once",
+    );
+    checks.check(
+        state.new_futures_refused(instance),
+        "hazard.quarantine_refuses_new_futures",
+        "a quarantined instance accepts no new future",
+    );
+
+    checks.check(
+        state.double_drop(instance, "tool.echo", 304),
+        "hazard.double_drop_refused",
+        "the second drop was refused instead of freeing the context twice",
+    );
 }
 
 // --- host state ------------------------------------------------------------
 
-struct Completed {
-    status: MetisStatus,
-    body: Vec<u8>,
+/// One waker the host handed to a plugin poll.
+///
+/// The slot is deliberately leaked: the contract says a wake may arrive after
+/// the future was dropped, so what the wake dereferences has to outlive the
+/// future. The counters it carries are what the harness reads.
+struct WakerSlot {
+    state: *const HostState,
+    request_id: u64,
+    live: AtomicBool,
 }
 
+impl Default for CallOutcome {
+    fn default() -> Self {
+        CallOutcome {
+            status: MetisStatus::Internal,
+            polls: 0,
+            body: String::new(),
+            events: false,
+            saw_timer_request: false,
+            missed_deadline: false,
+        }
+    }
+}
+
+impl Default for WatchdogOutcome {
+    fn default() -> Self {
+        WatchdogOutcome {
+            abandoned: false,
+            quarantined: false,
+            reclaimed: false,
+            status: MetisStatus::Internal,
+        }
+    }
+}
+
+/// The outcome of one driven call.
+#[derive(Debug, Clone)]
+struct CallOutcome {
+    status: MetisStatus,
+    polls: usize,
+    body: String,
+    events: bool,
+    saw_timer_request: bool,
+    missed_deadline: bool,
+}
+
+/// What the watchdog saw.
+#[derive(Debug, Clone)]
+struct WatchdogOutcome {
+    abandoned: bool,
+    quarantined: bool,
+    reclaimed: bool,
+    status: MetisStatus,
+}
+
+/// The host side of the boundary: the callback table, the counters, and the
+/// ordering ledger.
+///
+/// It is boxed and never moved, because the plugin keeps the host table pointer
+/// for its instance's lifetime and the waker slots point back at it.
 struct HostState {
-    /// Borrowed from the plugin and valid while the library stays loaded.
-    plugin: *const MetisPluginTableV1,
-    host_api: AtomicPtr<MetisHostApiV1>,
+    table: *const MetisPluginTableV1,
     instance: AtomicPtr<c_void>,
-
-    pending: Mutex<HashSet<u64>>,
-    completed: Mutex<HashMap<u64, Completed>>,
-    cancelled: Mutex<HashSet<u64>>,
-    completion_cv: Condvar,
-
-    host_allocs: AtomicUsize,
-    host_frees: AtomicUsize,
-    plugin_buffers_released: AtomicUsize,
-    foreign_free_attempts: AtomicUsize,
-    completion_callbacks: AtomicUsize,
-    progress_callbacks: AtomicUsize,
-    event_callbacks: AtomicUsize,
-    dropped_completions: AtomicUsize,
-    dropped_buffers_released: AtomicUsize,
-    host_callback_panics: AtomicUsize,
-
-    logs: Mutex<Vec<(i32, String)>>,
-    events: Mutex<Vec<(String, Vec<u8>)>>,
-    rejections: Mutex<Vec<String>>,
+    api: MetisHostApiV1,
+    logs: Mutex<Vec<String>>,
+    events: Mutex<Vec<String>>,
+    services: Mutex<Vec<(String, u64, String)>>,
+    answers: Mutex<Vec<u64>>,
+    released: AtomicUsize,
+    waker_clones: AtomicUsize,
+    waker_drops: AtomicUsize,
+    wake_after_drop: AtomicUsize,
+    in_flight: Mutex<HashSet<u64>>,
+    wakers: Mutex<HashMap<u64, Box<WakerSlot>>>,
+    quarantined: AtomicBool,
+    order: Mutex<Vec<String>>,
+    callback_panic_request: AtomicUsize,
 }
 
 impl HostState {
-    fn new(plugin: *const MetisPluginTableV1) -> Self {
-        HostState {
-            plugin,
-            host_api: AtomicPtr::new(std::ptr::null_mut()),
+    fn new(table: *const MetisPluginTableV1) -> Box<HostState> {
+        let mut host = Box::new(HostState {
+            table,
             instance: AtomicPtr::new(std::ptr::null_mut()),
-            pending: Mutex::new(HashSet::new()),
-            completed: Mutex::new(HashMap::new()),
-            cancelled: Mutex::new(HashSet::new()),
-            completion_cv: Condvar::new(),
-            host_allocs: AtomicUsize::new(0),
-            host_frees: AtomicUsize::new(0),
-            plugin_buffers_released: AtomicUsize::new(0),
-            foreign_free_attempts: AtomicUsize::new(0),
-            completion_callbacks: AtomicUsize::new(0),
-            progress_callbacks: AtomicUsize::new(0),
-            event_callbacks: AtomicUsize::new(0),
-            dropped_completions: AtomicUsize::new(0),
-            dropped_buffers_released: AtomicUsize::new(0),
-            host_callback_panics: AtomicUsize::new(0),
+            api: MetisHostApiV1 {
+                size: mem::size_of::<MetisHostApiV1>(),
+                user_data: std::ptr::null_mut(),
+                progress: host_progress,
+                emit_event: host_emit_event,
+                log: host_log,
+                service_request: host_service_request,
+            },
             logs: Mutex::new(Vec::new()),
             events: Mutex::new(Vec::new()),
-            rejections: Mutex::new(Vec::new()),
-        }
+            services: Mutex::new(Vec::new()),
+            answers: Mutex::new(Vec::new()),
+            released: AtomicUsize::new(0),
+            waker_clones: AtomicUsize::new(0),
+            waker_drops: AtomicUsize::new(0),
+            wake_after_drop: AtomicUsize::new(0),
+            in_flight: Mutex::new(HashSet::new()),
+            wakers: Mutex::new(HashMap::new()),
+            quarantined: AtomicBool::new(false),
+            order: Mutex::new(Vec::new()),
+            callback_panic_request: AtomicUsize::new(usize::MAX),
+        });
+        // The box never moves while it is alive, so this pointer stays valid
+        // for every callback and every waker the plugin holds.
+        host.api.user_data = &*host as *const HostState as *mut c_void;
+        host
     }
 
-    fn host_api(&self) -> *const MetisHostApiV1 {
-        self.host_api.load(SeqCst)
+    fn api(&self) -> *const MetisHostApiV1 {
+        &self.api
     }
 
-    fn register_pending(&self, request_id: u64) {
-        // D11: pending state is registered before the plugin is called, so a
-        // completion that overtakes the return still finds its request.
-        self.pending.lock().unwrap().insert(request_id);
+    fn order(&self, event: impl Into<String>) {
+        let event = event.into();
+        println!("[order] {event}");
+        self.order.lock().unwrap().push(event);
     }
 
-    fn record_completion(&self, request_id: u64, status: MetisStatus, body: Vec<u8>) {
-        self.completed
-            .lock()
-            .unwrap()
-            .insert(request_id, Completed { status, body });
-        self.completion_cv.notify_all();
+    fn ordering(&self) -> Vec<String> {
+        self.order.lock().unwrap().clone()
     }
 
-    /// Releases a plugin-allocated buffer through the plugin's own
-    /// `release_buffer`, which is the only code allowed to free plugin memory.
-    fn release_plugin_buffer(&self, buffer: MetisBuffer) -> MetisStatus {
-        if buffer.owner != METIS_BUFFER_OWNER_PLUGIN {
-            self.foreign_free_attempts.fetch_add(1, SeqCst);
-            self.rejections.lock().unwrap().push(format!(
-                "a buffer with owner={} was offered to release_buffer",
-                buffer.owner
-            ));
-            return MetisStatus::InvalidArgument;
-        }
-        if buffer.ptr.is_null() {
-            return MetisStatus::Ok;
-        }
-        // SAFETY: `plugin` outlives the state, and the table is a plugin static.
-        let table = unsafe { &*self.plugin };
-        let release = table.release_buffer;
-        let status = unsafe { release(buffer) };
-        if status == MetisStatus::Ok {
-            self.plugin_buffers_released.fetch_add(1, SeqCst);
-        } else {
-            self.rejections
-                .lock()
-                .unwrap()
-                .push(format!("release_buffer returned {}", status.as_str()));
-        }
-        status
+    fn released(&self) -> usize {
+        self.released.load(SeqCst)
     }
 
-    /// Copies a plugin payload out, validating the envelope, then releases it.
-    fn read_and_release(&self, buffer: MetisBuffer) -> Result<Vec<u8>, String> {
-        if buffer.ptr.is_null() {
-            return Ok(Vec::new());
-        }
-        // SAFETY: the plugin allocated `len` bytes at `ptr`, and it stays valid
-        // until `release_buffer` is called below.
-        let bytes = unsafe { slice::from_raw_parts(buffer.ptr, buffer.len) };
-        let body = metis_payload_body(bytes).map(<[u8]>::to_vec);
-        self.release_plugin_buffer(buffer);
-        body.map_err(|status| format!("the payload header was rejected with {}", status.as_str()))
+    fn waker_clones(&self) -> usize {
+        self.waker_clones.load(SeqCst)
     }
 
-    fn wait_for_completion(&self, request_id: u64, timeout: Duration) -> Option<Completed> {
-        let deadline = Instant::now() + timeout;
-        let mut completed = self.completed.lock().unwrap();
-        loop {
-            if let Some(completed) = completed.remove(&request_id) {
-                return Some(completed);
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return None;
-            }
-            completed = self
-                .completion_cv
-                .wait_timeout(completed, deadline - now)
-                .unwrap()
-                .0;
-        }
+    fn waker_drops(&self) -> usize {
+        self.waker_drops.load(SeqCst)
     }
 
-    fn wait_until(&self, timeout: Duration, mut predicate: impl FnMut(&HostState) -> bool) -> bool {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if predicate(self) {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+    fn in_flight(&self) -> HashSet<u64> {
+        self.in_flight.lock().unwrap().clone()
     }
 
-    fn log_lines(&self) -> Vec<String> {
+    fn in_flight_is_empty(&self) -> bool {
+        self.in_flight.lock().unwrap().is_empty()
+    }
+
+    fn saw_log(&self, needle: &str) -> bool {
         self.logs
             .lock()
             .unwrap()
             .iter()
-            .map(|(_, line)| line.clone())
-            .collect()
+            .any(|line| line.contains(needle))
     }
 
-    fn log_line_count(&self) -> usize {
-        self.logs.lock().unwrap().len()
+    fn saw_event(&self, topic: &str) -> bool {
+        self.events.lock().unwrap().iter().any(|t| t == topic)
     }
 
-    fn saw_log(&self, needle: &str) -> bool {
-        self.log_lines().iter().any(|line| line.contains(needle))
+    /// The fixture's one-line ledger, parsed.
+    fn fixture_ledger(&self) -> Option<HashMap<String, usize>> {
+        let logs = self.logs.lock().unwrap();
+        let line = logs
+            .iter()
+            .rev()
+            .find(|line| line.contains("FIXTURE_ACCOUNT"))?
+            .clone();
+        let payload = line.split("FIXTURE_ACCOUNT").nth(1)?.trim().to_string();
+        let mut ledger = HashMap::new();
+        for field in payload.split_whitespace() {
+            let (key, value) = field.split_once('=')?;
+            ledger.insert(key.to_string(), value.parse().ok()?);
+        }
+        Some(ledger)
     }
 
-    /// The millisecond count in the first log line containing `after Nms`.
-    ///
-    /// The fixture measures its own wait, so a promptness claim does not depend
-    /// on when the harness's thread happened to look.
-    fn logged_millis(&self, needle: &str) -> Option<u128> {
-        let line = self
-            .log_lines()
-            .into_iter()
-            .find(|line| line.contains(needle))?;
-        line.split("after ")
-            .nth(1)?
-            .split("ms")
-            .next()?
-            .trim()
-            .parse()
-            .ok()
+    /// Reads a plugin-owned buffer and releases it through the plugin's own
+    /// `release_buffer`, which is the only way a host may free one.
+    fn take_plugin_buffer(&self, buffer: MetisBuffer) -> Vec<u8> {
+        if buffer.ptr.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: the buffer is a plugin allocation, valid until released.
+        let bytes = unsafe { slice::from_raw_parts(buffer.ptr, buffer.len) }.to_vec();
+        // SAFETY: the table is the live one this host loaded.
+        let status = unsafe { ((*self.table).release_buffer)(buffer) };
+        assert_eq!(
+            status,
+            MetisStatus::Ok,
+            "the plugin releases its own buffer"
+        );
+        self.released.fetch_add(1, SeqCst);
+        bytes
     }
 
-    /// The topics of the events the plugin sent.
-    fn event_topics(&self) -> Vec<String> {
-        self.events
+    /// Starts one call. A quarantined instance refuses a new future, which is
+    /// the host's own policy once a poll has been abandoned.
+    fn invoke(
+        &self,
+        instance: *mut c_void,
+        capability: &str,
+        body: &str,
+        request_id: u64,
+    ) -> Option<MetisFutureHandle> {
+        if self.quarantined.load(SeqCst) {
+            println!("[order] a new future was refused: the instance is quarantined");
+            return None;
+        }
+        let request = metis_encode_payload(
+            &serde_json::to_vec(&EchoRequest {
+                echo: body.to_string(),
+                repeat: 1,
+            })
+            .unwrap_or_default(),
+        );
+        let mut handle = MetisFutureHandle::null();
+        // SAFETY: the instance is live, the request buffer is host-owned and
+        // valid for this call, and the out parameter is a live local.
+        let status = unsafe {
+            ((*self.table).invoke_future)(
+                instance,
+                capability.as_ptr(),
+                capability.len(),
+                request_id,
+                MetisBuffer {
+                    ptr: request.as_ptr() as *mut u8,
+                    len: request.len(),
+                    cap: request.len(),
+                    owner: METIS_BUFFER_OWNER_HOST,
+                    reserved: 0,
+                },
+                self.api(),
+                &mut handle,
+            )
+        };
+        if status == MetisStatus::Ok {
+            self.in_flight.lock().unwrap().insert(request_id);
+            Some(handle)
+        } else {
+            println!(
+                "[order] invoke_future for {capability} returned {}",
+                status.as_str()
+            );
+            None
+        }
+    }
+
+    /// One poll, with the host's waker for this request.
+    fn poll(&self, handle: &MetisFutureHandle, request_id: u64) -> (MetisStatus, String) {
+        let waker = self.waker_for(request_id);
+        let mut out = MetisBuffer::empty();
+        // SAFETY: the handle came from this table's `invoke_future`, and the
+        // waker is this host's.
+        let status = unsafe {
+            let vtable = &*handle.vtable;
+            (vtable.poll)(handle.ctx, waker, &mut out)
+        };
+        let body = if status == MetisStatus::Ok {
+            let bytes = self.take_plugin_buffer(out);
+            metis_payload_body(&bytes)
+                .ok()
+                .and_then(|body| serde_json::from_slice::<EchoResponse>(body).ok())
+                .map(|response| response.echo)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        (status, body)
+    }
+
+    /// Drops one future and releases the slot that tracked it.
+    fn drop_future(&self, handle: &MetisFutureHandle, request_id: u64) -> MetisStatus {
+        // SAFETY: the handle came from this table and this is its one drop.
+        let status = unsafe { ((*handle.vtable).drop)(handle.ctx) };
+        if let Some(slot) = self.wakers.lock().unwrap().get(&request_id) {
+            slot.live.store(false, SeqCst);
+        }
+        self.in_flight.lock().unwrap().remove(&request_id);
+        status
+    }
+
+    /// Drives one call to its terminal status, answering the services it asks
+    /// for.
+    fn drive(
+        &self,
+        instance: *mut c_void,
+        capability: &str,
+        body: &str,
+        request_id: u64,
+    ) -> CallOutcome {
+        let mut outcome = CallOutcome::default();
+        let Some(handle) = self.invoke(instance, capability, body, request_id) else {
+            outcome.status = MetisStatus::Internal;
+            return outcome;
+        };
+        let start = Instant::now();
+        loop {
+            outcome.polls += 1;
+            let (status, response) = self.poll(&handle, request_id);
+            match status {
+                MetisStatus::Pending => {
+                    if self.wanted_this(capability, request_id) {
+                        outcome.saw_timer_request = true;
+                    }
+                    if self.take_answer(request_id) {
+                        self.answer(instance, request_id, "{\"delay_ms\":20}");
+                    }
+                    if start.elapsed() > POLL_DEADLINE {
+                        outcome.status = MetisStatus::Internal;
+                        break;
+                    }
+                    // A future that never wakes must not be polled in a tight
+                    // loop: a host yields, and this is that yield.
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                terminal => {
+                    outcome.body = response;
+                    outcome.status = terminal;
+                    break;
+                }
+            }
+        }
+        outcome.events = self.saw_event("fixture.answered");
+        self.drop_future(&handle, request_id);
+        outcome
+    }
+
+    fn wanted_this(&self, capability: &str, request_id: u64) -> bool {
+        self.services
             .lock()
             .unwrap()
             .iter()
-            .map(|(topic, _)| topic.clone())
-            .collect()
+            .any(|(service, id, _)| service == "timer" && *id == request_id)
+            || capability == "tool.pending"
     }
 
-    /// Whether an event with this topic arrived, with a JSON body.
-    fn saw_event(&self, topic: &str) -> bool {
-        self.events.lock().unwrap().iter().any(|(sent, body)| {
-            sent == topic && serde_json::from_slice::<serde_json::Value>(body).is_ok()
-        })
-    }
-
-    /// Parses the fixture's accounting line, which is logged through the host's
-    /// own `log` callback at shutdown.
-    fn fixture_ledger(&self) -> Option<HashMap<String, usize>> {
-        let line = self
-            .log_lines()
-            .into_iter()
-            .find(|line| line.contains("FIXTURE_ACCOUNT"))?;
-        let mut fields = HashMap::new();
-        for token in line.split_whitespace() {
-            if let Some((key, value)) = token.split_once('=') {
-                fields.insert(key.to_string(), value.parse().unwrap_or(usize::MAX));
-            }
-        }
-        Some(fields)
-    }
-}
-
-// --- host callbacks (D7, D12) ---------------------------------------------
-
-/// Every callback body is wrapped in `catch_unwind`: a callback is itself an
-/// `extern "C"` frame reached from plugin code, so a panic that escaped it
-/// would unwind into plugin frames. The catch is observable, not silent: a
-/// completion whose callback panicked is recorded as an internal error.
-unsafe extern "C" fn host_complete(
-    user_data: *mut c_void,
-    request_id: u64,
-    status: MetisStatus,
-    payload: MetisBuffer,
-) {
-    let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: `user_data` is the boxed HostState, alive for the whole run.
-        let state = unsafe { &*(user_data as *const HostState) };
-        state.completion_callbacks.fetch_add(1, SeqCst);
-        if request_id == HOST_PANIC_REQUEST_ID {
-            panic!("harness: deliberate panic inside a host callback");
-        }
-        state.pending.lock().unwrap().remove(&request_id);
-
-        // A completion that arrives after a successful cancel is dropped, but
-        // the payload it carries is plugin memory and only the plugin may free
-        // it (D6, D12).
-        if state.cancelled.lock().unwrap().contains(&request_id) {
-            state.dropped_completions.fetch_add(1, SeqCst);
-            if !payload.ptr.is_null() && state.release_plugin_buffer(payload) == MetisStatus::Ok {
-                state.dropped_buffers_released.fetch_add(1, SeqCst);
-            }
-            return;
-        }
-
-        let body = match state.read_and_release(payload) {
-            Ok(body) => body,
-            Err(err) => {
-                state.rejections.lock().unwrap().push(err);
-                Vec::new()
-            }
+    /// Cancels a call and, if the plugin honours it, reports the terminal
+    /// status; if the plugin misses the deadline, records the miss and still
+    /// finishes the call rather than dropping it mid-flight.
+    fn cancel_call(&self, instance: *mut c_void, capability: &str, request_id: u64) -> CallOutcome {
+        let mut outcome = CallOutcome::default();
+        let Some(handle) = self.invoke(instance, capability, "cancel", request_id) else {
+            outcome.status = MetisStatus::Internal;
+            return outcome;
         };
-        state.record_completion(request_id, status, body);
-    }));
-
-    if caught.is_err() {
-        // SAFETY: as above.
-        let state = unsafe { &*(user_data as *const HostState) };
-        state.host_callback_panics.fetch_add(1, SeqCst);
-        state.pending.lock().unwrap().remove(&request_id);
-        if !payload.ptr.is_null() {
-            state.release_plugin_buffer(payload);
+        let (first, _) = self.poll(&handle, request_id);
+        outcome.polls = 1;
+        if first != MetisStatus::Pending {
+            outcome.status = first;
+            self.drop_future(&handle, request_id);
+            return outcome;
         }
-        state.record_completion(request_id, MetisStatus::Internal, Vec::new());
+        // SAFETY: the instance is live and the request is outstanding.
+        let cancel = unsafe { ((*self.table).cancel)(instance, request_id) };
+        if cancel != MetisStatus::Ok {
+            outcome.status = cancel;
+            self.drop_future(&handle, request_id);
+            return outcome;
+        }
+        let deadline = Instant::now() + CANCEL_WINDOW;
+        loop {
+            outcome.polls += 1;
+            let (status, body) = self.poll(&handle, request_id);
+            match status {
+                MetisStatus::Pending => {
+                    if Instant::now() > deadline {
+                        outcome.missed_deadline = true;
+                        println!(
+                            "[order] cancel deadline missed for request {request_id}; \
+                             the host records it and finishes the call"
+                        );
+                        if self.take_answer(request_id) {
+                            self.answer(instance, request_id, "{\"delay_ms\":20}");
+                        }
+                    }
+                    if Instant::now() > deadline + POLL_DEADLINE {
+                        outcome.status = MetisStatus::Internal;
+                        break;
+                    }
+                }
+                terminal => {
+                    outcome.body = body;
+                    outcome.status = terminal;
+                    break;
+                }
+            }
+        }
+        self.drop_future(&handle, request_id);
+        outcome
+    }
+
+    /// Drives a call whose future panics in its destructor.
+    fn panic_in_drop(&self, instance: *mut c_void, capability: &str, request_id: u64) -> bool {
+        let Some(handle) = self.invoke(instance, capability, "drop", request_id) else {
+            return false;
+        };
+        let (polled, _) = self.poll(&handle, request_id);
+        let dropped = self.drop_future(&handle, request_id);
+        println!(
+            "[order] drop of a panicking destructor returned {}",
+            dropped.as_str()
+        );
+        polled == MetisStatus::Pending && dropped == MetisStatus::Internal
+    }
+
+    /// Drives a call whose `service_request` callback panics inside the host.
+    fn callback_panic(&self, instance: *mut c_void, capability: &str, request_id: u64) -> bool {
+        self.callback_panic_request
+            .store(request_id as usize, SeqCst);
+        let outcome = self.drive(instance, capability, "callback", request_id);
+        self.callback_panic_request.store(usize::MAX, SeqCst);
+        println!(
+            "[order] a panicking host callback surfaced as {}",
+            outcome.status.as_str()
+        );
+        outcome.status == MetisStatus::Internal
+    }
+
+    /// Polls a blocking capability under a watchdog, quarantines the instance
+    /// when the poll is abandoned, and reclaims when it finally returns.
+    fn watchdog(
+        &self,
+        instance: *mut c_void,
+        capability: &str,
+        request_id: u64,
+    ) -> WatchdogOutcome {
+        let mut outcome = WatchdogOutcome::default();
+        let Some(handle) = self.invoke(instance, capability, "block", request_id) else {
+            return outcome;
+        };
+
+        // The poll runs on a thread of the host's own, so a poll that blocks
+        // does not block the watchdog that has to notice.
+        let waker = self.waker_for(request_id);
+        let ctx = handle.ctx as usize;
+        let vtable = handle.vtable as usize;
+        let waker_data = waker.data as usize;
+        let waker_vtable = waker.vtable as usize;
+        let (tx, rx) = mpsc::channel();
+        let poll = std::thread::spawn(move || {
+            // The handle and the waker travel as plain integers so the polling
+            // thread owns copies of two-pointer values, which is exactly what
+            // they are on the wire.
+            // SAFETY: the context came from this table, the waker came from
+            // this host, and the vtable pointer is a static.
+            let waker = MetisWaker {
+                data: waker_data as *mut c_void,
+                vtable: waker_vtable as *const MetisWakerVtable,
+            };
+            let mut out = MetisBuffer::empty();
+            let status = unsafe {
+                let vtable = &*(vtable as *const MetisFutureVtable);
+                (vtable.poll)(ctx as *mut c_void, waker, &mut out)
+            };
+            // The buffer travels as plain integers: a `MetisBuffer` holds a raw
+            // pointer, so it is not `Send`, while the three numbers that
+            // describe it are exactly what the other side needs.
+            let _ = tx.send((status, out.ptr as usize, out.len, out.cap));
+        });
+        match rx.recv_timeout(WATCHDOG) {
+            Ok((status, ptr, len, cap)) => {
+                if status == MetisStatus::Ok {
+                    let _ = self.take_plugin_buffer(MetisBuffer {
+                        ptr: ptr as *mut u8,
+                        len,
+                        cap,
+                        owner: METIS_BUFFER_OWNER_PLUGIN,
+                        reserved: 0,
+                    });
+                }
+                outcome.status = status;
+            }
+            Err(_) => {
+                outcome.abandoned = true;
+                self.order(format!(
+                    "watchdog abandoned the poll for request {request_id} after {:?}",
+                    WATCHDOG
+                ));
+                self.quarantined.store(true, SeqCst);
+                outcome.quarantined = true;
+                self.order("instance quarantined, its library stays resident");
+                // Wait for the abandoned poll to return: reclaim is the
+                // caller's, and the caller is this thread.
+                let (status, ptr, len, cap) = rx.recv().expect("the abandoned poll returns");
+                if status == MetisStatus::Ok {
+                    let _ = self.take_plugin_buffer(MetisBuffer {
+                        ptr: ptr as *mut u8,
+                        len,
+                        cap,
+                        owner: METIS_BUFFER_OWNER_PLUGIN,
+                        reserved: 0,
+                    });
+                }
+                poll.join().expect("the poll thread returns");
+                self.order(format!("the late poll returned {}", status.as_str()));
+                outcome.reclaimed = true;
+                outcome.status = status;
+            }
+        }
+        let _ = instance;
+        self.drop_future(&handle, request_id);
+        outcome
+    }
+
+    /// Whether a quarantined instance refuses a new future.
+    fn new_futures_refused(&self, instance: *mut c_void) -> bool {
+        let refused = self
+            .invoke(instance, "tool.echo", "after quarantine", 305)
+            .is_none();
+        self.quarantined.store(false, SeqCst);
+        refused
+    }
+
+    /// Drops one future twice and reports whether the second drop was refused.
+    fn double_drop(&self, instance: *mut c_void, capability: &str, request_id: u64) -> bool {
+        let Some(handle) = self.invoke(instance, capability, "double", request_id) else {
+            return false;
+        };
+        let _ = self.poll(&handle, request_id);
+        // SAFETY: the handle came from this table; the second drop is the
+        // hazard under test.
+        let first = unsafe { ((*handle.vtable).drop)(handle.ctx) };
+        let second = unsafe { ((*handle.vtable).drop)(handle.ctx) };
+        println!(
+            "[order] first drop {}, second drop {}",
+            first.as_str(),
+            second.as_str()
+        );
+        self.in_flight.lock().unwrap().remove(&request_id);
+        first == MetisStatus::Ok && second != MetisStatus::Ok
+    }
+
+    fn waker_for(&self, request_id: u64) -> MetisWaker {
+        let mut slots = self.wakers.lock().unwrap();
+        let slot = slots.entry(request_id).or_insert_with(|| {
+            Box::new(WakerSlot {
+                state: self as *const HostState,
+                request_id,
+                live: AtomicBool::new(true),
+            })
+        });
+        MetisWaker {
+            data: &mut **slot as *mut WakerSlot as *mut c_void,
+            vtable: &WAKER_VTABLE,
+        }
+    }
+
+    fn take_answer(&self, request_id: u64) -> bool {
+        let mut answers = self.answers.lock().unwrap();
+        match answers.iter().position(|id| *id == request_id) {
+            Some(index) => {
+                answers.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Answers an outstanding service request with a host-owned payload.
+    fn answer(&self, instance: *mut c_void, request_id: u64, body: &str) {
+        let encoded = metis_encode_payload(body.as_bytes());
+        // SAFETY: the instance is live and the answer buffer is host-owned and
+        // borrowed for this call.
+        let status = unsafe {
+            ((*self.table).service_complete)(
+                instance,
+                request_id,
+                MetisStatus::Ok,
+                MetisBuffer {
+                    ptr: encoded.as_ptr() as *mut u8,
+                    len: encoded.len(),
+                    cap: encoded.len(),
+                    owner: METIS_BUFFER_OWNER_HOST,
+                    reserved: 0,
+                },
+            )
+        };
+        assert_eq!(status, MetisStatus::Ok, "the plugin accepted the answer");
     }
 }
+
+// --- host callbacks --------------------------------------------------------
+//
+// Every one of them is an `extern "C"` frame the plugin calls into, so every
+// one of them contains its own panic: only the callback's own frame can.
 
 unsafe extern "C" fn host_progress(user_data: *mut c_void, request_id: u64, payload: MetisBuffer) {
-    let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let state = unsafe { &*(user_data as *const HostState) };
-        state.progress_callbacks.fetch_add(1, SeqCst);
-        let body = state.read_and_release(payload).unwrap_or_default();
-        state.logs.lock().unwrap().push((
-            METIS_LOG_INFO,
-            format!(
-                "host: progress for request {request_id}: {}",
-                String::from_utf8_lossy(&body)
-            ),
-        ));
-    }));
-    if caught.is_err() {
-        let state = unsafe { &*(user_data as *const HostState) };
-        state.host_callback_panics.fetch_add(1, SeqCst);
-    }
+    let state = unsafe { &*(user_data as *const HostState) };
+    let body = state.take_plugin_buffer(payload);
+    println!(
+        "[order] progress for request {request_id}: {} bytes",
+        body.len()
+    );
 }
 
 unsafe extern "C" fn host_emit_event(
@@ -1223,27 +1264,12 @@ unsafe extern "C" fn host_emit_event(
     topic_len: usize,
     payload: MetisBuffer,
 ) {
-    let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let state = unsafe { &*(user_data as *const HostState) };
-        state.event_callbacks.fetch_add(1, SeqCst);
-        // SAFETY: the topic is borrowed from the plugin for the duration of the
-        // call (D6).
-        let topic = if topic.is_null() {
-            String::new()
-        } else {
-            String::from_utf8_lossy(unsafe { slice::from_raw_parts(topic, topic_len) }).into_owned()
-        };
-        let body = state.read_and_release(payload).unwrap_or_default();
-        state.logs.lock().unwrap().push((
-            METIS_LOG_INFO,
-            format!("host: event {topic}: {}", String::from_utf8_lossy(&body)),
-        ));
-        state.events.lock().unwrap().push((topic, body));
-    }));
-    if caught.is_err() {
-        let state = unsafe { &*(user_data as *const HostState) };
-        state.host_callback_panics.fetch_add(1, SeqCst);
-    }
+    let state = unsafe { &*(user_data as *const HostState) };
+    // SAFETY: the topic is borrowed for the call.
+    let topic = unsafe { slice::from_raw_parts(topic, topic_len) };
+    let topic = String::from_utf8_lossy(topic).to_string();
+    let _ = state.take_plugin_buffer(payload);
+    state.events.lock().unwrap().push(topic);
 }
 
 unsafe extern "C" fn host_log(
@@ -1252,64 +1278,98 @@ unsafe extern "C" fn host_log(
     message: *const u8,
     message_len: usize,
 ) {
-    let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let state = unsafe { &*(user_data as *const HostState) };
-        // A log message is borrowed, not allocated, so there is nothing to
-        // release (D6).
-        let message = if message.is_null() {
-            String::new()
-        } else {
-            String::from_utf8_lossy(unsafe { slice::from_raw_parts(message, message_len) })
-                .into_owned()
-        };
-        state.logs.lock().unwrap().push((level, message));
-    }));
-    if caught.is_err() {
-        let state = unsafe { &*(user_data as *const HostState) };
-        state.host_callback_panics.fetch_add(1, SeqCst);
-    }
+    let state = unsafe { &*(user_data as *const HostState) };
+    // SAFETY: the message is borrowed for the call.
+    let message = unsafe { slice::from_raw_parts(message, message_len) };
+    state
+        .logs
+        .lock()
+        .unwrap()
+        .push(format!("[{level}] {}", String::from_utf8_lossy(message)));
 }
 
-// --- calls through the table ----------------------------------------------
-
-unsafe fn call_invoke(
-    state: &HostState,
+unsafe extern "C" fn host_service_request(
+    user_data: *mut c_void,
+    service: *const u8,
+    service_len: usize,
     request_id: u64,
-    capability: &str,
     payload: MetisBuffer,
-    out_payload: *mut MetisBuffer,
 ) -> MetisStatus {
-    // SAFETY: the table comes from the loaded plugin and the instance was
-    // created by it.
-    let table = unsafe { &*state.plugin };
-    let invoke = table.invoke;
-    unsafe {
-        invoke(
-            state.instance.load(SeqCst),
-            capability.as_ptr(),
-            capability.len(),
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let state = unsafe { &*(user_data as *const HostState) };
+        let panicking = state.callback_panic_request.load(SeqCst) == request_id as usize;
+        // The service payload is plugin-owned and released here, from inside
+        // the callback, which is the reentrancy the contract allows.
+        let body = state.take_plugin_buffer(payload);
+        // SAFETY: the service name is borrowed for the call.
+        let service = unsafe { slice::from_raw_parts(service, service_len) };
+        let service = String::from_utf8_lossy(service).to_string();
+        println!("[order] service_request {service} for request {request_id}");
+        state.services.lock().unwrap().push((
+            service.clone(),
             request_id,
-            payload,
-            state.host_api(),
-            out_payload,
-        )
+            String::from_utf8_lossy(&body).to_string(),
+        ));
+        if panicking {
+            panic!("[harness] a deliberate panic inside a host callback");
+        }
+        if service != "timer" {
+            return MetisStatus::NotFound;
+        }
+        state.answers.lock().unwrap().push(request_id);
+        MetisStatus::Ok
+    }));
+    caught.unwrap_or(MetisStatus::Internal)
+}
+
+// --- the host waker -------------------------------------------------------
+
+unsafe extern "C" fn waker_clone(waker: *const MetisWaker) -> MetisWaker {
+    // SAFETY: the waker was handed out by this host and is live for the poll.
+    let cloned = MetisWaker {
+        data: unsafe { (*waker).data },
+        vtable: unsafe { (*waker).vtable },
+    };
+    let slot = unsafe { &*(cloned.data as *const WakerSlot) };
+    let state = unsafe { &*slot.state };
+    state.waker_clones.fetch_add(1, SeqCst);
+    cloned
+}
+
+unsafe extern "C" fn waker_wake(waker: MetisWaker) {
+    // SAFETY: the data is a slot this host leaked on purpose.
+    let slot = unsafe { &*(waker.data as *const WakerSlot) };
+    let state = unsafe { &*slot.state };
+    state.waker_drops.fetch_add(1, SeqCst);
+    if !slot.live.load(SeqCst) {
+        state.wake_after_drop.fetch_add(1, SeqCst);
+        println!(
+            "[order] a wake for request {} arrived after the future was dropped",
+            slot.request_id
+        );
     }
 }
 
-unsafe fn call_cancel(state: &HostState, request_id: u64) -> MetisStatus {
-    let table = unsafe { &*state.plugin };
-    let cancel = table.cancel;
-    unsafe { cancel(state.instance.load(SeqCst), request_id) }
+unsafe extern "C" fn waker_wake_by_ref(waker: *const MetisWaker) {
+    // SAFETY: as in `waker_clone`.
+    let data = unsafe { (*waker).data };
+    let slot = unsafe { &*(data as *const WakerSlot) };
+    let state = unsafe { &*slot.state };
+    if !slot.live.load(SeqCst) {
+        state.wake_after_drop.fetch_add(1, SeqCst);
+    }
 }
 
-unsafe fn call_shutdown(state: &HostState) -> MetisStatus {
-    let table = unsafe { &*state.plugin };
-    let shutdown = table.shutdown;
-    unsafe { shutdown(state.instance.load(SeqCst)) }
+unsafe extern "C" fn waker_drop(waker: MetisWaker) {
+    // SAFETY: as in `waker_clone`.
+    let slot = unsafe { &*(waker.data as *const WakerSlot) };
+    let state = unsafe { &*slot.state };
+    state.waker_drops.fetch_add(1, SeqCst);
 }
 
-unsafe fn call_destroy(state: &HostState) -> MetisStatus {
-    let table = unsafe { &*state.plugin };
-    let destroy = table.destroy_instance;
-    unsafe { destroy(state.instance.load(SeqCst)) }
-}
+static WAKER_VTABLE: MetisWakerVtable = MetisWakerVtable {
+    clone: waker_clone,
+    wake: waker_wake,
+    wake_by_ref: waker_wake_by_ref,
+    drop: waker_drop,
+};
