@@ -3,8 +3,10 @@ type: ticket
 subtype: feature
 title: Plugin version tolerance across compiled versions
 status: stable
-workflow_state: ready
-blocked_by: [plugin-abi-core, plugin-contract-v1]
+workflow_state: done
+blocked_by:
+- plugin-abi-core
+- plugin-contract-v1
 size: s
 ---
 
