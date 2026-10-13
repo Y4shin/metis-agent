@@ -56,6 +56,19 @@ The CI job runs, in the existing `devenv shell --` style:
   `api-contracts`. It carries two module-level allows rather than being excluded
   from the gates.
 
+## Caveats
+
+- Both gates that generate or compare resolve the two plugins from the BSR over
+  the network on every run, and no `BUF_TOKEN` is pinned anywhere in the
+  repository. Anonymous rate limiting can fail `--check` with
+  `resource_exhausted: too many requests` for a reason that has nothing to do
+  with the change under review. A token in CI, or vendored pinned plugins, would
+  remove that dependency.
+- `buf breaking` reads buf's built-in default configuration, not this
+  directory's `breaking` block, because the CI command runs from the repository
+  root and there is no root `buf.yaml`. The two agree today (both are the FILE
+  category), but an edit to the `breaking` block here would not reach the gate.
+
 ## Toolchain
 
 Generation needs `buf` and nothing else, `rustfmt` for the formatting step, and
