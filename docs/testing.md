@@ -33,11 +33,30 @@ Contract, documented in `contracts/README.md`:
 - `buf breaking --against '.git#branch=main'` from the repository root --
   contract compatibility against the landing branch.
 
+Plugin ABI, documented in `crates/plugin-contract/src/abi` and
+`crates/plugin-fixture`:
+
+- `cargo run -p plugin-fixture --bin abi-harness` -- loads the fixture `cdylib`
+  through `plugin-contract` and drives every table entry, printing one `[ok]`
+  or `[fail]` line per check and a `[result] PASS`/`FAIL` line; it exits
+  non-zero on any failure. The harness rebuilds the fixture library first, so
+  a stale `.so` is never loaded.
+- `bash scripts/regenerate-abi-header.sh` -- regenerate the committed C header
+  from the `repr(C)` Rust; `--check` regenerates into a scratch file and fails
+  on any difference.
+- The C translation unit that static-asserts the ABI layout
+  (`crates/plugin-contract/c/layout_static_asserts.c`) is compiled by
+  `crates/plugin-contract/build.rs` on every build, so `cargo build`,
+  `cargo clippy` and `cargo test` all carry that check; the numbers it
+  measured are compared with Rust's by
+  `crates/plugin-contract/tests/c_layout.rs`.
+
 ## CI
 
 `.github/workflows/ci.yml` runs the Rust commands above through the devenv
 shell on push to `main` and on pull requests, followed by the three contract
-commands. The frontend commands are not in CI yet; add them when the frontend
+commands and the two plugin ABI commands (the harness and the header drift
+check). The frontend commands are not in CI yet; add them when the frontend
 has behaviour worth gating.
 
 ## Mock conventions

@@ -8,10 +8,13 @@ devenv shell
 ```
 
 The shell provides the current Rust nightly toolchain (rustc, cargo, clippy,
-rustfmt, rust-analyzer) plus Git, `buf`, Node.js, and npm. The nightly version is
-pinned by `devenv.lock`, and `channel = "nightly"` is set in `devenv.nix`.
-`buf` generates the wire contract; both codegen plugins are BSR remote plugins,
-so no `protoc`, local plugin binary, or JVM is installed.
+rustfmt, rust-analyzer) plus Git, `buf`, `cbindgen`, Node.js, and npm. The
+nightly version is pinned by `devenv.lock`, and `channel = "nightly"` is set in
+`devenv.nix`. `buf` generates the wire contract; both codegen plugins are BSR
+remote plugins, so no `protoc`, local plugin binary, or JVM is installed.
+`cbindgen` (nixpkgs attribute `rust-cbindgen`, 0.29.4) generates the plugin ABI
+header, and the C compiler on the shell path compiles the translation unit that
+static-asserts the ABI layout.
 
 Run a one-off command inside the shell with:
 

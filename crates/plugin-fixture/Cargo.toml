@@ -1,0 +1,30 @@
+# The fixture plugin and the harness that drives it. Test support only: nothing
+# outside this crate depends on them, and the crate exists to prove the plugin
+# boundary with a real shared library.
+[package]
+name = "plugin-fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "plugin_fixture"
+# `cdylib` is the artifact the harness loads. `rlib` lets the harness reuse the
+# fixture's payload shapes instead of restating the JSON, without either type
+# ever reaching the C ABI surface.
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "abi-harness"
+path = "src/bin/abi-harness.rs"
+
+[dependencies]
+plugin-contract.workspace = true
+libloading.workspace = true
+serde.workspace = true
+serde_json.workspace = true
