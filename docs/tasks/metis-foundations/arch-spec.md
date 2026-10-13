@@ -3093,15 +3093,221 @@ contract and workspace gates for the rest.
 
 ---
 
+## Pending ticket: `stream-resume-and-expiry`
+
+Blocked by the landed stream, whose cursor it gives a meaning: a reconnect carrying
+`last_event_id` replays what the ring still holds, a cursor the ring can no longer
+serve earns one distinct refusal, and the client answers that refusal with a
+resync, meaning a fresh cursorless stream that begins with the snapshot, rather
+than with a gap, a duplicate, or a retry loop.
+
+### Exports
+
+- `crates/api-contracts/src/events.rs`:
+  - `Ring::stream` becomes fallible at establishment: `stream(&self, channels:
+    &[&str], cursor: u64, heartbeat: Duration) -> Result<impl Stream<Item =
+    Result<v1::Event, ConnectError>> + Send + 'static, CursorError>`. The refusal is
+    decided under the same lock that reads the window and builds the opening
+    messages, so the check and the stream cannot disagree, and it returns before
+    the stream opens rather than as its first item. The item type keeps its
+    `Result`, which is what the slow-consumer policy owns.
+  - `pub enum CursorError { Expired { cursor: u64, earliest_resumable: u64,
+    latest_id: u64 } }`, carrying the cursor presented and both window bounds, so
+    the reason is in the value and not in prose. Its `Display` names which of the
+    two causes it was: the window moved past the cursor, or the daemon restarted
+    and the identifier space began again.
+  - `pub const CURSOR_ERROR_HEADER: &str = "metis-cursor-error";`, `pub enum
+    CursorRefusal { Expired }` with `as_str`, `parse` and `Display`, and `pub fn
+    cursor_refusal_headers(error: &CursorError) -> HeaderMap`, the refusal
+    vocabulary in the pattern `identity::refusal_headers` and
+    `auth::pair_refusal_headers` set: the meaning crosses the wire as a header and
+    never as message text. `CursorRefusal` is non-exhaustive like
+    `CredentialRefusal` and `PairRefusal`, and an unknown value parses to `None`,
+    which leaves the caller with the transport error rather than a guess.
+  - **The cursor rule**, replacing the landed placeholder: `0` means no cursor and
+    is never expired; a non-zero cursor is servable exactly when `cursor + 1 >=
+    earliest_resumable()` and `cursor <= latest_id()`, and expired otherwise. The
+    second clause is what makes a restart expire every cursor. The first says that
+    a cursor one below the oldest held identifier is still servable, because the
+    event that opened the window is exactly what follows it.
+  - **What a servable cursor opens with**: `since(cursor, channels)` in identifier
+    order and typed `EVENT`, then the live subscription. A stream opened without a
+    cursor keeps the landed shape, the head of each selected channel typed
+    `SNAPSHOT` (one empty snapshot message when the selection holds nothing), then
+    the live events. A resumed stream carries **no snapshot**: its caller already
+    holds the state a snapshot would restate, and restating the head would deliver
+    an identifier the replay also delivers. The map's "begins with a snapshot
+    message" is read as the cursorless stream's rule, which is how the map pairs it
+    with "a resync is a fresh stream"; the proto comments are corrected to say so.
+  - **The suppression floor**, restated: the subscription is taken before the
+    window is read, so an event published between the two is not lost, and the
+    floor is the highest identifier the opening messages carried (`max(head ids)`
+    without a cursor, `max(cursor, last replayed id)` with one), so no identifier is
+    carried twice. Heartbeats keep the landed shape and the landed identifier,
+    which for a resumed stream is at or above the floor.
+  - `Event`, `publish`, `snapshot`, `since`, `subscribe`, `earliest_resumable` and
+    `latest_id` keep their signatures and behaviour. The ring is still in memory,
+    still bounded, and still the only thing a resume can reach.
+- `contracts/proto/metis/v1/daemon.proto`: **no field is added, moved, or retyped,
+  so this ticket's contract change is prose only and `buf breaking` stays green.**
+  Three comments stop describing the placeholder:
+  - `StreamEventsRequest.last_event_id`: a non-zero cursor resumes after that
+    identifier and replays what the ring still holds; a cursor the ring can no
+    longer serve is refused before the stream opens, through
+    `metis-cursor-error: expired`.
+  - `EventKind.EVENT_KIND_SNAPSHOT`: it opens a stream that carries no cursor; a
+    resumed stream opens with the events that follow its cursor instead.
+  - `rpc StreamEvents` and `Event`: the "snapshot is the first message" sentence is
+    narrowed the same way.
+  - Because buffa emits proto comments into the generated Rust, the correction
+    moves `crates/api-contracts/generated/buffa/metis.v1.rs` and
+    `crates/api-contracts/generated/connect/metis.v1.rs`, so
+    `scripts/regenerate-contracts.sh` runs in this ticket and its `--check`
+    follows.
+- `crates/daemon/src/service.rs`: `stream_events` becomes
+  `self.ring.stream(&channels, request.last_event_id,
+  self.heartbeat).map_err(refuse_cursor).map(Response::stream)`. `refuse_cursor` is
+  a private function beside the landed `refuse_identity` and `refuse_pair`, in
+  their shape: `ConnectError::new(ErrorCode::FailedPrecondition,
+  error.to_string())` with `events::cursor_refusal_headers(&error)`. The handler
+  body before that line is unchanged, and `EVENT_CAPACITY` and `HEARTBEAT_DEFAULT`
+  are untouched.
+- `crates/client/src/skeleton.rs`: the same mapping in the private `events` helper,
+  whose signature becomes `ServiceResult<ServiceStream<Event>>` to carry it, so the
+  in-process service refuses a cursor exactly as the daemon does.
+  `RecordingDaemon` checks the declaration before the cursor, as the daemon's
+  handler does, and the `with_ring` surface is unchanged.
+- `crates/client/src/lib.rs`:
+  - `stream_events(&self, channels: &[&str], last_event_id: u64)` keeps its
+    signature and gains one typed failure: `ClientError::CursorExpired`, read from
+    `CURSOR_ERROR_HEADER` in the landed `typed_refusal` chain, so it arrives from
+    the call that opened the stream and from no other path.
+  - **The resync is the documented cursorless form of the same call**,
+    `stream_events(channels, 0)`, which is a fresh stream that begins with the
+    snapshot. No hidden retry is added: a caller that asked to resume learns that it
+    cannot and decides.
+- `crates/client/src/stream.rs`: no new method. `EventStream::message()` keeps its
+  shape, and its doc gains the cursor rule a caller resumes by.
+- `crates/client/examples/events.rs`: one more step. After printing the event, it
+  opens a second stream carrying that event's identifier as the cursor, prints
+  `[resume]` for the message that follows, and still prints `[result] PASS`.
+- `docs/testing.md`: the `Event stream` section gains the resume and expiry
+  commands and the properties they assert.
+
+### Existing abstractions to use
+
+- `CursorError`, `cursor_refusal_headers` and `CursorRefusal` as the one spelling of
+  the refusal, consumed by the daemon handler and the skeleton helper and read by
+  the client's `typed_refusal`: the module owns both ends, as `identity`, `auth` and
+  `pairing` already do.
+- `Ring::since`, `Ring::earliest_resumable`, `Ring::latest_id` and the landed
+  suppression floor: the replay is `since`, and the placeholders in `Ring::stream`
+  and the proto field comment are the seams this ticket replaces rather than new
+  machinery beside them.
+- `Ring::stream`'s one assembly of a stream's shape, still the only one: the daemon
+  and the skeleton both call it, so resume is implemented once and neither
+  front-end can drift from the other.
+- The landed refusal plumbing on both ends: `ErrorCode` plus
+  `ConnectError::with_headers` on the daemon's side, and the `refusal` /
+  `typed_refusal` chain plus the response-header read on the stream path on the
+  client's side. No new wire mechanism is introduced.
+- The landed test fixtures, unchanged in shape: the daemon stream test's own
+  `Fixture`, `serve` and `serve_over_tcp`, and the client stream test's own private
+  temporary socket base.
+
+### Do NOT reimplement
+
+- Do not add the `Cancel` RPC, a slow-consumer policy, or a way to distinguish a
+  deliberate stream drop from a transport failure: those are
+  `cancellation-and-slow-consumers`.
+- Do not add per-channel cursors, a second identifier space, a second ring, or
+  cursor persistence. Resume reaches exactly as far as the in-memory window does.
+- Do not add an automatic resync, a retry loop, or a backoff inside the wrapper.
+  The refusal is answered by the caller, once, with a cursorless stream.
+- Do not change the wire shape: no field, no `optional`, no new message. Only
+  comments move, and they move through `scripts/regenerate-contracts.sh`.
+- Do not change the ABI, the plugin crates, the non-streaming RPCs, or the landed
+  authorization behaviour of the stream.
+
+### Seams
+
+1. **Ring seam (cursor rule).** Unit tests in `crates/api-contracts/src/events.rs`:
+   a servable cursor replays exactly the held events after it, in identifier order
+   and typed `EVENT`; `cursor == earliest_resumable() - 1` is servable; `cursor ==
+   latest_id()` is servable and replays nothing; a cursor below the window and a
+   cursor above `latest_id()` each answer `CursorError::Expired` carrying both
+   bounds; a cursor of `0` is never expired; a live event published after the
+   stream opened still arrives once. Criterion 1's unit half.
+2. **Refusal seam.** A `Ring::stream` refusal maps to one `metis-cursor-error:
+   expired` header, `CursorRefusal::parse` round-trips it, an unknown value parses
+   to `None`, and `buf lint`, `buf breaking` against `main` and
+   `regenerate-contracts.sh --check` are green with the corrected comments.
+3. **Expiry seam.** Over a temporary socket, a daemon stream opened with a cursor
+   below its window is refused before any message is served, and the client reads it
+   as `ClientError::CursorExpired` from the call that opened the stream; the same
+   test then opens the stream with cursor `0` and asserts its first message is the
+   snapshot. Criteria 2 and 4 together.
+4. **Reconnect seam.** The test drains a stream, drops it, publishes while nothing
+   is connected, reconnects with the highest `EVENT` identifier it saw, and asserts
+   the identifiers it now receives are exactly the ones it missed: contiguous after
+   the cursor, and no identifier carried twice. Criterion 3.
+5. **Restart seam.** A `Service` is served, a stream is opened, and the service and
+   its listener are dropped; a second `Service` over the same store is served on a
+   second socket, because the landed listener leaves its socket file behind, and the
+   cursor earned from the first is refused as expired while a cursorless stream
+   still opens with the snapshot the new, empty ring produces. Criterion 5.
+6. **Additivity seam.** `Echo`, `Pair` and the cursorless stream keep their
+   behaviour, the ABI layout and plugin crates are untouched, the harness stays at
+   73 checks, and `bash scripts/regenerate-abi-header.sh --check` reports no drift.
+
+Test types: unit tests in `api-contracts` for the cursor rule and the refusal
+vocabulary; integration tests in `crates/daemon/tests/stream.rs` and
+`crates/client/tests/stream.rs` over a real socket for the refusal, reconnect and
+restart seams; the example for its own step; the contract and workspace gates for
+the rest.
+
+### Interface contract
+
+- `cancellation-and-slow-consumers` consumes the shape this ticket leaves: the
+  stream item type stays `Result` so a drop policy can refuse in-stream, the
+  delivered-identifier floor is the property its policy must not break, and a
+  dropped slow consumer still needs its own distinguishable signal, because
+  `CursorExpired` is a refusal at establishment and not a mid-stream event.
+- `windows-named-pipe` and `reverse-proxy-mode` inherit this unchanged:
+  `Ring::stream` is still the one assembly of a stream's shape, `serve_stream` is
+  still the one connection path, and the refusal is an ordinary Connect error on a
+  handler, which every front-end carries without knowing about it.
+- The daemon effort publishes real events into the ring through `Service::ring()`
+  and encodes payloads as JSON text, and it must not treat a servable cursor as a
+  durable position: the window is the only memory, so a chatty channel or a restart
+  can expire a cursor.
+- A caller's cursor is the highest `EVENT` identifier it has processed. A
+  `SNAPSHOT` advances it only for the channels that message names, and a
+  `HEARTBEAT` advances nothing, even though it carries the daemon's latest
+  identifier. `last_event_id` is earned on one channel selection: a caller that
+  changes its selection while resuming resyncs instead, which is the documented
+  answer to "the state I hold is for other channels".
+- Recorded residuals: expiry is daemon-wide, not per-channel, so a chatty channel
+  can expire a quiet channel's cursor and the answer is a resync; the replay is
+  bounded by the ring's capacity, so the window is also the resume reach, and the
+  capacity is still declared once per crate (1024 in `daemon::service`, 64 in
+  `client::skeleton`) with the duplicated `HEARTBEAT_DEFAULT` and `EVENT_CAPACITY`
+  constants and the non-configurable capacity carried forward; a restarted daemon
+  expires every cursor with no persistence; the client offers no automatic resync
+  by decision; and the map's fog about distinguishing a deliberate slow-consumer
+  drop from a transport failure is untouched, because nothing this ticket lands
+  drops a stream on purpose.
+
+---
+
 ## Downstream interface contracts (outline)
 
-The tickets still pending in this effort are `reverse-proxy-mode` and
-`windows-named-pipe`. Their sections are added when their chains reach the
-frontier; `event-stream` has landed and its measured section is above. The tickets
-below also name `stream-resume-and-expiry` and `cancellation-and-slow-consumers`,
-which are not pending yet, and the commitments below are what the landed tickets
-must already support, including the surfaces `local-identity-and-acl`,
-`state-store`, `pairing-and-tokens`, `remote-pairing` and `event-stream` landed.
+The tickets still pending in this effort are `cancellation-and-slow-consumers`,
+`reverse-proxy-mode` and `windows-named-pipe`. Their sections are added when their
+chains reach the frontier, apart from `stream-resume-and-expiry`, whose pending
+section is above; the commitments below are what the landed tickets must already
+support, including the surfaces `local-identity-and-acl`, `state-store`,
+`pairing-and-tokens`, `remote-pairing` and `event-stream` landed.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
