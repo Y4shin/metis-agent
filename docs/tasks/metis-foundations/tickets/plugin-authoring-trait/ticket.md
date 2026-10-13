@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Plugin authoring trait and adapters
 status: stable
-workflow_state: ready
-blocked_by: [plugin-abi-core]
+workflow_state: done
+blocked_by:
+- plugin-abi-core
 size: m
 ---
 
