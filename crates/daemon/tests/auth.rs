@@ -29,7 +29,8 @@ use api_contracts::connect::metis::v1::{
     DAEMON_SERVICE_ECHO_SPEC, DAEMON_SERVICE_PAIR_SPEC, DaemonService, DaemonServiceExt,
 };
 use api_contracts::proto::metis::v1::{
-    EchoRequest, EchoResponse, Event, PairRequest, PairResponse, StreamEventsRequest,
+    CancelRequest, CancelResponse, EchoRequest, EchoResponse, Event, PairRequest, PairResponse,
+    StreamEventsRequest,
 };
 use api_contracts::transport::{serve_tcp_listener_service, serve_tcp_service, serve_uds_service};
 use client::credential::{self, Backend};
@@ -438,6 +439,17 @@ impl DaemonService for RecordingDaemon {
     ) -> ServiceResult<ServiceStream<Event>> {
         self.served.record(ctx.path());
         self.inner.stream_events(ctx, request).await
+    }
+
+    /// Recorded for the same reason: the recorder covers every procedure the
+    /// contract declares. The cancellation tests themselves live in `cancel.rs`.
+    async fn cancel(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, CancelRequest>,
+    ) -> ServiceResult<CancelResponse> {
+        self.served.record(ctx.path());
+        self.inner.cancel(ctx, request).await
     }
 }
 

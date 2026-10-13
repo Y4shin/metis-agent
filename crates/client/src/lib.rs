@@ -39,13 +39,17 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use api_contracts::auth::{self, CredentialRefusal, PairRefusal};
+use api_contracts::cancel::CancelOutcome;
 use api_contracts::connect::metis::v1::DaemonServiceClient;
 use api_contracts::events;
 use api_contracts::identity;
-use api_contracts::proto::metis::v1::{EchoRequest, PairRequest, StreamEventsRequest};
+use api_contracts::proto::metis::v1::{
+    CancelRequest, EchoRequest, PairRequest, StreamEventsRequest,
+};
+use api_contracts::request::{self, RequestId};
 use api_contracts::transport;
 use connectrpc::ConnectError;
-use connectrpc::client::{ClientConfig, SharedHttp2Connection};
+use connectrpc::client::{CallOptions, ClientConfig, SharedHttp2Connection};
 use http::HeaderMap;
 
 use crate::credential::Backend;
@@ -354,6 +358,11 @@ impl Client {
     /// resumed stream carries no snapshot, because the caller already holds the
     /// state a snapshot would restate.
     ///
+    /// Every stream declares a request identifier of its own, which the daemon
+    /// registers the stream's work under, so [`Client::cancel`] can stop it. The
+    /// identifier is on the returned handle as [`EventStream::request_id`]; a
+    /// caller never invents one.
+    ///
     /// A cursor the ring can no longer serve earns [`ClientError::CursorExpired`]
     /// from this call. The answer is a resync, which is the cursorless form of
     /// the same call: `stream_events(channels, 0)` opens a fresh stream that
@@ -370,6 +379,7 @@ impl Client {
         channels: &[&str],
         last_event_id: u64,
     ) -> Result<EventStream, ClientError> {
+        let request_id = request_id();
         let request = StreamEventsRequest {
             channels: channels
                 .iter()
@@ -378,7 +388,15 @@ impl Client {
             last_event_id,
             ..Default::default()
         };
-        let stream = self.inner.stream_events(request).await.map_err(refusal)?;
+        // The identifier travels as request metadata on this call and no other,
+        // so two streams opened by the same client never share one.
+        let options = CallOptions::default()
+            .try_with_header(request::REQUEST_ID_HEADER, request_id.as_str())?;
+        let stream = self
+            .inner
+            .stream_events_with_options(request, options)
+            .await
+            .map_err(refusal)?;
         // A Connect streaming response carries its status inside the stream, so
         // a refusal arrives as a response the stream was established with and an
         // error in the stream itself. Reading the refusal headers here is what
@@ -388,8 +406,60 @@ impl Client {
         if let Some(refusal) = typed_refusal(stream.headers()) {
             return Err(refusal);
         }
-        Ok(EventStream::new(stream))
+        Ok(EventStream::new(stream, request_id))
     }
+
+    /// Stop the in-flight work the daemon registered under `request_id`, which
+    /// is the identifier a stream handle reports as [`EventStream::request_id`].
+    ///
+    /// The call is idempotent: it reports whether anything was in flight, and
+    /// work that finished, work already cancelled, and work never seen are
+    /// answered the same way. Work is keyed by the surface this client declares,
+    /// so this stops only work this client's own surface started.
+    ///
+    /// A cancelled stream stops: its next [`EventStream::message`] reports
+    /// [`ClientError::StreamCancelled`] rather than an event, so the gap a
+    /// cancellation leaves is never presented as current state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed errors [`Client::echo`] returns, and
+    /// [`ClientError::Call`] when the daemon answers with an outcome this build
+    /// cannot act on.
+    pub async fn cancel(&self, request_id: &RequestId) -> Result<CancelOutcome, ClientError> {
+        let request = CancelRequest {
+            request_id: request_id.as_str().to_owned(),
+            ..Default::default()
+        };
+        let response = self.inner.cancel(request).await.map_err(refusal)?;
+        response
+            .into_owned()
+            .outcome
+            .as_known()
+            .and_then(CancelOutcome::from_proto)
+            .ok_or_else(|| {
+                ClientError::Call(ConnectError::unknown(
+                    "the daemon answered a cancel outcome this build cannot act on",
+                ))
+            })
+    }
+}
+
+/// A fresh request identifier for one call.
+///
+/// Sixteen random bytes as lowercase hex: 32 printable bytes, distinct per call,
+/// and bounded by the identifier rule, so two calls never share one and a
+/// cancelled identifier names the work it was meant for. Fails loudly rather
+/// than silently repeating: an identifier that collides would let one call
+/// stop another.
+fn request_id() -> RequestId {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).expect("the operating system's random source is available");
+    let text = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    RequestId::parse(&text).expect("lowercase hex is a printable identifier")
 }
 
 /// The configuration a client with a declared surface carries: the declaration
@@ -434,23 +504,35 @@ fn with_credential(config: ClientConfig, token: Option<&str>) -> ClientConfig {
 ///
 /// A refusal the daemon labelled is reported as the typed error it is, and
 /// anything else stays the transport error. Every refusal is read from response
-/// headers, never from message text.
+/// metadata, never from message text.
 pub(crate) fn refusal(err: ConnectError) -> ClientError {
-    typed_refusal(err.response_headers()).unwrap_or(ClientError::Call(err))
+    // A Connect streaming failure carries the daemon's metadata in the
+    // end-of-stream envelope rather than in the response headers the stream was
+    // established with, so the trailer read is the second step of the chain and
+    // the response headers stay first, where the cursor and credential refusals
+    // arrive.
+    if let Some(refusal) = typed_refusal(err.response_headers()) {
+        return refusal;
+    }
+    if let Some(refusal) = typed_refusal(err.trailers()) {
+        return refusal;
+    }
+    ClientError::Call(err)
 }
 
-/// The typed error a refusal's response headers name, or `None` when they name
+/// The typed error a refusal's response metadata names, or `None` when it names
 /// no refusal this build knows.
 ///
 /// The event stream reports through this as well as a unary call: a Connect
 /// streaming response carries its status inside the stream, so its refusal
-/// headers are on the response the stream was established with rather than on a
-/// transport error.
+/// metadata is on the response the stream was established with and in the
+/// trailing metadata of a failure that happened after it.
 pub(crate) fn typed_refusal(headers: &HeaderMap) -> Option<ClientError> {
     version_refusal(headers)
         .or_else(|| credential_refusal(headers))
         .or_else(|| pair_refusal(headers))
         .or_else(|| cursor_refusal(headers))
+        .or_else(|| stream_refusal(headers))
 }
 
 /// The typed error for a credential refusal.
@@ -547,6 +629,24 @@ pub enum PairingCause {
     AlreadyPaired,
 }
 
+/// The typed error for a stream the daemon ended in the middle.
+///
+/// The refusal is read from the trailing metadata, never from the message text,
+/// so the caller learns what happened from the daemon's own vocabulary. A stream
+/// that ends this way carries no further event, and an error this build does not
+/// know is left as the transport error rather than guessed at.
+fn stream_refusal(headers: &HeaderMap) -> Option<ClientError> {
+    let header = headers.get(events::STREAM_ERROR_HEADER)?;
+    let refusal = events::StreamRefusal::parse(header.to_str().ok()?)?;
+    Some(match refusal {
+        events::StreamRefusal::SlowConsumer => ClientError::StreamDropped,
+        events::StreamRefusal::Cancelled => ClientError::StreamCancelled,
+        // The vocabulary is non-exhaustive: a refusal this build does not know
+        // is left as the transport error rather than guessed at.
+        _ => return None,
+    })
+}
+
 /// The typed error for a refusal that lists supported protocol versions.
 ///
 /// The list is read from the refusal's response header, never from its message
@@ -604,6 +704,16 @@ pub enum ClientError {
     /// resync, which is [`Client::stream_events`] with a cursor of `0`: a fresh
     /// stream that begins with the snapshot.
     CursorExpired,
+    /// The daemon dropped this stream because the client did not read it fast
+    /// enough, so events were lost before they could be carried. The answer is
+    /// the same resync an expired cursor earns, a fresh cursorless stream: the
+    /// events that were dropped are gone, and the state the caller holds is
+    /// stale rather than merely behind.
+    StreamDropped,
+    /// The request that owned this stream was cancelled, so the stream stopped.
+    /// What it already published stays published; what had not happened yet did
+    /// not.
+    StreamCancelled,
 }
 
 impl fmt::Display for ClientError {
@@ -654,6 +764,14 @@ impl fmt::Display for ClientError {
                 f,
                 "the daemon can no longer resume from this cursor: open a cursorless stream to resync"
             ),
+            Self::StreamDropped => write!(
+                f,
+                "the daemon dropped this stream because it could not keep up with it: events were lost, so open a cursorless stream to resync"
+            ),
+            Self::StreamCancelled => write!(
+                f,
+                "the request that owned this stream was cancelled, so the stream stopped"
+            ),
         }
     }
 }
@@ -667,7 +785,7 @@ impl std::error::Error for ClientError {
             Self::ProtocolVersion { .. } | Self::CredentialMissing => None,
             Self::CredentialRejected { .. } => None,
             Self::Pairing { .. } => None,
-            Self::CursorExpired => None,
+            Self::CursorExpired | Self::StreamDropped | Self::StreamCancelled => None,
         }
     }
 }

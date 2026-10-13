@@ -10,12 +10,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use api_contracts::cancel::Registry;
 use api_contracts::connect::metis::v1::{DaemonService, DaemonServiceExt};
 use api_contracts::events::{self, CursorError, Ring};
 use api_contracts::identity::{self, IdentityError};
 use api_contracts::proto::metis::v1::{
-    EchoRequest, EchoResponse, Event, PairRequest, PairResponse, StreamEventsRequest,
+    CancelRequest, CancelResponse, EchoRequest, EchoResponse, Event, PairRequest, PairResponse,
+    StreamEventsRequest,
 };
+use api_contracts::request::{self, RequestIdError};
 use connectrpc::{
     ConnectError, ConnectRpcService, ErrorCode, RequestContext, Response, Router, ServiceRequest,
     ServiceResult, ServiceStream,
@@ -50,6 +53,10 @@ pub struct Service {
     /// The daemon-wide events this service streams. One ring per service, which
     /// is one ring per daemon: identifiers compare across every channel.
     ring: Ring,
+    /// The work this service has in flight, keyed by the surface that started
+    /// it and the request identifier it declared. One registry per service, and
+    /// the handle is public so the daemon effort registers its own work here.
+    cancellations: Registry,
     /// The heartbeat interval of every stream this service opens.
     heartbeat: Duration,
 }
@@ -63,6 +70,7 @@ impl Service {
             store,
             preshared,
             ring: Ring::new(EVENT_CAPACITY),
+            cancellations: Registry::new(),
             heartbeat,
         }
     }
@@ -75,6 +83,16 @@ impl Service {
     #[must_use]
     pub fn ring(&self) -> Ring {
         self.ring.clone()
+    }
+
+    /// The work this service has in flight.
+    ///
+    /// Named after [`Service::ring`] for the same reason: a caller that holds
+    /// the service needs the same handle the handlers register into, both to
+    /// read what is in flight and to register work of its own.
+    #[must_use]
+    pub fn cancellations(&self) -> Registry {
+        self.cancellations.clone()
     }
 
     /// The service a listener serves, with the policy it enforces.
@@ -148,6 +166,12 @@ impl DaemonService for Service {
     /// through the `metis-cursor-error` header: the caller's answer is a
     /// cursorless stream, which is the resync.
     ///
+    /// A request that declared an identifier is registered as work in flight for
+    /// as long as the stream runs, so a `Cancel` naming that identifier stops it.
+    /// A caller that declared none is served exactly as before and is not
+    /// cancellable. A client that goes away leaves the stream, which drops the
+    /// registration: a disconnect cancels nothing.
+    ///
     /// The declaration is checked here because the recording is per handler: a
     /// streaming handler that skipped the call would leave a stream unrecorded
     /// rather than refused.
@@ -156,7 +180,8 @@ impl DaemonService for Service {
         ctx: RequestContext,
         request: ServiceRequest<'_, StreamEventsRequest>,
     ) -> ServiceResult<ServiceStream<Event>> {
-        identity::from_headers(ctx.headers()).map_err(refuse_identity)?;
+        let declared = identity::from_headers(ctx.headers()).map_err(refuse_identity)?;
+        let id = request::RequestId::from_headers(ctx.headers()).map_err(refuse_request_id)?;
         // The channels are borrowed views of the request body, which the stream
         // outlives, so they are collected into owned borrows on this frame
         // before the stream is built.
@@ -165,7 +190,32 @@ impl DaemonService for Service {
             .ring
             .stream(&channels, request.last_event_id, self.heartbeat)
             .map_err(refuse_cursor)?;
-        Ok(Response::stream(stream))
+        // Registered after the cursor is served, so a refused stream leaves
+        // nothing in flight. The guard travels inside the stream, so the work is
+        // in flight exactly as long as the stream is served.
+        let guard = id.map(|id| self.cancellations.register(declared.surface(), id));
+        Ok(Response::stream(events::cancellable(stream, guard)))
+    }
+
+    /// Stop the in-flight work the declaring surface started under the
+    /// identifier in the request.
+    ///
+    /// The call is idempotent: it answers whether anything was in flight, and
+    /// work that finished, work already cancelled, and work never seen read the
+    /// same, so a repeated call is answered rather than refused and no surface
+    /// can learn whether another surface's identifier exists.
+    async fn cancel(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, CancelRequest>,
+    ) -> Result<connectrpc::Response<CancelResponse>, ConnectError> {
+        let declared = identity::from_headers(ctx.headers()).map_err(refuse_identity)?;
+        let id = request::RequestId::parse(request.request_id).map_err(refuse_request_id)?;
+        let outcome = self.cancellations.cancel(declared.surface(), &id);
+        connectrpc::Response::ok(CancelResponse {
+            outcome: outcome.to_proto().into(),
+            ..Default::default()
+        })
     }
 }
 
@@ -204,6 +254,17 @@ fn refuse_identity(error: IdentityError) -> ConnectError {
 fn refuse_cursor(error: CursorError) -> ConnectError {
     let headers = events::cursor_refusal_headers(&error);
     ConnectError::new(ErrorCode::FailedPrecondition, error.to_string()).with_headers(headers)
+}
+
+/// Refuse a request identifier this daemon cannot act on.
+///
+/// The refusal carries no header of its own, unlike a cursor or a credential:
+/// there is no answer a client can act on differently, because an identifier a
+/// daemon cannot read names no work either way. It is refused rather than
+/// answered as already finished, because a caller that believes its work is
+/// cancellable has lost the guarantee it asked for.
+fn refuse_request_id(error: RequestIdError) -> ConnectError {
+    ConnectError::new(ErrorCode::InvalidArgument, error.to_string())
 }
 
 /// Map a pairing refusal onto the wire.
