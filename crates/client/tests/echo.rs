@@ -2,10 +2,15 @@
 //!
 //! The seams are the transport loop, the served path over a real Unix socket,
 //! the endpoint rule, and the wrapper call that names no transport. The
-//! skeleton service and a temporary socket directory are the shared setup.
+//! skeleton service and a temporary socket directory are the shared setup. The
+//! platform-default half of the endpoint rule is unit-tested in the crate's
+//! `lib.rs` tests, where no test needs a temporary directory: this binary
+//! builds its socket directory from `std::env::temp_dir()`, and mutating
+//! `TMPDIR` here would race those tests.
 
 #![cfg(unix)]
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -37,6 +42,12 @@ impl TempSocket {
         let dir =
             std::env::temp_dir().join(format!("metis-echo-{}-{sequence}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create the temporary socket directory");
+        // The daemon refuses a socket directory that is wider than its rule
+        // allows, so the test's base is private, exactly as a runtime directory
+        // is. The daemon applies its own mode and group to the directory the
+        // socket lives in.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict the temporary socket directory");
         let path = dir.join("daemon.sock");
         Self { dir, path }
     }
@@ -163,13 +174,6 @@ async fn wrapper_echoes_over_a_temporary_socket() {
     );
 }
 
-/// The platform default is the literal the effort fixes, not whatever the
-/// environment happens to hold.
-#[test]
-fn default_endpoint_is_the_platform_default() {
-    assert_eq!(default_endpoint(), PathBuf::from("/tmp/metis-daemon.sock"));
-}
-
 /// The environment override redirects the local constructor to its socket, and
 /// an empty override means "unset" rather than "the empty path".
 #[tokio::test]
@@ -178,7 +182,10 @@ async fn environment_override_redirects_the_local_constructor() {
     serve_skeleton(socket.path()).await;
 
     let override_guard = EndpointOverride::set(socket.path());
-    assert_eq!(resolve_endpoint(), socket.path().to_path_buf());
+    assert_eq!(
+        resolve_endpoint().expect("an explicit endpoint needs no private base"),
+        socket.path().to_path_buf()
+    );
 
     // The local constructor resolves the override and reaches the skeleton. No
     // transport, `Http2Connection`, or generated stub type is named here.
@@ -190,7 +197,11 @@ async fn environment_override_redirects_the_local_constructor() {
     assert_eq!(echoed, "hello through the override");
 
     unsafe { std::env::set_var(ENDPOINT_ENV, "") };
-    assert_eq!(resolve_endpoint(), default_endpoint());
+    assert_eq!(
+        resolve_endpoint().ok(),
+        default_endpoint().ok(),
+        "an empty override is unset, so the rule falls to the default"
+    );
 
     drop(override_guard);
 }

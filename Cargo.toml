@@ -46,6 +46,10 @@ client = { path = "crates/client" }
 # serialisation shapes out of the C ABI surface.
 cc = "1"
 libloading = "0.9"
+# The socket ACL sets a directory's and a socket file's group, which `std`
+# does not expose. It is a direct dependency of `api-contracts` only, and only
+# on Unix.
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

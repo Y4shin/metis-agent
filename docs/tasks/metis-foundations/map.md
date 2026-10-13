@@ -252,6 +252,20 @@ streaming assumptions before anything is built on top.
   `reverse-proxy-mode`, `local-identity-and-acl` and `pairing-and-tokens` land,
   which is why the bind address is required. The stream-over-TCP assertion is
   carried by `event-stream`, which owns the first streaming RPC.
+- Local access control and the identity declaration are real. The socket
+  directory and the socket file are created with mode 700, or 770 with
+  `METIS_SOCKET_GROUP` naming a group the daemon's user belongs to; the daemon
+  owns the directory as its own user, and a pre-existing directory that is a
+  symlink, is owned by someone else, or is wider than the rule is refused rather
+  than chmodded. Every client call carries `metis-protocol-version`,
+  `metis-surface` and `metis-client-version` as default headers, the service
+  records them, and an absent, malformed or unsupported version is refused with
+  `InvalidArgument` carrying `metis-supported-versions`, which the wrapper turns
+  into `ClientError::ProtocolVersion`. The declaration is not authentication;
+  credentials arrive with `pairing-and-tokens`. The default endpoint moved to
+  `$XDG_RUNTIME_DIR/metis/daemon.sock`, then `$TMPDIR/metis/daemon.sock`, then a
+  typed `NoPrivateBase` error, with `METIS_ENDPOINT` still winning, which closes
+  the `/tmp` conflict.
 
 ## Fog
 
@@ -276,13 +290,6 @@ streaming assumptions before anything is built on top.
   done, a pull request can still go red on rate limiting and needs a re-run.
 - How the client distinguishes a deliberate slow-consumer stream drop from a
   transport failure, so the resync decision is not guesswork.
-- The local endpoint default and the local access-control requirement conflict:
-  the skeleton defaults to `/tmp/metis-daemon.sock`, while
-  `local-identity-and-acl` requires the daemon to own the socket's directory as a
-  configured `uid:gid` with mode 700 or 770. `/tmp` is shared and world-writable
-  (sticky), so it cannot carry that ownership. Which default replaces it, for
-  example a per-user runtime directory, and whether the ACL tests must set
-  `METIS_ENDPOINT`, is that ticket's decision.
 - The endpoint override's variable name is a private constant in `client`, so the
   daemon effort would restate the literal `METIS_ENDPOINT` unless the constant is
   exported. Related: `serve_uds` has no shutdown path that unlinks its socket, so

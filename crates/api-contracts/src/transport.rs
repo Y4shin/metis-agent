@@ -13,6 +13,13 @@
 //! `REMOTE_ADDR_ENV` carries an `IP:port` literal, `resolve_remote_addr` reads
 //! it, and there is no default address to fall back to.
 //!
+//! The local front-end carries its access control itself, because the
+//! operating system enforces it: `serve_uds` creates the socket's directory
+//! with the mode and group this daemon is configured with, and refuses a
+//! directory it did not create to spec rather than changing it. A local client
+//! therefore needs no credential; `identity` carries the declaration it makes
+//! instead.
+//!
 //! This module is the only place that knows how to serve and connect a stream.
 //! Generated code stays mounted and untouched.
 
@@ -65,8 +72,16 @@ where
 /// Returns the bind or accept error. Accepting runs until the task is dropped.
 #[cfg(unix)]
 pub async fn serve_uds(path: &std::path::Path, router: Router) -> io::Result<()> {
+    // The access control is applied here rather than by the caller, so every
+    // path that binds a local socket carries it. The socket's directory is
+    // created to spec first, then the stale socket file is removed, then the
+    // socket is bound and the same rule applied to it: on Linux, connecting to
+    // a Unix socket also checks write permission on the socket file.
+    let acl = SocketAcl::from_env().map_err(io::Error::other)?;
+    ensure_dir(path, &acl).map_err(io::Error::other)?;
     let _ = std::fs::remove_file(path);
     let listener = tokio::net::UnixListener::bind(path)?;
+    apply_acl(path, &acl).map_err(io::Error::other)?;
     let router = Arc::new(router);
     loop {
         let (stream, _) = listener.accept().await?;
@@ -178,6 +193,232 @@ pub fn local_authority() -> http::Uri {
     "http://localhost".parse().expect("static authority")
 }
 
+/// The mode a socket and its directory carry when no group is configured:
+/// only the daemon's own user may reach it.
+pub const SOCKET_MODE_PRIVATE: u32 = 0o700;
+
+/// The mode they carry when a group is configured: the daemon's user and that
+/// group may reach it, nobody else.
+pub const SOCKET_MODE_GROUP: u32 = 0o770;
+
+/// The environment variable that names the group the socket's directory and
+/// the socket file are shared with.
+///
+/// The group is a name from the host's group database, and the daemon's user
+/// must belong to it; an unknown name is a typed error rather than a silent
+/// fall back to the user's primary group. An absent or empty value means no
+/// group, and the private mode.
+pub const SOCKET_GROUP_ENV: &str = "METIS_SOCKET_GROUP";
+
+/// The access control a Unix socket path is created with.
+///
+/// The owner is never configured: the daemon owns what it creates, as its own
+/// user, and no privileged step is involved.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+struct SocketAcl {
+    /// The mode of the socket's directory and of the socket file.
+    mode: u32,
+    /// The configured group, when there is one.
+    group: Option<libc::gid_t>,
+}
+
+#[cfg(unix)]
+impl SocketAcl {
+    /// Read the configured access control from the environment.
+    ///
+    /// An absent or empty [`SOCKET_GROUP_ENV`] is the private mode with no
+    /// group; a name resolves to the host's group database.
+    fn from_env() -> Result<Self, ConfigError> {
+        let Some(value) = env_value(SOCKET_GROUP_ENV) else {
+            return Ok(Self {
+                mode: SOCKET_MODE_PRIVATE,
+                group: None,
+            });
+        };
+        let group = resolve_group(&value).ok_or_else(|| ConfigError::UnknownSocketGroup {
+            variable: SOCKET_GROUP_ENV,
+            value: value.clone(),
+        })?;
+        Ok(Self {
+            mode: SOCKET_MODE_GROUP,
+            group: Some(group),
+        })
+    }
+}
+
+/// Create the socket's directory with the configured ownership and mode, or
+/// accept one that already carries them.
+///
+/// The directory is the socket path's parent. It is created with the mode
+/// already applied, so it is never briefly wider than the rule allows, and the
+/// mode is applied again afterwards because `umask` can narrow a creation mode.
+///
+/// A pre-existing directory is refused, never modified, when it is a symlink,
+/// is not a directory, is not owned by this process's user, or carries a mode
+/// wider than the rule allows. A directory that passes is used and has the
+/// configured mode and group applied, which is how a daemon restarted under a
+/// different group setting reaches its own directory.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::SocketAcl`] when the directory cannot be created,
+/// inspected, or used, and [`ConfigError::UnknownSocketGroup`] when
+/// [`SOCKET_GROUP_ENV`] names no group on this host.
+#[cfg(unix)]
+pub fn ensure_socket_dir(socket: &std::path::Path) -> Result<(), ConfigError> {
+    let acl = SocketAcl::from_env()?;
+    ensure_dir(socket, &acl)
+}
+
+/// The directory a socket path lives in.
+#[cfg(unix)]
+fn socket_dir(socket: &std::path::Path) -> Result<&std::path::Path, ConfigError> {
+    socket
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| ConfigError::SocketAcl {
+            path: socket.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the socket path has no directory to own",
+            ),
+        })
+}
+
+#[cfg(unix)]
+fn ensure_dir(socket: &std::path::Path, acl: &SocketAcl) -> Result<(), ConfigError> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let dir = socket_dir(socket)?;
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => check_dir(dir, &metadata, acl)?,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(acl.mode)
+                .create(dir)
+                .map_err(|source| ConfigError::SocketAcl {
+                    path: dir.to_path_buf(),
+                    source,
+                })?;
+        }
+        Err(source) => {
+            return Err(ConfigError::SocketAcl {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    }
+    apply_acl(dir, acl)
+}
+
+/// Refuse a pre-existing directory the daemon may not use, without touching it.
+#[cfg(unix)]
+fn check_dir(
+    dir: &std::path::Path,
+    metadata: &std::fs::Metadata,
+    acl: &SocketAcl,
+) -> Result<(), ConfigError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let refuse = |reason: String| ConfigError::SocketAcl {
+        path: dir.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::PermissionDenied, reason),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(refuse(
+            "the socket directory is a symlink, which is never followed".to_owned(),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(refuse("the socket directory is not a directory".to_owned()));
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(refuse(format!(
+            "the socket directory is owned by user {}, not by this user",
+            metadata.uid()
+        )));
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & !acl.mode != 0 {
+        return Err(refuse(format!(
+            "the socket directory is mode {mode:o}, wider than the allowed {:o}",
+            acl.mode
+        )));
+    }
+    Ok(())
+}
+
+/// Apply the configured mode, and the configured group when there is one.
+#[cfg(unix)]
+fn apply_acl(path: &std::path::Path, acl: &SocketAcl) -> Result<(), ConfigError> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    let refuse = |source: io::Error| ConfigError::SocketAcl {
+        path: path.to_path_buf(),
+        source,
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(acl.mode)).map_err(refuse)?;
+    if let Some(group) = acl.group {
+        let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            refuse(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the socket path holds an interior NUL byte",
+            ))
+        })?;
+        // `uid_t::MAX` leaves the owner alone: the daemon owns what it
+        // created, and only the group is ever configured.
+        let code = unsafe { libc::chown(raw.as_ptr(), libc::uid_t::MAX, group) };
+        if code != 0 {
+            return Err(refuse(io::Error::last_os_error()));
+        }
+    }
+    Ok(())
+}
+
+/// A group name from the host's group database, through the reentrant lookup
+/// so a concurrent name lookup cannot race a shared static entry.
+#[cfg(unix)]
+fn resolve_group(name: &str) -> Option<libc::gid_t> {
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut buffer = vec![0 as libc::c_char; 1024];
+    loop {
+        let mut entry: libc::group = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::group = std::ptr::null_mut();
+        let code = unsafe {
+            libc::getgrnam_r(
+                name.as_ptr(),
+                &mut entry,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if code == libc::ERANGE {
+            if buffer.len() >= 1 << 16 {
+                return None;
+            }
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if code != 0 || result.is_null() {
+            return None;
+        }
+        return Some(entry.gr_gid);
+    }
+}
+
+/// An environment variable's value when it is set and not empty.
+fn env_value(variable: &str) -> Option<String> {
+    let value = std::env::var_os(variable)?;
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_string_lossy().into_owned())
+}
+
 /// The environment variable that names the remote bind address.
 ///
 /// Naming an `IP:port` literal enables the remote listener; an absent or empty
@@ -208,6 +449,21 @@ pub enum ConfigError {
         /// The bind failure.
         source: io::Error,
     },
+    /// The socket's directory could not be created, is one the daemon may not
+    /// use, or could not be given its access control.
+    SocketAcl {
+        /// The directory that was refused or could not be prepared.
+        path: std::path::PathBuf,
+        /// The reason, as the operating system reported it.
+        source: io::Error,
+    },
+    /// [`SOCKET_GROUP_ENV`] names no group on this host.
+    UnknownSocketGroup {
+        /// The variable that was read.
+        variable: &'static str,
+        /// The value it held.
+        value: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -219,6 +475,16 @@ impl std::fmt::Display for ConfigError {
             Self::RemoteBind { addr, source } => {
                 write!(f, "cannot bind the remote listener to {addr}: {source}")
             }
+            Self::SocketAcl { path, source } => {
+                write!(
+                    f,
+                    "cannot use {} as the socket directory: {source}",
+                    path.display()
+                )
+            }
+            Self::UnknownSocketGroup { variable, value } => {
+                write!(f, "{variable} names no group on this host: {value:?}")
+            }
         }
     }
 }
@@ -228,6 +494,8 @@ impl std::error::Error for ConfigError {
         match self {
             Self::InvalidRemoteAddr { source, .. } => Some(source),
             Self::RemoteBind { source, .. } => Some(source),
+            Self::SocketAcl { source, .. } => Some(source),
+            Self::UnknownSocketGroup { .. } => None,
         }
     }
 }
@@ -391,6 +659,340 @@ mod tests {
                 "the error names the value: {message}"
             );
             drop(env);
+        }
+    }
+
+    /// The socket ACL, Unix-only like the front-end it guards.
+    #[cfg(unix)]
+    mod acl {
+        use super::ENV_LOCK;
+        use crate::transport::{
+            ConfigError, SOCKET_GROUP_ENV, SOCKET_MODE_GROUP, SOCKET_MODE_PRIVATE,
+            ensure_socket_dir, serve_uds,
+        };
+        use connectrpc::Router;
+        use std::ffi::OsString;
+        use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
+        use std::path::{Path, PathBuf};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{MutexGuard, PoisonError};
+        use std::time::Duration;
+
+        /// A temporary directory that removes itself on drop, so the ACL tests
+        /// clean up on the success path and on a panic alike.
+        struct TempDir {
+            path: PathBuf,
+        }
+
+        impl TempDir {
+            /// The directory is created private, the way a runtime directory
+            /// is: it is the base the daemon works under, not the daemon's own
+            /// directory.
+            fn new(name: &str) -> Self {
+                static NEXT: AtomicUsize = AtomicUsize::new(0);
+                let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "metis-acl-{name}-{}-{sequence}",
+                    std::process::id()
+                ));
+                std::fs::create_dir_all(&path).expect("create the temporary directory");
+                std::fs::set_permissions(
+                    &path,
+                    std::fs::Permissions::from_mode(SOCKET_MODE_PRIVATE),
+                )
+                .expect("restrict the temporary directory");
+                Self { path }
+            }
+
+            fn join(&self, name: &str) -> PathBuf {
+                self.path.join(name)
+            }
+        }
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
+        }
+
+        /// Holds `METIS_SOCKET_GROUP` for the duration of a test and restores
+        /// the previous value on drop. The lock it carries serialises every
+        /// environment test in this binary, so a test that wants no group
+        /// configured holds it too.
+        struct SocketGroupEnv {
+            previous: Option<OsString>,
+            _lock: MutexGuard<'static, ()>,
+        }
+
+        impl SocketGroupEnv {
+            fn set(value: &str) -> Self {
+                let lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+                let previous = std::env::var_os(SOCKET_GROUP_ENV);
+                // Edition 2024 makes mutating the process environment unsafe
+                // because it is not thread-safe. Every test that touches the
+                // variable holds `ENV_LOCK`, so nothing races this write.
+                unsafe { std::env::set_var(SOCKET_GROUP_ENV, value) };
+                Self {
+                    previous,
+                    _lock: lock,
+                }
+            }
+
+            fn unset() -> Self {
+                let lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+                let previous = std::env::var_os(SOCKET_GROUP_ENV);
+                // SAFETY: see `set`.
+                unsafe { std::env::remove_var(SOCKET_GROUP_ENV) };
+                Self {
+                    previous,
+                    _lock: lock,
+                }
+            }
+        }
+
+        impl Drop for SocketGroupEnv {
+            fn drop(&mut self) {
+                // SAFETY: see `set`; the lock is held until this guard is
+                // dropped.
+                unsafe {
+                    match &self.previous {
+                        Some(value) => std::env::set_var(SOCKET_GROUP_ENV, value),
+                        None => std::env::remove_var(SOCKET_GROUP_ENV),
+                    }
+                }
+            }
+        }
+
+        /// A group this process belongs to, preferring one that is not its
+        /// primary group, so the assertion can tell an applied group from the
+        /// group the file system would have used anyway.
+        fn a_group_the_process_belongs_to() -> (String, u32) {
+            let primary = unsafe { libc::getegid() };
+            let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+            if count > 0 {
+                let mut groups = vec![0 as libc::gid_t; count as usize];
+                let read = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+                for &group in groups.iter().take(read.max(0) as usize) {
+                    if group != primary
+                        && let Some(name) = group_name(group)
+                    {
+                        return (name, group);
+                    }
+                }
+            }
+            let name =
+                group_name(primary).expect("the primary group is named in the group database");
+            (name, primary)
+        }
+
+        /// The name the group database holds for `gid`, through the reentrant
+        /// lookup so parallel tests cannot race a shared static entry.
+        fn group_name(gid: u32) -> Option<String> {
+            let mut buffer = vec![0 as libc::c_char; 1024];
+            let mut entry: libc::group = unsafe { std::mem::zeroed() };
+            let mut result: *mut libc::group = std::ptr::null_mut();
+            let code = unsafe {
+                libc::getgrgid_r(
+                    gid,
+                    &mut entry,
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    &mut result,
+                )
+            };
+            if code != 0 || result.is_null() {
+                return None;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr(entry.gr_name) };
+            name.to_str().ok().map(str::to_owned)
+        }
+
+        fn mode_of(path: &Path) -> u32 {
+            std::fs::metadata(path).expect("the path exists").mode() & 0o7777
+        }
+
+        /// A socket directory the daemon creates is private to it: mode 700,
+        /// owned by its own user, created under a base that may not exist yet,
+        /// and accepted when the daemon starts again.
+        #[test]
+        fn a_fresh_socket_directory_is_created_private() {
+            let _group = SocketGroupEnv::unset();
+            let base = TempDir::new("fresh");
+            let socket = base.join("nested/daemon.sock");
+
+            ensure_socket_dir(&socket).expect("the daemon creates its own directory");
+            let directory = std::fs::metadata(socket.parent().expect("the socket has a directory"))
+                .expect("the directory exists");
+            assert_eq!(directory.mode() & 0o7777, SOCKET_MODE_PRIVATE);
+            assert_eq!(directory.uid(), unsafe { libc::geteuid() });
+
+            ensure_socket_dir(&socket).expect("the directory it created is accepted again");
+        }
+
+        /// A configured group widens the mode to 770 and applies that group,
+        /// whether the daemon creates the directory or finds it already private.
+        #[test]
+        fn a_configured_group_is_applied() {
+            let (name, group) = a_group_the_process_belongs_to();
+            let base = TempDir::new("group");
+            let socket = base.join("created/daemon.sock");
+            let directory = socket
+                .parent()
+                .expect("the socket has a directory")
+                .to_path_buf();
+
+            let ungrouped = SocketGroupEnv::unset();
+            ensure_socket_dir(&socket).expect("the directory is created");
+            assert_eq!(mode_of(&directory), SOCKET_MODE_PRIVATE);
+            drop(ungrouped);
+
+            let grouped = SocketGroupEnv::set(&name);
+            ensure_socket_dir(&socket).expect("the configured group is applied");
+            let metadata = std::fs::metadata(&directory).expect("the directory exists");
+            assert_eq!(metadata.mode() & 0o7777, SOCKET_MODE_GROUP);
+            assert_eq!(
+                metadata.gid(),
+                group,
+                "the directory carries the configured group"
+            );
+            drop(grouped);
+        }
+
+        /// A directory wider than the rule allows is refused and left exactly
+        /// as it is: the daemon does not undo an operator's own permission
+        /// change behind their back.
+        #[test]
+        fn a_wider_pre_existing_directory_is_refused_and_left_alone() {
+            let _group = SocketGroupEnv::unset();
+            let base = TempDir::new("wide");
+            let directory = base.join("shared");
+            std::fs::create_dir(&directory).expect("create the pre-existing directory");
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
+                .expect("widen the pre-existing directory");
+
+            let error = ensure_socket_dir(&directory.join("daemon.sock"))
+                .expect_err("mode 755 is wider than 700");
+            match &error {
+                ConfigError::SocketAcl { path, .. } => assert_eq!(path, &directory),
+                other => panic!("expected a socket ACL refusal, got {other:?}"),
+            }
+            assert_eq!(mode_of(&directory), 0o755, "the directory is not chmodded");
+        }
+
+        /// The same rule follows the configured group: with a group the mode
+        /// may be 770, and anything wider is still refused untouched.
+        #[test]
+        fn a_directory_wider_than_the_group_mode_is_refused() {
+            let (name, _group) = a_group_the_process_belongs_to();
+            let base = TempDir::new("group-wide");
+            let directory = base.join("shared");
+            std::fs::create_dir(&directory).expect("create the pre-existing directory");
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777))
+                .expect("widen the pre-existing directory");
+
+            let grouped = SocketGroupEnv::set(&name);
+            ensure_socket_dir(&directory.join("daemon.sock"))
+                .expect_err("mode 777 is wider than 770");
+            assert_eq!(mode_of(&directory), 0o777, "the directory is not chmodded");
+            drop(grouped);
+        }
+
+        /// A symlink is refused rather than followed, so the ACL cannot be
+        /// aimed at a directory the daemon was not told about.
+        #[test]
+        fn a_symlinked_directory_is_refused() {
+            let _group = SocketGroupEnv::unset();
+            let base = TempDir::new("symlink");
+            let target = base.join("real");
+            std::fs::create_dir(&target).expect("create the target directory");
+            std::fs::set_permissions(
+                &target,
+                std::fs::Permissions::from_mode(SOCKET_MODE_PRIVATE),
+            )
+            .expect("restrict the target directory");
+            let link = base.join("link");
+            symlink(&target, &link).expect("create the symlink");
+
+            ensure_socket_dir(&link.join("daemon.sock")).expect_err("a symlink is refused");
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .expect("the symlink exists")
+                    .file_type()
+                    .is_symlink(),
+                "the symlink is left in place"
+            );
+            assert_eq!(
+                mode_of(&target),
+                SOCKET_MODE_PRIVATE,
+                "the target is untouched"
+            );
+        }
+
+        /// A path that is not a directory is refused: the ACL is a directory
+        /// rule, and a file at the socket's own path is not one.
+        #[test]
+        fn a_file_where_the_directory_belongs_is_refused() {
+            let _group = SocketGroupEnv::unset();
+            let base = TempDir::new("file");
+            let file = base.join("not-a-directory");
+            std::fs::write(&file, b"").expect("create the file");
+
+            ensure_socket_dir(&file.join("daemon.sock")).expect_err("a file is not a directory");
+        }
+
+        /// A group the host does not have is a typed error, not a silent
+        /// fallback to the primary group.
+        #[test]
+        fn an_unknown_group_is_a_typed_error() {
+            let _group = SocketGroupEnv::set("metis-no-such-group");
+            let base = TempDir::new("unknown-group");
+            let socket = base.join("nested/daemon.sock");
+
+            let error = ensure_socket_dir(&socket).expect_err("the group does not exist");
+            assert!(
+                matches!(error, ConfigError::UnknownSocketGroup { .. }),
+                "expected an unknown group error, got {error:?}"
+            );
+        }
+
+        /// The socket file is created under the same rule as its directory, so
+        /// the ACL covers both halves of the path.
+        #[tokio::test]
+        async fn the_bound_socket_is_private_too() {
+            let _group = SocketGroupEnv::unset();
+            let base = TempDir::new("bound");
+            let socket = base.join("nested/daemon.sock");
+            let server_socket = socket.clone();
+            tokio::spawn(async move {
+                if let Err(err) = serve_uds(&server_socket, Router::new()).await {
+                    eprintln!("listener error: {err}");
+                }
+            });
+            assert!(
+                wait_for_path(&socket).await,
+                "the listener binds its socket"
+            );
+
+            let directory = std::fs::metadata(socket.parent().expect("the socket has a directory"))
+                .expect("the directory exists");
+            assert_eq!(directory.mode() & 0o7777, SOCKET_MODE_PRIVATE);
+            assert_eq!(directory.uid(), unsafe { libc::geteuid() });
+
+            let bound = std::fs::symlink_metadata(&socket).expect("the socket exists");
+            assert!(bound.file_type().is_socket(), "the path is a socket");
+            assert_eq!(bound.mode() & 0o7777, SOCKET_MODE_PRIVATE);
+            assert_eq!(bound.uid(), unsafe { libc::geteuid() });
+        }
+
+        /// Wait, bounded, for a listener to create its socket file.
+        async fn wait_for_path(path: &Path) -> bool {
+            for _ in 0..100 {
+                if path.exists() {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            false
         }
     }
 }
