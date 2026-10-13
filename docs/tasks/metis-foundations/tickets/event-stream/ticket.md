@@ -15,6 +15,12 @@ identifier ring, the snapshot that opens every stream, and the client's stream
 drain, so that a surface receives a snapshot and then events without hand-rolling
 framing or resume.
 
+The event's payload carries structured content, and its wire type is chosen during
+implementation: JSON text in a `string` is the accepted fallback, and a more
+native encoding is welcome if it does not pull a schema or well-known-type
+dependency into generation for little gain. The choice is recorded, because
+`buf breaking` runs in FILE mode and changing the type later is expensive.
+
 ## Acceptance criteria
 
 - [ ] The document declares a server-streaming events RPC whose request selects

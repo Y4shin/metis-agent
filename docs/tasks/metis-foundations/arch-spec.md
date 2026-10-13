@@ -2778,16 +2778,137 @@ tests are Unix-gated, and these two inherit that.
 
 ---
 
+## Pending ticket: `event-stream`
+
+Blocked by the landed skeleton. The first ticket of the realtime line and the
+largest: appends the server-streaming events RPC to `metis.v1`, adds the
+daemon-wide event ring and the snapshot that opens every stream, and gives the
+client a stream it can drain.
+
+### Exports
+
+- `contracts/proto/metis/v1/daemon.proto`:
+  - `rpc StreamEvents(StreamEventsRequest) returns (stream Event);` appended to
+    `DaemonService`.
+  - `StreamEventsRequest { repeated string channels = 1; uint64 last_event_id =
+    2; }`, where `0` means no cursor and ids start at 1, so the field needs no
+    `optional`.
+  - `Event { uint64 id = 1; EventKind kind = 2; string channel = 3; <payload> = 4; }`,
+    carrying the event's channel, kind and identifier. **The payload field's wire
+    type is deliberately left to the implementing agent, per the operator's
+    decision**, constrained by: it must carry the event's structured content, it
+    must not pull a well-known-type or schema dependency into generation unless
+    that buys more than it costs, and JSON text in a `string` is the accepted
+    fallback. Whatever it picks is recorded in the deviation report and
+    reconciled here, because `buf breaking` runs in FILE mode and changing the
+    type afterwards is expensive.
+  - `enum EventKind { EVENT_KIND_UNSPECIFIED = 0; SNAPSHOT = 1; HEARTBEAT = 2;
+    EVENT = 3; }`, the contract's first enum, which is what makes the buffa
+    mount's dormant `clippy::derivable_impls` allow load-bearing.
+  - `Cancel` is **not** in this ticket; `cancellation-and-slow-consumers` appends
+    it.
+- `buf.yaml`: the `RPC_RESPONSE_STANDARD_NAME` exception this file already
+  reserves for the streaming message, scoped as tightly as buf v2 allows, with
+  `buf lint` green. Regeneration through `scripts/regenerate-contracts.sh`, so the
+  committed trees and the drift check move with it.
+- `crates/api-contracts/src/events.rs`: the ring, in the shared crate because the
+  daemon serves it and the client's in-process test service and example also need
+  one, and this is the only crate both reach.
+  - `Event { id: u64, kind: EventKind, channel: String, payload: ... }` as the
+    Rust mirror of the message.
+  - `Ring::new(capacity)`, `publish(channel, kind, payload) -> u64`,
+    `snapshot(&[&str]) -> Vec<Event>`, `since(id, &[&str]) -> Vec<Event>`,
+    `earliest_resumable()`, and a live subscription handle for the serving side.
+  - One daemon-wide monotonic counter across channels, and a bounded capacity
+    that drops the oldest event and advances the earliest resumable id.
+- `crates/daemon/src/service.rs`: the `stream_events` implementation: the
+  snapshot first, then live events for the selected channels, with heartbeats as
+  ordinary messages. `Service::new(store, preshared, heartbeat: Duration)` with
+  `HEARTBEAT_DEFAULT` at 15 seconds, so a test can set a short interval instead of
+  waiting.
+- `crates/client/src/lib.rs`: `pub async fn stream_events(&self, channels:
+  &[&str], last_event_id: u64) -> Result<EventStream, ClientError>`, where
+  `EventStream` yields typed events and the wrapper still names no transport and
+  no generated stub type.
+- `crates/client/src/skeleton.rs`: the stream method too, so the in-process
+  service stays the one the wrapper tests and the example drive.
+- The example prints the snapshot and one event and exits non-zero on failure, and
+  `docs/testing.md` gains the stream run commands.
+
+### Existing abstractions to use
+
+- `serve_stream` and the private `serve_connection`, plus `connectrpc`'s native
+  server-streaming support: the connection is already wrapped, so the stream needs
+  no new transport path.
+- `AuthPolicy` and `AuthInterceptor`: the stream is authorized at establishment
+  through `intercept_streaming`, which is exactly the half `pairing-and-tokens`
+  could not test. This ticket supplies that wire test.
+- The landed test helpers, including `TempSocket`, `reserve_loopback_port`,
+  `serve_over_tcp` and the paired-token fixture.
+- `crates/client/examples/echo.rs` as the walkthrough pattern, and
+  `docs/testing.md`'s command-list convention.
+
+### Do NOT reimplement
+
+- Do not add resume or expiry policy, a slow-consumer policy, or the `Cancel`
+  RPC. This ticket carries a cursor; `stream-resume-and-expiry` and
+  `cancellation-and-slow-consumers` give it meaning.
+- Do not add a second event loop, a second ring, or a per-channel counter.
+- Do not put the ring in SQLite: it is in-memory and bounded, which is the
+  ticket's storage decision.
+- Do not hand-roll framing or a second streaming mechanism when `connectrpc` has
+  one.
+- Do not change the ABI, the plugin crates, or the existing non-streaming RPCs.
+
+### Seams
+
+1. **Contract seam.** The generated server-streaming trait method and client
+   method exist, `buf lint` is green with the one scoped exception, and
+   `regenerate-contracts.sh --check` reports no drift.
+2. **Ring seam.** Ids are monotonic and daemon-wide across channels, the ring is
+   bounded with the oldest dropped past capacity and `earliest_resumable`
+   following it, `snapshot` returns the current head per selected channel, and
+   `since` returns what follows an id. Unit-tested, including the drop case.
+3. **Stream seam.** Over a temporary socket, the first message is the snapshot, a
+   published event follows with a greater id, heartbeats arrive as ordinary
+   `HEARTBEAT` events, and the identifiers never decrease. This is criterion 5.
+4. **Authorization seam.** With `TokenRequired` mounted, the stream is refused
+   without a credential and served with a paired token, which closes the
+   streaming-interceptor gap the pairing tickets recorded.
+5. **Example seam.** The example prints the snapshot and one event and exits
+   non-zero when the stream fails.
+6. **Additivity seam.** The ABI layout and plugin crates are untouched, the
+   harness stays at 73 checks, and the existing RPCs keep their signatures.
+
+Test types: unit tests in `api-contracts` for the ring; integration tests in
+`crates/daemon/tests/` over a real socket for the stream and authorization seams;
+the example for its own seam; the contract and workspace gates for the rest.
+
+### Interface contract
+
+- `stream-resume-and-expiry` consumes `last_event_id`, `since` and
+  `earliest_resumable`; the rule that `0` means "no cursor" is this ticket's
+  placeholder, and that ticket replaces it with real resume and expiry semantics.
+- `cancellation-and-slow-consumers` appends the `Cancel` RPC and owns the drop
+  policy for a slow consumer.
+- The daemon effort publishes real events into the ring; the skeleton's events
+  are test support and stay minimal.
+- Recorded residuals: heartbeats are unconditional rather than idle-detected, the
+  ring is per-process and lost on restart, the payload encoding is the
+  implementer's choice as recorded above, and slow-consumer behaviour is the
+  library default until the cancellation ticket lands.
+
+---
+
 ## Downstream interface contracts (outline)
 
 The tickets still pending in this effort are `event-stream`, `reverse-proxy-mode`
 and `windows-named-pipe`. Their sections are added when their chains reach the
-frontier; `remote-pairing` has landed and its section is above. The tickets the
-bullets below also name (`stream-resume-and-expiry`,
-`cancellation-and-slow-consumers`) are not pending
-yet, and the commitments below are what the landed tickets must already support,
-including the surfaces `local-identity-and-acl`, `state-store` and
-`pairing-and-tokens` landed.
+frontier, apart from `event-stream`, whose pending section is above; the tickets
+below also name `stream-resume-and-expiry` and `cancellation-and-slow-consumers`,
+which are not pending yet, and the commitments below are what the landed tickets
+must already support, including the surfaces `local-identity-and-acl`,
+`state-store`, `pairing-and-tokens` and `remote-pairing` landed.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
