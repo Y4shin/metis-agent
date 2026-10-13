@@ -105,7 +105,6 @@ same event.
 typedef struct MetisFutureHandle { void *ctx; const MetisFutureVtable *vtable; } MetisFutureHandle;
 
 typedef struct MetisFutureVtable {
-    size_t size;
     MetisStatus (*poll)(void *ctx, MetisWaker waker, MetisBuffer *out_value);
     MetisStatus (*drop)(void *ctx);
 } MetisFutureVtable;
@@ -128,7 +127,6 @@ typedef struct MetisFutureVtable {
 typedef struct MetisWaker { void *data; const MetisWakerVtable *vtable; } MetisWaker;
 
 typedef struct MetisWakerVtable {
-    size_t size;
     MetisWaker (*clone)(const MetisWaker *waker);
     void (*wake)(MetisWaker waker);
     void (*wake_by_ref)(const MetisWaker *waker);
@@ -266,7 +264,8 @@ boxed-future helper that replaces `async-ffi`.
    quarantine predicate.
 5. The ownership and lifetime rules above, plus the envelope in the header,
    became contract text after a hand-written C plugin exposed them as guesswork.
-6. Two vtable `size` fields that were written and never read are deleted or read.
+6. Two vtable `size` fields that were written and never read are deleted, so
+   neither vtable carries a `size` field.
 7. The `metis.*` control plane (schemas, configure, counters) moves onto the
    futures path so `invoke` can be deleted structurally rather than surviving as
    an inline side channel.
