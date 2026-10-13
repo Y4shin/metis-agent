@@ -18,6 +18,22 @@ questions), let the parent analyse the findings, fold the agreed findings back
 into the main prototype with one writer, update this document, and repeat until
 the open list is empty of things that matter.
 
+## Notifications
+
+Use the `notify_user` tool so the operator can walk away and know when to come
+back. The same convention applies to every session that continues this work:
+
+- Send one at the end of **every** turn, including turns that only report progress,
+  and send one **before** any `ask_user_question` call, so a question never sits
+  unseen.
+- Keep it short and lead with the actionable part: what is running, what needs the
+  operator, or that nothing does. A couple of sentences plus the key numbers is the
+  right size.
+- Name the identifiers and paths that matter, such as the run id, the commit, and
+  which prototype copy or lane produced a result.
+- Say explicitly when nothing is needed from the operator. That is the common case
+  and it is what makes the channel trustworthy.
+
 ## Status as of commit `4dbf5ce`
 
 - The main prototype now lives in the repository at `spikes/plugin-registry`
