@@ -34,14 +34,17 @@ jobs:
       - name: Test
         run: devenv shell -- cargo test
 
+      # Both contract gates run from the repository root, where the one
+      # `buf.yaml` lives, so the gate that runs and the policy that is declared
+      # cannot read different files.
       - name: Contract lint
-        working-directory: contracts
         run: devenv shell -- buf lint
 
-      # Run from the repository root: the comparison walks the whole tree on
-      # both sides, so the contract files line up with the branch's copy.
+      # `--against-config` scopes the `main` side of the comparison with the
+      # same root configuration as the working tree, so the two sides line up on
+      # `contracts/proto` instead of comparing a module with a whole tree.
       - name: Contract breaking changes
-        run: devenv shell -- buf breaking --against '.git#branch=main'
+        run: devenv shell -- buf breaking --against '.git#branch=main' --against-config buf.yaml
 
       - name: Contract regeneration check
         run: devenv shell -- bash scripts/regenerate-contracts.sh --check
