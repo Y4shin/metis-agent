@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Plugin version tolerance across compiled versions (plugin-compatibility)
+
+`metis_read_table` now compares `abi_minor` additively with `found >= known`, so a plugin built for a newer minor inside major 1 interoperates while the retired pre-release table at minor 0 is still refused with `MinorMismatch` before any entry is read. A library built for another major fails at symbol resolution with `MajorMismatch` over a real second C library, and the fixture advertises an eighth capability at descriptor version 2, which makes the per-capability gate falsifiable end to end: only that capability is refused and the rest of the plugin keeps serving. Payload types prove that a body carrying an unknown field still decodes, and the harness grew from 62 to 73 checks, including Linux-only faulting-page probes that prove a reader touches only the entries its own `size` covers.
+
 ## 2026-10-13, Unify the capability declaration (plugin-contract-v1, amendment)
 
 The declaration both sides of the plugin wire read is now one ungated type in `plugin-contract::capability`, with `serde_json::Value` schemas and a lenient `kind`; `schemars` stays optional behind `authoring`, and the host deleted its own duplicate type and the test that kept the two in step. A capability whose kind this build does not know is refused on its own with `Unsupported` instead of failing the declaration. The wire is byte-identical.

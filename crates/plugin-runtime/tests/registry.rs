@@ -6,7 +6,7 @@ mod support;
 use std::sync::Arc;
 
 use plugin_contract::abi::MetisStatus;
-use plugin_fixture::CAPABILITIES;
+use plugin_fixture::{CAPABILITIES, NEWER_CAPABILITY, NEWER_CAPABILITY_VERSION};
 use plugin_runtime::{CallError, Registry, RouteError};
 use serde_json::json;
 
@@ -27,13 +27,20 @@ fn the_loader_reads_the_declaration_and_the_version() {
         CAPABILITIES.to_vec(),
         "the shared declaration parses what the plugin publishes"
     );
+    // The fixture declares one capability at a version above the one a host of
+    // this revision serves, which is what the per-capability gate is driven
+    // with; every other descriptor declares version 1.
     assert!(
-        instance
-            .capabilities()
-            .iter()
-            .all(|capability| capability.kind == "tool"
-                && capability.version == 1
-                && capability.request_schema.is_object()),
+        instance.capabilities().iter().all(|capability| {
+            let expected = if capability.name == NEWER_CAPABILITY {
+                NEWER_CAPABILITY_VERSION
+            } else {
+                1
+            };
+            capability.kind == "tool"
+                && capability.version == expected
+                && capability.request_schema.is_object()
+        }),
         "every descriptor carries its schemas inline"
     );
 }

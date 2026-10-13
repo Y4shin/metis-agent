@@ -18,8 +18,11 @@
  * ABI minor version. It travels in the function table.
  *
  * It is 1 because this revision changed the entry order under an unchanged
- * symbol and major. A reader refuses a minor it does not know, so a plugin
- * built against the superseded order is refused instead of misread.
+ * symbol and major. The minor is compared additively: a reader accepts the
+ * minor it knows and any newer one, because a newer table's extra entries are
+ * appended after the last entry this build reads, and it refuses an older
+ * minor, because that table's entries are in the superseded order. A plugin
+ * built against the superseded order is therefore refused instead of misread.
  */
 #define METIS_ABI_MINOR 1
 
@@ -543,7 +546,8 @@ typedef struct MetisPluginTableV1 {
      */
     uint32_t abi_major;
     /**
-     * ABI minor version, which must be the one this build speaks.
+     * ABI minor version. A reader accepts the one it speaks and any newer one,
+     * and refuses an older one.
      */
     uint32_t abi_minor;
     /**

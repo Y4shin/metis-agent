@@ -52,7 +52,8 @@ _Static_assert(METIS_BUFFER_OWNER_PLUGIN == 2, "owner tag plugin");
 
 _Static_assert(METIS_ABI_MAJOR == 1, "major 1 is the versioned entry symbol");
 /* The revision changed the entry order under the unchanged symbol and major,
- * so the minor moved to 1 and a reader refuses a minor it does not know. */
+ * so the minor moved to 1. A reader compares the minor additively: this minor
+ * and any newer one are accepted, an older one is refused. */
 _Static_assert(METIS_ABI_MINOR == 1, "minor 1 is the revised entry order");
 
 /* --- the payload envelope, now in the header --------------------------- */

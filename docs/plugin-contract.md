@@ -75,7 +75,7 @@ The symbol and the ABI major stay `v1` and 1, because this revision lands before
 | Entry | Shape | Contract |
 | --- | --- | --- |
 | `size` | `usize` | Bytes of the table the plugin provides. Read first, always. |
-| `abi_major`, `abi_minor` | `u32` | Major is part of the symbol name; minor is advisory. |
+| `abi_major`, `abi_minor` | `u32` | Major is part of the symbol name; minor is compared additively, so a newer minor is tolerated and an older one is refused. |
 | `create_instance` | `(host: *const MetisHostApiV1, out_instance: **mut c_void) -> MetisStatus` | Builds an instance, stores the host table, runs the plugin's `started`. No instance on failure. |
 | `destroy_instance` | `(instance) -> MetisStatus` | Releases the instance. Only valid after `shutdown`. |
 | `list_capabilities` | `(instance, out_payload: *mut MetisBuffer) -> MetisStatus` | Returns a plugin-allocated payload listing capabilities, each with its name, version, and request and response schemas. |
@@ -280,10 +280,11 @@ as recorded here, so an implementer does not reopen them.
   ABI major stays 1, because this revision lands before the first release and no
   plugin exists in the wild to be compatible with. The entry order does change,
   so a stale pre-release plugin would be silently misread if it loaded:
-  `abi_minor` becomes 1 and the loader refuses a minor it does not know, which
-  refuses that stale plugin instead. `plugin-compatibility` later relaxes that to
-  additive tolerance inside the major. Additive change inside major 1 stays
-  append-only by `size`.
+  `abi_minor` becomes 1 and the comparison refuses a minor older than the one
+  this build knows, which refuses that stale plugin instead.
+  `plugin-compatibility` landed the additive half: the comparison is `found >=
+  known`, so a newer minor inside major 1 is tolerated and an older one is still
+  refused. Additive change inside major 1 stays append-only by `size`.
 - **Typed facades.** Not in this revision. The erased `call` plus published
   schemas lands; generated typed facades belong to the SDK effort.
 - **The two vtable `size` fields.** Deleted, with the residual recorded: a

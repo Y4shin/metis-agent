@@ -73,6 +73,11 @@ reader refuses a minor it does not know. That refuses a stale pre-release plugin
 instead of reading its entries through the new order. Additive change inside the
 major stays append-only by `size` from here.
 
+Amended after `plugin-compatibility`: the comparison is one-directional. A
+reader tolerates the minor it knows and any newer one (`found >= known`) and
+still refuses an older one, so the retired pre-release table at minor 0 stays
+refused while a later additive minor interoperates.
+
 **The envelope and the presence rule ship in the header.** The payload header
 constants and the per-entry slot constants are in the generated C header, so a
 non-Rust implementer does not have to guess either. The two vtable `size` fields

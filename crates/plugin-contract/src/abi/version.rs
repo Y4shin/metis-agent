@@ -3,16 +3,23 @@
 //!
 //! Two things are checked before any entry is read, and they are separate on
 //! purpose. The *version* refuses a table this build cannot interpret: a
-//! different major, or a minor this build does not know, which is what refuses
-//! a stale pre-release plugin whose entries are in the superseded order instead
-//! of reading them through the new one. The *size* refuses a table too short to
-//! cover an entry this build needs, which is the presence rule the whole ABI
-//! rests on.
+//! different major, or a minor older than the one this build knows, which is
+//! what refuses a stale pre-release plugin whose entries are in the superseded
+//! order instead of reading them through the new one. The *size* refuses a table
+//! too short to cover an entry this build needs, which is the presence rule the
+//! whole ABI rests on.
 //!
-//! The minor check is deliberately exact. Additive change inside major 1 stays
-//! append-only by `size`, which is a rule about layout and not about tolerance,
-//! and a host with a wider tolerance is the compatibility ticket's job: it
-//! relaxes this to `found >= known` and appends nothing to the layout.
+//! The minor check is additive: a table reporting the minor this build knows or
+//! a newer one is accepted, because additive change inside major 1 is
+//! append-only by `size`, so a newer minor's entries are appended after the last
+//! entry this build reads and are never reached. A minor older than this
+//! build's is refused, because the entry order itself changed and the entries
+//! this build reads would be read at the wrong offsets. `found >= known` is the
+//! whole rule; the retired pre-release minor 0 stays refused by it.
+//!
+//! The order of the two checks is part of the contract: the version is checked
+//! first, so a table of the wrong version is refused before its bytes are
+//! interpreted at all, whatever size it reports.
 
 use core::mem::size_of;
 
@@ -38,15 +45,17 @@ pub enum MetisAbiError {
         /// The major the table reported.
         found: u32,
     },
-    /// The table's `abi_minor` is one this build does not know.
+    /// The table's `abi_minor` is older than the one this build knows.
     ///
-    /// An exact comparison, in both directions: a newer minor has entries this
-    /// build cannot interpret, and an older one predates the entry order this
-    /// build reads.
+    /// Additive tolerance, in one direction only: a table reporting this
+    /// build's minor or a newer one is accepted, and a table reporting an older
+    /// one is refused, because the older table's entries are in the superseded
+    /// order and reading them through this build's order would interpret the
+    /// wrong bytes.
     MinorMismatch {
         /// The minor this build knows.
         known: u32,
-        /// The minor the table reported.
+        /// The minor the table reported, which is older.
         found: u32,
     },
     /// The table's `size` does not cover an entry this build requires.
@@ -108,6 +117,13 @@ const PLUGIN_ENTRIES: [(&str, usize); 8] = [
 /// one made safe: the prefix (which carries `size`, `abi_major` and
 /// `abi_minor`) is read first, then the version fields, then the entries.
 ///
+/// Only the entries this build's layout carries are read. A table that reports a
+/// longer `size`, such as a plugin built by a later revision of this ABI, is
+/// accepted: the entries past this build's last one are appended and are never
+/// touched, because nothing here names them. A table that reports a shorter
+/// `size` than an entry this build needs is refused with the name of the first
+/// entry the reported size does not cover.
+///
 /// # Safety
 ///
 /// `table` must point at a live, immutable table that stays alive for `'a`.
@@ -125,7 +141,7 @@ pub unsafe fn metis_read_table<'a>(
             found: prefix.abi_major,
         });
     }
-    if prefix.abi_minor != METIS_ABI_MINOR {
+    if prefix.abi_minor < METIS_ABI_MINOR {
         return Err(MetisAbiError::MinorMismatch {
             known: METIS_ABI_MINOR,
             found: prefix.abi_minor,
@@ -137,6 +153,7 @@ pub unsafe fn metis_read_table<'a>(
         }
     }
     // SAFETY: the size checks above cover every field of the table, so the
-    // whole struct may be read.
+    // whole struct may be read. A long table is fine: only the fields named
+    // above are read, and every one of them is inside the reported size.
     Ok(unsafe { &*table })
 }
