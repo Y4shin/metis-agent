@@ -24,11 +24,21 @@ Frontend, run from `apps/ui`:
 - `npm run check` -- `svelte-kit sync` plus `svelte-check`.
 - `npm run build` -- the static build through `@sveltejs/adapter-static`.
 
+Contract, documented in `contracts/README.md`:
+
+- `bash scripts/regenerate-contracts.sh` -- regenerate the committed Rust for
+  the wire contract; `--check` regenerates into a scratch directory and fails on
+  any difference.
+- `cd contracts && buf lint` -- contract lint.
+- `buf breaking --against '.git#branch=main'` from the repository root --
+  contract compatibility against the landing branch.
+
 ## CI
 
 `.github/workflows/ci.yml` runs the Rust commands above through the devenv
-shell on push to `main` and on pull requests. The frontend commands are not
-in CI yet; add them when the frontend has behaviour worth gating.
+shell on push to `main` and on pull requests, followed by the three contract
+commands. The frontend commands are not in CI yet; add them when the frontend
+has behaviour worth gating.
 
 ## Mock conventions
 

@@ -10,6 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `buf breaking` compares the working tree against the `main` branch,
+          # so the job needs the branch and its history, not just the commit
+          # being built.
+          fetch-depth: 0
 
       - uses: cachix/install-nix-action@v27
 
@@ -28,3 +33,15 @@ jobs:
 
       - name: Test
         run: devenv shell -- cargo test
+
+      - name: Contract lint
+        working-directory: contracts
+        run: devenv shell -- buf lint
+
+      # Run from the repository root: the comparison walks the whole tree on
+      # both sides, so the contract files line up with the branch's copy.
+      - name: Contract breaking changes
+        run: devenv shell -- buf breaking --against '.git#branch=main'
+
+      - name: Contract regeneration check
+        run: devenv shell -- bash scripts/regenerate-contracts.sh --check
