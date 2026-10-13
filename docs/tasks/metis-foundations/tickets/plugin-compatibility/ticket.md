@@ -29,8 +29,13 @@ tolerance within the revised v1 table and the per-capability and payload promise
       support while the rest of the plugin stays usable, asserted by a test.
 - [ ] Payloads carrying unknown fields deserialise successfully, covered by a
       test.
-- [ ] A plugin built against the retired v1 table, or any other ABI major, fails
-      at symbol resolution before any table is interpreted, with a typed error.
+- [ ] A plugin that exports only another ABI major's entry symbol fails at
+      symbol resolution, before any table is read, with a typed error rather
+      than a raw loader error.
+- [ ] A plugin built against the retired pre-release v1 table exports the same
+      `metis_plugin_entry_v1` symbol, so it is refused by the version gate with
+      `MinorMismatch` before any table entry is read: additive tolerance is
+      `found >= known`, which leaves minor 0 refused. Asserted by a test.
 
 ## Blocked by
 
