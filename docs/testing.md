@@ -68,6 +68,15 @@ Plugin ABI, documented in `crates/plugin-contract/src/abi` and
   `cargo clippy` and `cargo test` all carry that check; the numbers it
   measured are compared with Rust's by
   `crates/plugin-contract/tests/c_layout.rs`.
+- The authoring surface (the `Plugin` trait, the export and host adapters, and
+  the crate's minimal executor) is behind `plugin-contract`'s `authoring`
+  feature, which is off by default so the runtime sees the primitives and the
+  payload envelope alone. Its tests live in
+  `crates/plugin-contract/tests/authoring.rs` under that feature, and the
+  fixture turns the feature on, so the workspace `cargo test` build unifies it
+  in and runs them. `cargo test -p plugin-contract --features authoring` runs
+  them on their own, and `cargo test -p plugin-contract` runs the feature-off
+  path (the gate checks in `tests/feature_gate.rs`).
 
 ## CI
 
