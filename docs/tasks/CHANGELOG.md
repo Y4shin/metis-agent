@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Service-taking TCP front-end (serve-tcp-service)
+
+`transport::serve_tcp_service` and `serve_tcp_listener_service` now mount a `ConnectRpcService` on TCP, the way `serve_uds_service` already did on the Unix socket, because `connectrpc` keeps the interceptor chain on the service rather than the router. Both transports can therefore enforce the credential policy the last ticket added, with no peer-address sniffing: the tests refuse a credentialless call with the typed missing-credential error, serve a paired token, keep `Pair` exempt, and assert the two front-ends answer identically. `serve_tcp_listener` and `serve_stream` were reduced to delegations over the one private connection body, keeping their signatures and observable behaviour, and the workspace suite is at 144 passed, 0 failed.
+
 ## 2026-10-13, Pairing, per-surface tokens, and client credential storage (pairing-and-tokens)
 
 `DaemonService` gained `Pair`, gated by a preshared key resolved from a literal, an environment reference, a keystore or a secret file, with a group- or world-readable secret file refused rather than warned about. A successful pairing mints one opaque per-surface token, stores only its SHA-256 in the state database, and returns the text once; the daemon authorizes unary and streaming calls through a `connectrpc::Interceptor` that reads `Authorization: Bearer` and answers `metis-auth-error` with missing, invalid or revoked, while the client keeps its token in the platform keychain through `secret-tool` or `security`, or in a 600 file, and reports which answered. Removing a token row and restarting revokes that surface alone. A listener mounts a `ConnectRpcService` rather than a `Router`, so `serve_uds_service` carries the policy on the Unix socket and the TCP equivalent is the new `serve-tcp-service` ticket.

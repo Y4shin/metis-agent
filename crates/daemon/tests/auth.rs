@@ -6,6 +6,12 @@
 //! than by a handler (a recording service proves its handler never ran), and
 //! that the whole credential lifecycle survives a daemon restart.
 //!
+//! Both service-taking front-ends are mounted here. The local one is the Unix
+//! socket; the remote one is TCP, through `serve_tcp_listener_service` (or
+//! `serve_tcp_service`, which binds first), because the interceptor chain lives
+//! on the service and the `Router`-taking TCP front-ends cannot carry it. One
+//! test mounts one service on both and requires the same answer.
+//!
 //! The keychain machinery is held out of the way: `PATH` names one empty
 //! directory, so the client's owner-only file answers and the token round trips
 //! through a path the test owns.
@@ -13,6 +19,7 @@
 #![cfg(unix)]
 
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,7 +29,7 @@ use api_contracts::connect::metis::v1::{
     DAEMON_SERVICE_ECHO_SPEC, DaemonService, DaemonServiceExt,
 };
 use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse, PairRequest, PairResponse};
-use api_contracts::transport::serve_uds_service;
+use api_contracts::transport::{serve_tcp_listener_service, serve_tcp_service, serve_uds_service};
 use client::credential::{self, Backend};
 use client::{Client, ClientError, CredentialCause, Surface};
 use connectrpc::{
@@ -234,16 +241,21 @@ impl Fixture {
         bytes
     }
 
-    /// Serve a recording service with `policy`, so a test can prove whether a
-    /// handler ran.
-    async fn serve_recording(&self, path: &Path, policy: AuthPolicy, served: &Served) {
+    /// The recording service with `policy`, so a test can prove whether a
+    /// handler ran, on either front-end.
+    fn recording_service(&self, policy: AuthPolicy, served: &Served) -> ConnectRpcService<Router> {
         let router = Arc::new(RecordingDaemon {
             served: served.clone(),
         })
         .register(Router::new());
-        let service = ConnectRpcService::new(router)
-            .with_interceptor(AuthInterceptor::new(self.store.clone(), policy));
-        serve(path, service).await;
+        ConnectRpcService::new(router)
+            .with_interceptor(AuthInterceptor::new(self.store.clone(), policy))
+    }
+
+    /// Serve a recording service with `policy`, so a test can prove whether a
+    /// handler ran.
+    async fn serve_recording(&self, path: &Path, policy: AuthPolicy, served: &Served) {
+        serve(path, self.recording_service(policy, served)).await;
     }
 
     /// A client that declares `surface`, which loads that surface's stored
@@ -255,6 +267,62 @@ impl Fixture {
             .with_surface(surface)
             .expect("the stored credential is readable")
     }
+
+    /// Serve the daemon's own service with `policy` over TCP, the way a remote
+    /// listener serves it.
+    async fn serve_daemon_over_tcp(&self, policy: AuthPolicy) -> SocketAddr {
+        serve_over_tcp(service(self.store.clone(), self.secret.clone(), policy)).await
+    }
+
+    /// A client that reaches `addr` over TCP and declares `surface`, which
+    /// loads that surface's stored credential.
+    async fn remote_client(&self, addr: SocketAddr, surface: Surface) -> Client {
+        Client::with_remote_addr(addr)
+            .await
+            .expect("the remote transport builds")
+            .with_surface(surface)
+            .expect("the stored credential is readable")
+    }
+}
+
+/// Serve `service` on a loopback TCP listener the kernel binds, and report the
+/// address it chose.
+///
+/// The listener is bound here rather than by the front-end, so the test never
+/// guesses a port: this is the entry point a caller that must report the bound
+/// address uses, and the one every TCP test below mounts a credential policy
+/// through.
+async fn serve_over_tcp(service: ConnectRpcService<Router>) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
+    tokio::spawn(async move {
+        if let Err(err) = serve_tcp_listener_service(listener, service).await {
+            eprintln!("remote service listener error: {err}");
+        }
+    });
+    addr
+}
+
+/// Reserve a loopback port by binding and releasing it, so a test can require a
+/// bind on that exact address afterwards.
+fn reserve_loopback_port() -> SocketAddr {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve a loopback port");
+    let addr = listener.local_addr().expect("read the reserved address");
+    drop(listener);
+    addr
+}
+
+/// Wait, bounded, for a TCP listener to accept a connection at `addr`.
+async fn wait_for_tcp(addr: SocketAddr) -> bool {
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
 }
 
 /// Serve `service` on `path`, and return once the socket is bound.
@@ -765,5 +833,208 @@ async fn removing_one_row_and_restarting_revokes_only_that_surface() {
     assert_eq!(
         restarted.surfaces().await.expect("the rows read"),
         vec!["ui".to_owned()]
+    );
+}
+
+/// A service carrying `AuthPolicy::TokenRequired`, served over a real TCP
+/// socket, refuses a call with no credential.
+///
+/// This is what the landed TCP front-ends cannot do: they take a bare `Router`,
+/// and the interceptor chain lives on the service, so the policy only travels
+/// through a front-end that takes a service.
+#[tokio::test]
+async fn the_tcp_service_front_end_refuses_a_call_with_no_credential() {
+    let fixture = Fixture::new("tcp-missing").await;
+    let served = Served::default();
+    let service = fixture.recording_service(AuthPolicy::TokenRequired, &served);
+    let addr = serve_over_tcp(service).await;
+
+    // The surface has no stored credential, so the call carries none.
+    let caller = fixture.remote_client(addr, Surface::Cli).await;
+    let error = caller
+        .echo("who am i")
+        .await
+        .expect_err("a credential is required here");
+    assert!(
+        matches!(error, ClientError::CredentialMissing),
+        "expected the missing-credential refusal, got {error}"
+    );
+    assert!(
+        served.paths().is_empty(),
+        "the handler never ran: {served:?}",
+        served = served.paths()
+    );
+}
+
+/// The bind-and-delegate front-end binds the address it is given and mounts the
+/// service there, so a remote listener reaches its policy through one call.
+///
+/// This is the entry point for a caller that cannot read `local_addr()` first:
+/// it names the address, and the front-end binds it. The port is reserved by
+/// binding and releasing it before the call, because this front-end reports no
+/// address; the port the kernel chooses is reported by
+/// `serve_tcp_listener_service`, which `serve_over_tcp` uses.
+#[tokio::test]
+async fn the_bind_and_delegate_front_end_serves_the_mounted_service() {
+    let fixture = Fixture::new("tcp-bind").await;
+    let reserved = reserve_loopback_port();
+    let served = Served::default();
+    let service = fixture.recording_service(AuthPolicy::TokenRequired, &served);
+    tokio::spawn(async move {
+        if let Err(err) = serve_tcp_service(reserved, service).await {
+            eprintln!("remote service listener error: {err}");
+        }
+    });
+    assert!(
+        wait_for_tcp(reserved).await,
+        "the front-end binds the reserved address"
+    );
+
+    // A credential the store knows is served through the socket this front-end
+    // bound, so the service and its policy travelled with the bind.
+    fixture
+        .store
+        .insert_token("cli", &landed_hash(TOKEN_A).hash())
+        .await
+        .expect("the row is written");
+    plant("cli", TOKEN_A);
+
+    let caller = fixture.remote_client(reserved, Surface::Cli).await;
+    assert_eq!(
+        caller
+            .echo("bound and served")
+            .await
+            .expect("the token is this surface's"),
+        "bound and served"
+    );
+    assert_eq!(
+        served.paths(),
+        vec![DAEMON_SERVICE_ECHO_SPEC.procedure.to_owned()],
+        "the mounted handler served the call"
+    );
+}
+
+/// Pairing stays exempt over the TCP front-end, and the token it mints is what
+/// the calls after it carry.
+///
+/// The surface has no credential when the pairing call is made, so a call that
+/// was not exempt would be refused as missing: the exemption is what makes the
+/// first remote call possible, and the minted token is what makes the next one
+/// land.
+#[tokio::test]
+async fn pairing_stays_exempt_over_the_tcp_service_front_end() {
+    let fixture = Fixture::new("tcp-pairing").await;
+    let addr = fixture
+        .serve_daemon_over_tcp(AuthPolicy::TokenRequired)
+        .await;
+
+    let mut caller = fixture.remote_client(addr, Surface::Cli).await;
+    let backend = caller
+        .pair(PRESHARED_KEY)
+        .await
+        .expect("the pairing procedure is exempt from the credential check");
+    let Backend::File(path) = &backend else {
+        panic!("the file backend answers when no keychain tool is on PATH");
+    };
+    assert!(
+        path.file_name().is_some_and(|name| name == "cli.token"),
+        "the credential is filed under the declared surface: {}",
+        path.display()
+    );
+
+    assert_eq!(
+        caller
+            .echo("paired over the remote listener")
+            .await
+            .expect("the token the pairing call minted is served"),
+        "paired over the remote listener"
+    );
+    assert_eq!(
+        fixture.store.surfaces().await.expect("the rows read"),
+        vec!["cli".to_owned()]
+    );
+}
+
+/// One service, mounted on the Unix socket front-end and on the TCP one,
+/// refuses the same call with no credential and serves the same call with a
+/// paired token.
+///
+/// The front-ends are two bind shapes over one connection body, so the remote
+/// one must not be a second, weaker policy path: the service value is the same
+/// one on both, and the answers have to match.
+#[tokio::test]
+async fn a_service_mounted_on_both_front_ends_answers_the_same_way() {
+    let fixture = Fixture::new("parity").await;
+    let served = Served::default();
+    let service = fixture.recording_service(AuthPolicy::TokenRequired, &served);
+
+    let socket = fixture.socket("parity");
+    serve(&socket, service.clone()).await;
+    let reserved = reserve_loopback_port();
+    tokio::spawn(async move {
+        if let Err(err) = serve_tcp_service(reserved, service).await {
+            eprintln!("remote service listener error: {err}");
+        }
+    });
+    assert!(
+        wait_for_tcp(reserved).await,
+        "the TCP front-end binds the reserved address"
+    );
+
+    // The same request with no credential: both refuse as missing, and neither
+    // handler ran.
+    for (front_end, caller) in [
+        ("local", fixture.client(&socket, Surface::Cli).await),
+        (
+            "remote",
+            fixture.remote_client(reserved, Surface::Cli).await,
+        ),
+    ] {
+        let error = caller
+            .echo("who am i")
+            .await
+            .expect_err("a credential is required on both front-ends");
+        assert!(
+            matches!(error, ClientError::CredentialMissing),
+            "the {front_end} front-end: expected the missing-credential refusal, got {error}"
+        );
+    }
+    assert!(
+        served.paths().is_empty(),
+        "no handler ran on either front-end: {served:?}",
+        served = served.paths()
+    );
+
+    // The same request carrying a paired token: both serve it, and both reach
+    // the mounted handler with the method path alone.
+    fixture
+        .store
+        .insert_token("cli", &landed_hash(TOKEN_A).hash())
+        .await
+        .expect("the row is written");
+    plant("cli", TOKEN_A);
+
+    let local = fixture.client(&socket, Surface::Cli).await;
+    let remote = fixture.remote_client(reserved, Surface::Cli).await;
+    let local_reply = local
+        .echo("the same request")
+        .await
+        .expect("the local front-end serves the paired token");
+    let remote_reply = remote
+        .echo("the same request")
+        .await
+        .expect("the remote front-end serves the paired token");
+    assert_eq!(local_reply, "the same request");
+    assert_eq!(
+        local_reply, remote_reply,
+        "the two front-ends answer the same request the same way"
+    );
+    assert_eq!(
+        served.paths(),
+        vec![
+            DAEMON_SERVICE_ECHO_SPEC.procedure.to_owned(),
+            DAEMON_SERVICE_ECHO_SPEC.procedure.to_owned(),
+        ],
+        "the mounted handler served one call per front-end"
     );
 }

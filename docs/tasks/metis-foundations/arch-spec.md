@@ -1465,8 +1465,10 @@ harness and no new test protocol.
   TCP front-ends still take a bare `Router`, so they cannot mount the authorized
   service, and an enabled listener still serves an unauthenticated surface,
   which is why the bind address is required and has no default;
-  `serve-tcp-service` owns the service-taking front-end. The ordering risk is
-  recorded, not hidden.
+  `serve-tcp-service` owns the service-taking front-end, and it has since landed
+  that front-end (`serve_tcp_service` and `serve_tcp_listener_service`), so the
+  unauthenticated TCP surface is closed for a listener that mounts a service. The
+  ordering risk is recorded, not hidden.
 - The plaintext warning the map's constraints require belongs to the daemon's
   startup policy and to `reverse-proxy-mode`; this ticket records the residual
   instead of inventing a policy surface for it.
@@ -1484,6 +1486,10 @@ harness and no new test protocol.
   authorized service `pairing-and-tokens` landed. The required, defaultless bind
   address is the only mitigation until `serve-tcp-service` lands, and that
   ticket exists on `main` (`97e0a91`), which `remote-pairing` is blocked by.
+  Closed by `serve-tcp-service` (merge `4f57d3d`), which landed the
+  service-taking TCP front-end `serve_tcp_service`; the bind address stays
+  required and defaultless, and a listener that mounts a bare `Router` still
+  serves unauthenticated.
 - `serve_tcp` is exported and unexercised: no test drives it and no caller
   exists until the daemon effort wires the listener into `main`. The tested path
   is `serve_tcp_listener`. If the operator wants it covered before the daemon
@@ -2300,15 +2306,18 @@ with 0 failed.
   front-ends (`serve_tcp`, `serve_tcp_listener`) still take a bare `Router`, so an
   authorized service cannot be mounted on TCP yet: a TCP listener wired through
   today's surface would serve unauthenticated. `serve-tcp-service` on `main`
-  (`97e0a91`) owns the service-taking front-end, and `remote-pairing` is blocked
-  by it. `windows-named-pipe` and `reverse-proxy-mode` have the same choice to
-  make and the same front-end shape to copy.
+  (`97e0a91`) owned the service-taking front-end, and `remote-pairing` was blocked
+  by it; that front-end has since landed (`serve_tcp_service` and
+  `serve_tcp_listener_service`, merge `4f57d3d`). `windows-named-pipe` and
+  `reverse-proxy-mode` have the same choice to make and the same front-end shape
+  to copy.
 - `remote-pairing` reuses `Pair`, the auth interceptor, the secret references and
   the client credential store over the remote transport; it adds no second
   credential path. It also owns whether a remote listener runs `TokenRequired`
   from the start, because the factory takes the policy, so the daemon effort or
-  that ticket decides the wiring, and it cannot do so over TCP until
-  `serve-tcp-service` lands.
+  that ticket decides the wiring, and it can now do that over TCP, because the
+  landed `serve-tcp-service` mounts the factory's `ConnectRpcService` through
+  `serve_tcp_service`.
 - `event-stream` inherits authorization through `intercept_streaming`, so its
   `StreamEvents` handler does not call the check itself; the obligation is the
   interceptor's, which is why this ticket removes that residual from
@@ -2345,36 +2354,102 @@ Recorded residuals:
   identity and transport tests and answers `Pair` with `Unimplemented`, and the
   daemon effort replaces it; the daemon binary does not mount either service yet,
   so the listeners exist only in tests and in the daemon effort's future wiring.
-- An authorized service cannot be mounted on the landed TCP front-ends until
-  `serve-tcp-service` lands.
+- An authorized service could not be mounted on the landed TCP front-ends until
+  `serve-tcp-service` landed; it has landed, so `serve_tcp_service` and
+  `serve_tcp_listener_service` mount the interceptor-carrying service.
 
 ---
 
-## Pending ticket: `serve-tcp-service`
+## Landed ticket: `serve-tcp-service`
 
-Blocked by nothing. The TCP twin of the landed `serve_uds_service`, so a remote
-listener can mount the credential policy `pairing-and-tokens` added. Until this
-lands, a TCP listener mounted through the landed surface serves unauthenticated,
-because `serve_tcp` and `serve_tcp_listener` take a bare `Router` and
-`connectrpc` 0.9.1 keeps the interceptor chain on `ConnectRpcService` with no
-conversion back.
+Landed on `task/serve-tcp-service` as the merge commit `4f57d3d`, parents
+`fb36073` (the landing branch, created at `main`'s tip because it did not exist
+before this landing, the convention this spec records) and `c4c2c16` (the working
+branch `ticket/serve-tcp-service`, seven `wip:` commits off `main` at `fb36073`,
+deleted after the merge); the docs commit `5ef1042` carries the ticket note and
+the committed deviation report. The merge was clean and `git diff c4c2c16 HEAD`
+is empty, so the landing tree is byte for byte the tree the verify worker gated.
+The gates were green on `c4c2c16` through `devenv shell --`: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test -p daemon --test auth`
+(14 passed), the workspace `cargo test` (144 passed, 0 failed, 7 ignored),
+`buf lint`, `buf breaking` against `main` with `--against-config buf.yaml`,
+`bash scripts/regenerate-contracts.sh --check`, the ABI header drift check, and
+the ABI harness (`[result] PASS (73 checks)`). The implementer also ran
+one adversarial mutation: making `serve_tcp_listener_service` ignore the
+mounted service failed exactly the four new tests, and the file was restored
+byte for byte.
+
+The TCP twin of the landed `serve_uds_service`: a front-end that serves a mounted
+`ConnectRpcService<Router>` rather than a bare `Router`, so a remote listener can
+mount the credential policy `pairing-and-tokens` landed. Before this ticket a TCP
+listener wired through the landed surface served unauthenticated, because
+`connectrpc` 0.9.1 keeps the interceptor chain on `ConnectRpcService` and offers
+no conversion back to a `Router`.
+
+Three files changed: `crates/api-contracts/src/transport.rs` (+65/-21),
+`crates/daemon/tests/auth.rs` (+285) and `docs/testing.md` (+9/-1).
+
+The surfaces below are the measured ones. The divergences from the plan are
+folded in below: the accept loop wraps the mounted SERVICE in one `Arc` and hands
+each accepted stream a clone of it rather than building an `Arc` for the router
+per stream, because the interceptor chain lives on the service; the landed
+`serve_tcp_listener` and `serve_stream` were reduced to delegations to that loop
+and to the private connection body, which is the shape that satisfies "no second
+accept loop" and "keep their signatures and behaviour" together; the bind seam is
+driven with a reserved loopback port because `serve_tcp_service` returns
+`io::Result<()>` and cannot report a kernel-assigned address; and the four new
+tests are appended to `crates/daemon/tests/auth.rs`, so that binary's
+`#![cfg(unix)]` gate covers them.
 
 ### Exports
 
 - `crates/api-contracts/src/transport.rs`:
   - `pub async fn serve_tcp_listener_service(listener: tokio::net::TcpListener,
-    service: ConnectRpcService<Router>) -> io::Result<()>`: the accept loop,
-    building one `Arc` for the router per accepted stream and delegating each to
-    the private `serve_connection` body that `serve_stream` and
-    `serve_uds_service` already share.
+    service: ConnectRpcService<Router>) -> io::Result<()>`: the one TCP accept
+    loop. It wraps the mounted service in one `Arc`, hands each accepted stream a
+    clone of the service, and delegates the stream to the private
+    `serve_connection` body that `serve_stream` and `serve_uds_service` already
+    share. The service is the value the loop clones, not the router, because the
+    interceptor chain lives on the service; `ConnectRpcService`'s clone is
+    shallow (`Arc<D>`), so the per-connection semantics match the
+    per-connection `from_arc` the loop used before.
   - `pub async fn serve_tcp_service(addr: SocketAddr, service:
-    ConnectRpcService<Router>) -> io::Result<()>`: bind plus delegate, mirroring
-    the landed `serve_tcp` and `serve_tcp_listener` split, so a caller that must
-    report a kernel-assigned port binds first and calls the listener-taking twin.
+    ConnectRpcService<Router>) -> io::Result<()>`: binds
+    `tokio::net::TcpListener` and delegates to `serve_tcp_listener_service`,
+    mirroring the landed `serve_tcp` and `serve_tcp_listener` split. It returns
+    `io::Result<()>` only, so it cannot report a kernel-assigned address: a
+    caller that must report the port binds first, reads `local_addr()`, and calls
+    the listener-taking twin.
+  - Those two are the only public additions; the diff shows exactly two new
+    `pub async fn` lines in the file.
   - The landed `serve_stream`, `serve_uds`, `serve_uds_service`, `serve_tcp` and
-    `serve_tcp_listener` keep their signatures and behaviour.
+    `serve_tcp_listener` keep their signatures, error handling, and observable
+    behaviour, and no existing transport test changed. Two bodies moved:
+    `serve_tcp_listener` is now
+    `serve_tcp_listener_service(listener, ConnectRpcService::from_arc(Arc::new(router)))`,
+    and `serve_stream` is now
+    `serve_connection(stream, ConnectRpcService::from_arc(router.into()))`, the
+    same delegation `serve_uds` already had to `serve_uds_service`. The
+    repository still holds exactly two accept loops, the Unix one in
+    `serve_uds_service` and the TCP one in `serve_tcp_listener_service`, and
+    `client::skeleton::serve_remote` keeps calling
+    `serve_tcp_listener(listener, router())` unchanged.
     `ConnectRpcService<Router>` is exactly what
     `daemon::service::service(store, preshared, policy)` returns.
+- `crates/daemon/tests/auth.rs`: four new tests over a real TCP socket, 10 tests
+  before and 14 after, with the three new helpers `serve_over_tcp`,
+  `reserve_loopback_port` and `wait_for_tcp`:
+  `the_tcp_service_front_end_refuses_a_call_with_no_credential`,
+  `the_bind_and_delegate_front_end_serves_the_mounted_service`,
+  `pairing_stays_exempt_over_the_tcp_service_front_end` and
+  `a_service_mounted_on_both_front_ends_answers_the_same_way`. No new unit test
+  in `crates/api-contracts`: both new functions are covered at the integration
+  seam. The file carries `#![cfg(unix)]`, so these four tests are Unix-gated
+  although TCP is available on every target (recorded below).
+- `docs/testing.md`: the transport bullet extended with the service-taking TCP
+  front-ends, why they exist, and the parity assertion. No acceptance criterion
+  asked for that doc update; it follows how the earlier transport tickets
+  documented their run paths.
 
 ### Existing abstractions to use
 
@@ -2403,46 +2478,82 @@ conversion back.
 1. **Mounting seam.** A `ConnectRpcService` carrying `AuthPolicy::TokenRequired`,
    served over a real TCP listener, refuses a call with no credential with the
    typed missing-credential error and serves a call carrying a paired token, with
-   the `Pair` procedure still exempt.
-2. **Parity seam.** The same service mounted through `serve_uds_service` and
-   through `serve_tcp_service` produces the same refusals and the same served
-   result for the same requests, so the TCP front-end is not a second, weaker
-   policy path.
-3. **Bind seam.** `serve_tcp_service(127.0.0.1:0, service)` serves, and the
+   the `Pair` procedure still exempt. Three tests in
+   `crates/daemon/tests/auth.rs` drive it:
+   `the_tcp_service_front_end_refuses_a_call_with_no_credential` (the refusal
+   reaches the client as `ClientError::CredentialMissing` read from
+   `AUTH_ERROR_HEADER`, so it can only come from the interceptor, and the `Served`
+   recorder proves the handler never ran),
+   `the_bind_and_delegate_front_end_serves_the_mounted_service` (a paired token
+   is served through the address-taking front-end), and
+   `pairing_stays_exempt_over_the_tcp_service_front_end` (the `Pair` procedure is
+   exempt over TCP and the minted token is then served).
+2. **Parity seam.** One cloned service value mounted through `serve_uds_service`
+   and through `serve_tcp_listener_service` produces the same refusals and the
+   same served result for the same requests, so the TCP front-end is not a
+   second, weaker policy path. Asserted by
+   `a_service_mounted_on_both_front_ends_answers_the_same_way`. The assertion
+   covers the unary path only, because the contract still declares no streaming
+   RPC; `event-stream` carries the stream half.
+3. **Bind seam.** `serve_tcp_service` serves through a real bound socket, and the
    listener-taking twin is the entry point a caller uses when it needs
-   `local_addr()` first, which is the reason the landed split exists.
+   `local_addr()` first, which is the reason the landed split exists. The test
+   reserves a loopback port by bind-and-release, passes that address to
+   `serve_tcp_service`, and waits for the listener to accept; port `0` is
+   exercised through `serve_tcp_listener_service`, which the other three tests
+   use. The reserved-port pattern is racy in principle and is recorded below.
 4. **Signature seam.** The landed transport front-ends keep their signatures and
    the existing transport tests are unchanged, so nothing built on the Router
    shape breaks.
 5. **Additivity seam.** No contract, generated tree, ABI layout, or plugin
    change: the drift, lint, breaking and harness gates stay green.
 
-Test types: an integration test in `crates/daemon/tests/` reusing the auth fixture
-for seams 1 and 3, one parity assertion covering both front-ends for seam 2, and
-the existing transport tests plus the workspace gates for seams 4 and 5.
+Test types: four integration tests in `crates/daemon/tests/auth.rs` for seams 1
+to 3, over a real loopback socket and reusing that binary's landed auth fixture,
+temporary store directory, `client::credential` and `Client::pair` (the fixture
+is private to that binary, which is why they were appended there rather than
+placed in a new file); the existing transport tests plus the workspace gates for
+seams 4 and 5.
 
 ### Interface contract
 
-- `remote-pairing`, which is blocked by this ticket, mounts
-  `AuthPolicy::TokenRequired` on its TCP listener through `serve_tcp_service`;
-  that is why it could not be wired before.
+- `remote-pairing`, which this ticket blocked, mounts
+  `AuthPolicy::TokenRequired` on its TCP listener through `serve_tcp_service`; the
+  service-taking front-end it needed now exists.
 - The daemon effort mounts the local service through `serve_uds_service` and the
   remote one through `serve_tcp_service`. `reverse-proxy-mode` extends the same
   module and inherits the service-taking shape for its own front-end.
-- Recorded residual: two parallel front-end families now exist over one shared
-  connection body, one Router-taking and one service-taking, so a future
-  front-end must choose deliberately. Keeping the body private and shared is what
-  stops them diverging in behaviour, and the parity seam is what asserts it
-  today.
+
+### Residual, recorded rather than resolved
+
+- Two parallel front-end families now exist over one shared connection body, one
+  Router-taking and one service-taking, so a future front-end must choose
+  deliberately. Keeping the body private and shared is what stops them diverging
+  in behaviour, and the parity seam is what asserts it today.
+- The bind test's reserved-port pattern is racy in principle on a busy host: the
+  port is chosen by bind-and-release, and another process can take it before
+  `serve_tcp_service` binds.
+- The four TCP tests are Unix-gated, because they live in
+  `crates/daemon/tests/auth.rs`, whose `#![cfg(unix)]` covers the whole binary, so
+  the service-taking TCP front-end has no test coverage on non-Unix targets even
+  though TCP is the first transport every target has. A dedicated test binary is
+  the fix if that coverage is wanted.
+- The parity assertion covers the unary path only, because the contract declares
+  no streaming RPC; `event-stream` owns the stream, both in the contract and at
+  the wire.
+- `serve_tcp_listener`'s body changed from holding the accept loop to delegating
+  to it, so the landed function keeps its signature and its observable behaviour
+  but is no longer byte-identical to what `tcp-listener` landed. Criterion 3 read
+  literally as "not touched" would require a duplicated accept loop instead,
+  which the same criterion forbids.
 
 ---
 
 ## Downstream interface contracts (outline)
 
-The tickets still pending in this effort are `serve-tcp-service`, `event-stream`,
-`reverse-proxy-mode`, `windows-named-pipe` and `remote-pairing`. Their sections
-are added when their chains reach the frontier, apart from `serve-tcp-service`,
-whose pending section is above. The tickets the bullets below also name
+The tickets still pending in this effort are `event-stream`, `reverse-proxy-mode`,
+`windows-named-pipe` and `remote-pairing`. Their sections are added when their
+chains reach the frontier. The tickets the bullets below also name
 (`stream-resume-and-expiry`, `cancellation-and-slow-consumers`) are not pending
 yet, and the commitments below are what the landed tickets must already support,
 including the surfaces `local-identity-and-acl`, `state-store` and
@@ -2475,8 +2586,9 @@ including the surfaces `local-identity-and-acl`, `state-store` and
   kernel-assigned port takes an already bound listener, as `serve_tcp_listener`
   does; a front-end that must serve an interceptor-carrying service takes a
   `ConnectRpcService<Router>` instead, the shape `serve_uds_service` landed, and
-  the landed TCP front-ends are the exception whose service-taking counterpart
-  `serve-tcp-service` owns. A front-end that resolves a non-default authority
+  `serve-tcp-service` landed that TCP counterpart as
+  `serve_tcp_listener_service` and `serve_tcp_service`, so the earlier exception
+  is closed. A front-end that resolves a non-default authority
   names it through a helper beside `local_authority` and `remote_authority`; new
   settings and bind failures join the non-exhaustive `ConfigError`. Because
   `Client` builds its own transport and exposes no injection point, each of
@@ -2493,12 +2605,12 @@ including the surfaces `local-identity-and-acl`, `state-store` and
   `metis-supported-versions` refusal header under `api_contracts::identity`) and
   now the credential vocabulary under `api_contracts::auth`
   (`AUTHORIZATION_HEADER`, `AUTH_ERROR_HEADER`, `CredentialRefusal`, `bearer`,
-  `bearer_token`). It owns no second credential path, and its remaining
-  constraint is that an authorized service cannot be mounted on TCP until
-  `serve-tcp-service` lands, because `service(...)` returns the interceptor's own
-  `ConnectRpcService` and the landed TCP front-ends take a bare `Router`. The
-  token path the landed ticket built is the commitment it kept: `Store::open`,
-  `mint`, `insert_token(surface, &TokenHash)`, `verify_token` and `revoke_token`
+  `bearer_token`). It owns no second credential path. That constraint is closed:
+  the landed `serve-tcp-service` mounts the interceptor-carrying
+  `ConnectRpcService` that `service(...)` returns, through `serve_tcp_service`
+  and `serve_tcp_listener_service`. The token path the landed ticket built is
+  the commitment it kept: `Store::open`, `mint`,
+  `insert_token(surface, &TokenHash)`, `verify_token` and `revoke_token`
   with the surface name as a `&str`, `Verify::UnknownSurface` and
   `Verify::Mismatch` mapped onto `RejectionCause::Revoked` and
   `RejectionCause::Invalid`, `TokenError::Malformed` from `Token::parse` turned
@@ -2613,10 +2725,21 @@ including the surfaces `local-identity-and-acl`, `state-store` and
   TCP front-ends, which take a bare `Router`, cannot carry the policy. That gap
   is the `serve-tcp-service` ticket on `main` (`97e0a91`), which `remote-pairing`
   is blocked by; the deviation report named it before the landing. The tickets
-  still pending in the effort are `serve-tcp-service`, `event-stream`,
-  `reverse-proxy-mode`, `windows-named-pipe` and `remote-pairing`; the earlier
-  notes in this section carry the pending set at their own landing moment, and
-  this note carries the current set.
+  still pending in the effort at that landing moment were `serve-tcp-service`,
+  `event-stream`, `reverse-proxy-mode`, `windows-named-pipe` and `remote-pairing`;
+  the earlier notes in this section carry the pending set at their own landing
+  moment, and this note carries the set then.
+- `serve-tcp-service` landed as the merge commit `4f57d3d` on
+  `task/serve-tcp-service`, parents `fb36073` (the landing branch, created at
+  `main`'s tip) and `c4c2c16` (the working branch, seven `wip:` commits), with the
+  ticket note and the committed deviation report in the docs commit `5ef1042`.
+  It closes the hole the pairing note records: a TCP listener can now mount the
+  interceptor-carrying service through `serve_tcp_listener_service` and
+  `serve_tcp_service`, so `remote-pairing` is unblocked. The tickets still
+  pending in the effort are `event-stream`, `reverse-proxy-mode`,
+  `windows-named-pipe` and `remote-pairing`; the earlier notes in this section
+  carry the pending set at their own landing moment, and this note carries the
+  current set.
 
 ---
 
