@@ -49,9 +49,6 @@ const COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 /// through plugin frames (D7).
 const HOST_PANIC_REQUEST_ID: u64 = 4;
 
-/// Highest per-capability version this host understands (D5, D10).
-const HOST_CAPABILITY_VERSION_MAX: u32 = 1;
-
 /// The capabilities this host expects to discover.
 const EXPECTED_CAPABILITIES: [(&str, CapabilityKind, u32); 4] = [
     ("tool.echo", CapabilityKind::Tool, 1),
@@ -318,20 +315,9 @@ fn main() -> ExitCode {
                 .collect::<Vec<_>>()
         ),
     );
-
-    // Per-capability version gating is the host's half of D5/D10: refuse the
-    // capability, keep using the plugin.
-    let refused: Vec<&str> = descriptors
-        .iter()
-        .filter(|descriptor| descriptor.version > HOST_CAPABILITY_VERSION_MAX)
-        .map(|descriptor| descriptor.name.as_str())
-        .collect();
-    let accepted = descriptors.len() - refused.len();
-    checks.check(
-        accepted == EXPECTED_CAPABILITIES.len() && refused.is_empty(),
-        "capabilities.version_gate",
-        format!("accepted={accepted} refused={refused:?}"),
-    );
+    // Per-capability version gating is deliberately not exercised here: it is
+    // `plugin-compatibility`'s subject, and this fixture advertises no version a
+    // host would have to refuse.
 
     // --- the envelope across the boundary (D4) ----------------------------
 
