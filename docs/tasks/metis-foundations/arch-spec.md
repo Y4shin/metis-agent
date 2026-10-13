@@ -548,16 +548,486 @@ only through the offline stub-backed twin and the clean-tree passes.
 
 ---
 
+## Pending ticket: `local-transport-rpc-skeleton`
+
+Blocked by `contract-pipeline`; not landed yet. It builds the first complete path
+between two processes: the handwritten transport, the client wrapper, a minimal
+service, an integration test, and an example, so the contract and its generated
+stubs are proven over a real local socket instead of a dummy implementation.
+
+### Exports
+
+- `crates/api-contracts/src/transport.rs`, mounted as `pub mod transport;` in
+  `src/lib.rs` (crate docs updated to name it): the one handwritten transport in
+  the repository, the module the skeleton, `client`, and the daemon effort
+  share.
+  - `pub async fn serve_stream<S>(stream: S, router: Router) -> io::Result<()>`:
+    the accept-loop body, generic over any asynchronous bidirectional stream. It
+    wraps the stream with `TokioIo`, builds `ConnectRpcService::new(router)`
+    once, and drives a `hyper_util` auto (HTTP/1.1 or HTTP/2) connection. This
+    is the function `windows-named-pipe`, `tcp-listener`, and
+    `reverse-proxy-mode` reuse, so a later transport adds a listener front-end
+    and no second serve loop. connectrpc 0.9.1 has no `Server::serve_connection`,
+    so this push path is the measured route.
+  - `pub async fn serve_uds(path: &Path, router: Router) -> io::Result<()>`: the
+    Unix front-end. It removes a stale socket file, binds
+    `tokio::net::UnixListener`, accepts in a loop, and hands each stream to
+    `serve_stream`. The socket path is the seam the integration test drives.
+  - `pub fn uds_transport(path: impl Into<PathBuf>) -> connectrpc::client::Http2Connection`:
+    the connector front-end, built with `Http2Connection::lazy_with_connector`
+    over a `tower::service_fn` that opens a `UnixStream`, so a later transport
+    supplies its own connector against the same generated client shape.
+  - `pub fn local_authority() -> http::Uri`: `http://localhost`, the
+    `:authority` the local transport uses (the server does not validate it).
+- `crates/api-contracts/Cargo.toml`: the transport's dependencies at the spike's
+  measured set and features, declared in the root `Cargo.toml` workspace
+  dependencies: `tokio = "1"`,
+  `tower = { version = "0.5", features = ["util"] }`,
+  `hyper = { version = "1", features = ["server", "http1", "http2"] }`, and
+  `hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }`.
+  The `futures` crate is not needed yet: the echo path carries no stream.
+- `crates/client/src/lib.rs`, on the empty crate `api-contracts` is already
+  wired into: the wrapper that hides the transport.
+  - `pub struct Client`, holding the generated `DaemonServiceClient` over an
+    injected transport. Its API names no transport and no generated stub type:
+    a caller constructs it and calls a method.
+  - `pub async fn local() -> Result<Client, ClientError>`, resolving the
+    endpoint, building the local transport, and connecting, plus an explicit
+    endpoint constructor for a caller that already has one.
+  - `pub async fn echo(&self, message: &str) -> Result<String, ClientError>`,
+    performing the echo RPC over the local transport and returning the
+    response's `message`.
+  - `pub fn default_endpoint() -> PathBuf`, the platform default, with the
+    environment override honoured by the wrapper and the example alike. The two
+    literals (the default path and the variable name) are this ticket's to fix,
+    and the daemon effort binds the same default.
+  - `pub enum ClientError`, the wrapper's typed error over the transport and
+    protocol failures. The credential-specific variants arrive with
+    `local-identity-and-acl`.
+  - The skeleton service: the minimal `DaemonService` implementation the test
+    and the example drive. It is test support rather than product API, lives
+    beside them in `crates/client` as one shared implementation, carries
+    `#[allow(refining_impl_trait)]`, echoes the request, and stamps
+    `received_at`. This effort owns `client` and not `daemon`, so the daemon
+    effort replaces this service and keeps the transport module.
+- An integration test under `crates/client/tests/` that starts the service on a
+  temporary socket path, calls the RPC through the wrapper, asserts the echoed
+  response, and removes the socket directory; and an example binary that serves
+  the same skeleton on the resolved endpoint, makes the same call, prints the
+  response, and exits non-zero on failure.
+- CI: no new step. The socket test joins the existing `cargo test` step on Linux,
+  and the existing all-targets gates already compile the example.
+
+### Existing abstractions to use
+
+- `spikes/connectrpc/crates/wire/src/lib.rs`: the measured accept loop
+  (`ConnectRpcService::new` plus a `hyper_util` auto builder),
+  `Http2Connection::lazy_with_connector`, `local_authority()`, and the
+  compile-only Windows named-pipe pair the later transport tickets extend. Port
+  the shape, not the spike paths.
+- `spikes/connectrpc/crates/wire/src/bin/spike.rs`: the serve-then-call driver
+  shape, including waiting for the socket before connecting and printing one
+  result line.
+- The landed contract surfaces: `DaemonService`, `DaemonServiceExt::register`,
+  `DaemonServiceClient`, and `DAEMON_SERVICE_SERVICE_NAME`, already exercised by
+  `crates/api-contracts/tests/contract.rs`.
+- `crates/api-contracts/src/{lib,proto,connect}.rs`: the generated trees stay
+  mounted and untouched, and the transport is a sibling handwritten module.
+- `docs/testing.md`: the run commands and the CI convention; the socket test
+  joins the existing test step rather than a second workflow.
+
+### Do NOT reimplement
+
+- Do not hand-write messages, the client stub, or a register helper, and do not
+  define a second echo request or response type: the generated `metis.v1` types
+  are the wire types.
+- Do not add a second accept loop, a second connector, or a wrapper around
+  `connectrpc::Server`: `serve_stream` and `uds_transport` are the one
+  implementation every later transport extends.
+- Do not put handwritten behaviour in `generated/`, and do not edit generated
+  code to make the transport fit.
+- Do not grow a product daemon surface: the skeleton service exists to prove the
+  path, and the configurable, ACL-configured listener belongs to the daemon
+  effort.
+- Do not pin `tokio`, `hyper`, `hyper-util`, or `tower` exactly: only the pre-1.0
+  protocol pair is pinned exactly.
+- Do not let `client` depend on Tauri or a terminal UI crate, and do not expose
+  the transport, `Http2Connection`, or a generated stub type in the wrapper's
+  public API.
+- Do not mock the transport in the served test or point it at a fixed socket
+  path: the test binds its own temporary directory and removes it.
+
+### Seams
+
+1. **Loop seam.** `serve_stream` serves a router over any asynchronous
+   bidirectional stream: a test drives a `tokio::io::duplex` pair through the
+   loop and the connector shape, which is what proves no Unix-socket assumption
+   leaked into it. The socket test below drives the real path.
+2. **Served path seam.** Against a real socket: the service serves on a
+   temporary path, the wrapper calls echo through it, the response carries the
+   echoed message and a `received_at` stamp, and the test removes the socket
+   directory on both the success and the failure path.
+3. **Endpoint seam.** `default_endpoint()` yields the platform default, and the
+   environment override redirects the connection: the test sets the variable to
+   its temporary socket, asserts the call lands there, and restores the
+   variable.
+4. **Wrapper seam.** A caller that names no transport gets the echo result: the
+   test constructs the client through the local constructor and calls `echo`,
+   with no `uds_transport`, `Http2Connection`, or generated stub type anywhere in
+   the test's path.
+5. **Example seam.** `cargo run -p client --example echo` serves the skeleton on
+   the resolved endpoint, performs the same call, prints the response, and exits
+   non-zero on failure, so the path is runnable by hand as well as asserted.
+
+Test types: one integration test file under `crates/client/tests/` for seams 1,
+2, 3, and 4, run by the existing `cargo test` step on Linux; the example binary
+for seam 5, compiled by the existing all-targets gates.
+
+### Interface contract
+
+- The transport module is the only place that knows how to serve and connect a
+  local stream. `client` calls it, and `windows-named-pipe`, `tcp-listener`,
+  `tls-and-client-trust`, and `reverse-proxy-mode` extend it with new bind and
+  connector front-ends over the same `serve_stream` and no second service
+  implementation.
+- The wrapper is the only UI-independent way to reach the daemon: its API names
+  no transport, a later transport changes no caller's code, and the crate's
+  manifest gains the runtime and transport crates only, never Tauri or a
+  terminal UI crate.
+- The skeleton service is test support. The daemon effort replaces it with the
+  real service, keeps the transport module, and carries the same
+  `#[allow(refining_impl_trait)]` on every `DaemonService` implementation that
+  the landed contract requires.
+- This ticket serves the echo RPC only. The event stream, its snapshot, and the
+  cursor arrive with `event-stream` over this same transport, which is what
+  leaves the walking skeleton's stream half to that ticket.
+- `api-contracts` gains async transport dependencies; `plugin-contract` stays
+  free of async runtimes. The transport compiles on Unix, and the Windows and
+  TCP front-ends arrive with their own tickets as the only per-platform code.
+- The endpoint contract is one platform-derived default plus one environment
+  override, resolved identically by the wrapper and the example. Whatever the
+  ticket fixes for the two literals is what the daemon effort binds, and a later
+  transport reuses the rule (a TCP/TLS endpoint is a different front-end, not a
+  different resolution rule).
+
+---
+
+## Pending ticket: `plugin-authoring-trait`
+
+Blocked by `plugin-abi-core`; not landed yet. It builds the Rust author surface
+on top of the landed primitives: the trait, both adapters, the
+cancelled-completion rule, the lifecycle and event routes, and the
+descriptor/dispatch check, with the fixture rewritten through the trait and
+still driven by the same harness.
+
+### Exports
+
+- `crates/plugin-contract/Cargo.toml`: a `[features]` table with `authoring`, off
+  by default, carrying the feature's optional `serde` (with `derive`) and
+  `serde_json` dependencies. With the feature off the crate keeps the empty
+  dependency list `plugin-abi-core` measured, which is what lets `plugin-runtime`
+  depend on the primitives and the payload envelope alone.
+- `crates/plugin-contract/src/authoring/`, behind `#[cfg(feature = "authoring")]`
+  and re-exported from `src/lib.rs` under the same gate:
+  - `Plugin`: `Default + Send + Sync + 'static` (the bounds the spike measured,
+    because the adapter moves every capability future onto a worker), one async
+    method per capability taking the deserialised request and the per-request
+    context, the capability declaration the adapter lists and dispatches on, an
+    instance lifecycle pair, and a cancellation method. The capability methods
+    are parameterised by the plugin's own serde request and response types, in
+    the shape the fixture's `payload` module already models, so no payload type
+    enters the crate.
+  - `Call`, the per-request context: the ABI request id, the cancellation token
+    (D15) with the `is_cancelled()` poll convenience kept, and the host routes
+    (`progress`, `emit_event`, `log`), so an author never sees a `MetisBuffer`,
+    a payload header, or a callback pointer.
+  - `PluginError`: the frozen status space minus `Ok` and `Pending`, with
+    `InvalidArgument`, `NotFound`, `PermissionDenied`, `Unsupported`, and
+    `Internal` carrying a detail string and `Cancelled` carrying control flow,
+    mapped onto `MetisStatus` inside the adapter.
+  - `pub const fn table::<P: Plugin + Default>() -> MetisPluginTableV1`, the
+    export adapter: the whole plugin side of the translation as one `const fn`
+    that the plugin instantiates into a static. That is the spike's 6-line
+    wiring, and the reason no macro is justified at this size.
+  - The host adapter: `MetisHostApiV1` to an awaitable call, the shape the
+    spike's consumer used, so a host registers its pending record before calling
+    and awaits a completion the callback resolves.
+  - The crate's own minimal executor (`block_on` and `spawn`): one worker thread
+    per pending call with a `park`/`unpark` waker, which is what lets `invoke`
+    return `Pending` with no async runtime in the dependency list.
+- The four behaviours the spike left open, added on top of its shape:
+  - a lifecycle pair, `started` and `stopped`, run by the adapter from
+    `create_instance` and `shutdown`. `started` can fail with a `PluginError`
+    and that status is what `create_instance` returns, so `Default` construction
+    stays infallible while initialisation can still fail loudly.
+  - an `emit_event` route through the author surface: a topic and a payload go
+    out, the D4 envelope and a plugin-owned buffer are built inside the adapter,
+    the host `emit_event` callback is called, and the receiver releases the
+    buffer. The spike emitted zero events, so this is the missing half of the
+    host table's contract.
+  - the descriptor/dispatch consistency check: the declared descriptors and the
+    dispatch arms are separate declarations, and `create_instance` fails with a
+    non-`Ok` status and a log line naming the mismatch when they do not line up,
+    so a missing arm cannot survive to a call-time `NotFound`. The test drives
+    the failure.
+  - the cancelled-completion rule as documented contract: a capability that
+    returns `Cancelled` after a successful cancel suppresses its `complete`
+    callback (the fixture's `suppressed` ledger counts it, and no buffer is
+    allocated to release), while `Cancelled` returned without a successful
+    cancel still completes, so the host is never parked on a completion that
+    will not arrive. D12's other half stays the host's: a completion that races
+    the cancel is dropped and its payload released.
+- `crates/plugin-fixture/src/lib.rs`: the fixture rewritten through the trait,
+  with `plugin-contract`'s `authoring` feature on, keeping the four capability
+  names (`tool.echo`, `tool.pending`, `tool.cancellable`, `tool.panic`), the
+  allocation ledger, and the single exported `metis_*` symbol.
+- `crates/plugin-fixture/src/bin/abi-harness.rs`: the check list changes where
+  the always-pending shape moves an expectation, and the harness keeps loading
+  the real library. The `[ok]`/`[fail]` pattern, the `[result] PASS`/`FAIL`
+  line, the rebuild-first step, and the bounded wait are unchanged.
+- New public constants: any constant the feature adds anywhere in the crate
+  needs a matching `exclude` entry in `cbindgen.toml`, and
+  `bash scripts/regenerate-abi-header.sh --check` must still exit 0. The
+  authoring types are absent from the cbindgen `[export] include` list and the
+  script parses the crate with default features, so the header does not grow.
+- `Cargo.toml` and `devenv.nix`: the fixture's dependency on the `authoring`
+  feature is the only manifest change, and no new tool is needed.
+
+### Existing abstractions to use
+
+- `spikes/plugin-authoring-trait/crates/authoring/`: the measured trait, `Call`,
+  `PluginError`, `table::<P>()`, the host adapter, and the minimal executor.
+  Port the shape into `crate::authoring`; do not depend on the spike crates.
+- `spikes/plugin-authoring-trait/crates/plugin/` and `crates/consumer/`: prior
+  art for the plugin implementation and the consumer that loads and drives it.
+- The landed `crate::abi` and `crate::payload`: the buffers, the statuses,
+  `metis_read_prefix`, the envelope header, the encode helper, and the release
+  rule all exist, and this ticket adds no ABI type, no payload rule, and no
+  layout change.
+- `crates/plugin-fixture/src/lib.rs` and `src/bin/abi-harness.rs`: the fixture
+  being rewritten and the host that must keep loading it for real.
+- `docs/tasks/metis-foundations/tasks/plugin-abi-layout/task.md`: D3, D5, D7,
+  D11, D12, and D15 plus the authoring spike's gap list are the settled input,
+  and the `plugin-abi-core` section above states the crate-level obligations
+  this ticket inherits.
+
+### Do NOT reimplement
+
+- Do not re-litigate D1 to D15 or the spike amendments, including "the adapter
+  always returns `Pending`": no inline fast path in the trait adapter, because
+  D11's inline shape stays the ABI's direct-implementer path.
+- Do not add a macro: the spike measured about 90 translation lines, so a macro
+  is not justified at this size.
+- Do not add an async runtime: no `tokio` and no executor crate in
+  `plugin-contract`. The crate drives the futures with its own minimal executor,
+  and the SDK owns the real one.
+- Do not move payload types, serde types, or the fixture's request and response
+  shapes into `crate::abi`, and do not let the trait module import an ABI type.
+- Do not make construction fallible or configuration-carrying: `Default` stays
+  the construction shape, and `started` is where initialisation reports failure.
+- Do not let the author surface carry a raw pointer, a `MetisBuffer`, a status
+  enum, or a callback pointer: those belong to the adapter.
+- Do not remove the harness's rebuild-first step, its real library load, or its
+  bounded wait, and do not keep a second, ABI-direct implementation of the
+  fixture alongside the trait one.
+
+### Seams
+
+1. **Always-pending seam.** Through the real library: every capability of the
+   rewritten fixture returns `Pending` from `invoke` and delivers its result
+   through the host `complete` callback, including the capability that used to
+   finish inline, and the instance keeps serving the next call.
+2. **Cancellation seam.** A call parked on I/O observes cancellation promptly:
+   the test starts a capability that waits on the cancellation token, calls the
+   table's `cancel`, and asserts the call ends promptly. `tool.cancellable`
+   suppresses its completion and the ledger's `suppressed` counter moves, while
+   the harness drops the late completion of the capability that ignores
+   cancellation (`tool.pending`) and still releases its buffer.
+3. **Lifecycle seam.** `started` runs from `create_instance` and `stopped` runs
+   from `shutdown`, which joins every worker before returning, so no callback
+   arrives after it (D12); a plugin whose `started` fails yields a failing
+   `create_instance` and no instance.
+4. **Event seam.** A plugin-originated event reaches the host: a capability and
+   the lifecycle hook emit a topic and a payload through the author surface, the
+   harness's `emit_event` callback records the event, and the harness releases
+   the buffer, so the ownership ledger still balances.
+5. **Descriptor seam.** `create_instance` checks the declared descriptors against
+   the dispatch arms and fails when they disagree, so a missing arm is a loud
+   creation failure and not a call-time `NotFound`; a unit test under the feature
+   drives a deliberately inconsistent plugin through the exported adapter.
+6. **Cancelled-completion seam.** The documented rule holds: `Cancelled` after a
+   successful cancel completes nothing, `Cancelled` without a successful cancel
+   still completes, and both leave the buffer ledger balanced.
+7. **Feature seam.** With the feature off the crate's dependency list stays empty
+   and the runtime path is unchanged; the trait module names no ABI type, and the
+   header drift check still exits 0 with the authoring module in the tree.
+
+Test types: the harness binary for seams 1, 2, 3, 4, and 6; unit tests under the
+feature for seams 5 and 7; the `plugin-abi-core` symbol, layout, envelope, and
+ownership checks keep running unchanged.
+
+### Interface contract
+
+- `plugin-runtime` (metis-plugins) consumes `plugin-contract` with the feature
+  off and never depends on the author surface. `metis-plugin-sdk` re-exports the
+  trait, `Call`, `PluginError`, `table`, the host adapter, and the minimal
+  executor, and owns the real executor.
+- The author-facing contract in one place: `Default` construction,
+  `started`/`stopped` lifecycle, a cancellation token on the per-request context
+  for prompt cancellation, always-pending completion through the host callback,
+  `Cancelled` as control flow only after a successful cancel, capability
+  descriptors checked against dispatch arms at creation, and plugin-originated
+  events routed through the same surface.
+- The ABI is untouched: no new table entry, no layout change, no new ABI type,
+  no new payload rule, the header regenerates with no diff, and any new public
+  constant carries an `exclude` entry.
+- The fixture's rewrite moves two harness expectations off the `invoke` return:
+  the inline capability completes as `Ok`, and the panicking capability
+  completes as `Internal`, because the worker catches the panic after `invoke`
+  has already returned `Pending`. A direct ABI implementer keeps both on the
+  `invoke` return, the inline `Ok` with a payload and `Internal` from the
+  exported adapter.
+- Consequence recorded rather than hidden: once the fixture implements the trait
+  only, nothing in the tree exercises the ABI's inline `invoke` result. The
+  inline shape stays part of the ABI for direct implementers, and a later
+  fixture or host that needs it covered has to add an implementer of its own.
+
+---
+
+## Pending ticket: `plugin-compatibility`
+
+Blocked by `plugin-abi-core`; not landed yet. Version tolerance on top of the
+unchanged layout: prefix-only reading, per-capability version gating, unknown
+payload fields, and a typed error for a differing major.
+
+### Exports
+
+- `crates/plugin-contract/src/abi`, next to `metis_read_prefix`: the size-based
+  presence predicate. It answers whether the table's reported `size` covers a
+  given entry (`size >= offset + size_of::<*const c_void>()`, written through
+  `offset_of!` and `size_of::<usize>()` so it holds per target), and presence is
+  decided by it and never by a null-pointer test (D8). It serves both the plugin
+  table and the host table, and it adds no field and no table entry.
+- `crates/plugin-contract/src/abi`: the typed error the version checks return,
+  with a variant for a table whose `abi_major` is not this build's and a variant
+  for a table whose `size` does not cover the prefix or the entry being read.
+  It is Rust-only, absent from the generated header, and `plugin-runtime`
+  inherits it instead of inventing its own. The symbol half of the major check
+  (a plugin exports `metis_plugin_entry_v<major>`, so a v2 plugin cannot resolve
+  through the v1 name) is the same fact at resolution time, and the probe for it
+  stays in the harness until `plugin-runtime` owns loading.
+- The per-capability gate, demonstrated in the fixture and the harness: a host
+  refuses a capability whose descriptor version it does not support with
+  `Unsupported` for that capability alone. The plugin still loads, still lists
+  its other capabilities, and still serves them. The fixture gains one
+  capability descriptor with a version the harness refuses, which moves the
+  harness's expected capability list and its check count.
+- `crates/plugin-fixture/src/payload.rs`: the unknown-field rule stays intact.
+  No payload type sets `serde(deny_unknown_fields)`, and a new field is optional
+  with a default, so a body carrying a field this build does not know decodes
+  and the call succeeds.
+- `crates/plugin-fixture/src/bin/abi-harness.rs`: new checks for the seams
+  below. The fixture library is not replaced, the harness keeps its
+  rebuild-first step and its real library load, and no second copy of the ABI
+  appears anywhere.
+- No layout change and no header change: `MetisPluginTableV1` keeps its seven
+  entries and its 72 bytes on 64-bit, the Rust const assertions and the C
+  translation unit are untouched, and `bash scripts/regenerate-abi-header.sh
+  --check` still exits 0. Any public constant the ticket adds needs an `exclude`
+  entry.
+
+### Existing abstractions to use
+
+- `metis_read_prefix` and `MetisTablePrefix` as landed: the prefix read is the
+  entry point, and the predicate is the other half of the same idea, a consumer
+  that reads only what the reported `size` promises.
+- `crates/plugin-fixture/src/lib.rs`: the fixture whose shorter table and gated
+  capability are exercised, with the capability list it advertises.
+- `crates/plugin-fixture/src/bin/abi-harness.rs`: the check pattern
+  (`Checks::new()`, one `[ok]`/`[fail]` line per check, a `[result]` line, a
+  non-zero exit on failure), the timeout-bounded wait for a completion, and the
+  rebuild-the-library-first step are the prior art for the new checks.
+- `spikes/plugin-abi-mechanics/`: prior art for the prefix rules of D8 (size
+  first, append-only entries, presence by size) on both tables.
+- `crate::payload`: the envelope already owns the header rules, so unknown-field
+  tolerance is a property of the payload types and not a new envelope rule.
+
+### Do NOT reimplement
+
+- Do not append a field or an entry to `MetisPluginTableV1` or
+  `MetisHostApiV1`: this ticket is additive in code, not in layout, and the Rust
+  const assertions and the C static asserts stay exactly as they are.
+- Do not decide presence from a null pointer, and do not read a field past the
+  `size` the plugin reported.
+- Do not add a second capability descriptor type or a second payload shape: the
+  fixture's payload module stays the one place the payload shapes live, and the
+  serialiser stays outside `crate::abi`.
+- Do not re-test the envelope's failure modes or re-state its header rules;
+  `crate::payload` owns them.
+- Do not add a loader to `plugin-contract`: the symbol probe stays harness-owned
+  until `plugin-runtime` owns library loading.
+- Do not weaken the harness: the rebuild-first step, the real library load, the
+  bounded wait, and the `[ok]`/`[fail]` plus `[result]` contract stay.
+- Do not add a gating check the fixture cannot make fail: the landed effort
+  removed exactly such a check because the fixture advertised no version a host
+  would refuse, and this ticket is where that gap is closed.
+
+### Seams
+
+1. **Prefix seam.** A table whose reported `size` covers only the prefix this
+   build knows is read through `metis_read_prefix` and the predicate: the entries
+   inside the reported size are read with their real values, the entry outside it
+   is refused with the typed error, and no field is reached past the size. Driven
+   with a shortened table whose uncovered tail is a canary that would be
+   observable if it were touched.
+2. **Major seam.** A differing ABI major fails before any table is interpreted:
+   the `metis_plugin_entry_v2` lookup fails, the harness reports the typed error
+   rather than a raw loader error, and nothing in the table is read.
+3. **Gating seam.** One capability whose descriptor version the host does not
+   support is refused with `Unsupported` for that capability alone, while
+   `list_capabilities` still lists the rest and the other capabilities still
+   serve, asserted against the real fixture through the harness.
+4. **Unknown-field seam.** A request body carrying a field this build does not
+   know decodes and the call succeeds, asserted across the boundary from the
+   harness and on the payload types in a unit test.
+5. **Additivity seam.** The layout checks are unchanged and still pass: the Rust
+   const assertions in `src/abi/layout.rs`, the C translation unit compiled on
+   every build, and the comparison in `crates/plugin-contract/tests/c_layout.rs`.
+   The header regenerates with no diff, and the entry-symbol check still sees
+   exactly one `metis_*` symbol in the fixture.
+
+Test types: the harness binary for seams 1, 2, 3, and 4; unit tests in
+`plugin-contract` for the predicate, the typed error, and the payload tolerance;
+the existing layout, C, and header checks for seam 5.
+
+### Interface contract
+
+- The compatibility surface is exactly this sequence: read the prefix with
+  `metis_read_prefix`, decide presence with the size predicate, refuse a
+  differing major with the typed error before interpreting anything, and gate
+  each capability by its own descriptor version. Nothing else moves.
+- `plugin-runtime` (metis-plugins) applies the same sequence at load time and
+  per capability. The fixture and the harness here are the measured
+  demonstration; the loader itself stays in that effort.
+- The layout stays append-only and unchanged. The predicate is what a later
+  ticket uses when it appends the first new table entry, and at that point the
+  assertions in `src/abi/layout.rs` and `c/layout_static_asserts.c` are extended
+  with the new entry.
+- Descriptor gating is per capability and never fails the whole plugin: a
+  refused capability is `Unsupported` for that name, the plugin keeps its other
+  capabilities, and unknown payload fields stay ignorable (D5, D10).
+- The fixture and the harness are shared with `plugin-authoring-trait`, which
+  rewrites the fixture through the trait. The two chains land in one order and
+  the later one rebases onto the earlier one.
+
+---
+
 ## Downstream interface contracts (outline)
 
-These tickets are not pending yet. Their sections are added when they reach the
-frontier; the commitments below are what the landed tickets must already
-support.
+These tickets are not pending yet; the three sections above are. Their sections
+are added when they reach the frontier, and the commitments below are what the
+landed and pending tickets must already support.
 
-- `local-transport-rpc-skeleton`: `crates/api-contracts` gains a handwritten
-  `transport` module (Unix socket serve loop plus connector) shared by the
-  skeleton, `client`, and the daemon effort; the skeleton service implements
-  `DaemonService` with the `refining_impl_trait` allow.
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
   request, the snapshot as the stream's first message, heartbeats as ordinary
@@ -572,15 +1042,6 @@ support.
 - `local-identity-and-acl`, `pairing-and-tokens`, `remote-pairing`: add request
   metadata and RPCs under `metis.v1`; credentials travel as
   `Authorization` metadata on every call, including the stream.
-- `plugin-authoring-trait`: the `authoring` feature in `plugin-contract`, with
-  the settled cancellation token and always-pending adapter, plus the
-  descriptor/dispatch consistency check and the lifecycle and `emit_event` gaps
-  the authoring spike recorded. It extends the crate `plugin-abi-core` landed,
-  so its new public items must respect the cbindgen `exclude` rule.
-- `plugin-compatibility`: prefix reading and per-capability version gating on
-  top of the unchanged layout. It adds the `size`-based presence predicate
-  in-crate, since `plugin-contract` exports `metis_read_prefix` but not the
-  predicate.
 
 ## Architecture notes
 
@@ -611,3 +1072,10 @@ support.
   seam describes. The harness is the owner of the host-callback panic probe and
   of the library rebuild, so no consumer of the fixture can load a stale or
   unwrapped library.
+- The three pending tickets are all level 1, each blocked only by a landed
+  ticket, and they edit files the others read:
+  `local-transport-rpc-skeleton` adds workspace dependencies and fills
+  `crates/client`, while `plugin-authoring-trait` and `plugin-compatibility`
+  both edit `crates/plugin-fixture/src/lib.rs`, its harness, and the fixture
+  manifest. They cannot run in parallel on the shared cwd, so the two plugin
+  chains land in one order and the later one rebases onto the earlier one.
