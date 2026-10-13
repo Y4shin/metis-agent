@@ -165,11 +165,12 @@ pub async fn serve_tcp(addr: SocketAddr, router: Router) -> io::Result<()> {
 
 /// Serve a Connect router over an already bound TCP listener.
 ///
-/// This is the same accept loop [`serve_tcp_service`] runs, not a second one: it
-/// builds the service once and hands each accepted stream the same one. The
-/// split exists for a caller that must report the address the operating system
-/// assigned to a port of `0`: it binds first, reads `local_addr`, and hands the
-/// listener on. `client::skeleton::serve_remote` is that caller.
+/// The router is built into one service, and [`serve_tcp_listener_service`]
+/// runs the accept loop, so the router-taking and the service-taking TCP
+/// front-ends share one loop rather than two. The split exists for a caller
+/// that must report the address the operating system assigned to a port of `0`:
+/// it binds first, reads `local_addr`, and hands the listener on.
+/// `client::skeleton::serve_remote` is that caller.
 ///
 /// # Errors
 ///
@@ -200,11 +201,12 @@ pub async fn serve_tcp_service(
 
 /// Serve an already built Connect service over an already bound TCP listener.
 ///
-/// The accept loop is the same one [`serve_tcp_listener`] runs, and each
-/// accepted stream reaches the same private connection body [`serve_stream`]
-/// runs. A caller reaches this instead of `serve_tcp_listener` when it mounted
-/// an interceptor chain, which lives on the service rather than on the router:
-/// a remote listener that enforces a credential policy mounts a service.
+/// This is the one TCP accept loop: [`serve_tcp`] and [`serve_tcp_listener`]
+/// reach it rather than running a loop of their own, and each accepted stream
+/// reaches the private connection body [`serve_stream`] also uses. A caller
+/// reaches this instead of `serve_tcp_listener` when it mounted an interceptor
+/// chain, which lives on the service rather than on the router: a remote
+/// listener that enforces a credential policy mounts a service.
 ///
 /// # Errors
 ///

@@ -193,7 +193,14 @@ the store:
   refused as missing, invalid, or revoked (each distinguishable), a valid
   credential is served, every paired surface reaches the same surface, and
   removing one row and restarting revokes that surface alone. A recording
-  service proves a refused call never reached its handler.
+  service proves a refused call never reached its handler. The same service is
+  mounted on the service-taking TCP front-ends (`serve_tcp_service`, and
+  `serve_tcp_listener_service` for a caller that must report the bound address)
+  and answers over a real TCP socket: the service-taking twins exist because the
+  interceptor chain lives on the service, so the `Router`-taking `serve_tcp` and
+  `serve_tcp_listener` cannot carry a credential policy. The parity assertion
+  mounts one service on the Unix and the TCP front-end and requires the same
+  refusal and the same served answer from both.
 - `cargo test -p daemon` also covers the unit halves: the digest contract
   between the token `Pair` returns and the row the store wrote, the refusal
   headers, and the policy's exemption of the pairing procedure.
