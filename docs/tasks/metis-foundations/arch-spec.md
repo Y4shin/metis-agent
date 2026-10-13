@@ -1005,16 +1005,39 @@ ownership checks keep running unchanged.
 
 ---
 
-## Pending ticket: `plugin-compatibility`
+## Landed ticket: `plugin-compatibility`
 
-Blocked by `plugin-abi-core` and `plugin-contract-v1`, both landed; not landed
-itself. Version tolerance on top of the revised v1 layout: additive change
-inside the major, per-capability version gating, unknown payload fields, and the
-refusal of a plugin built against the retired pre-release table, whose typed
-error landed with `plugin-contract-v1`.
+Landed on `task/plugin-compatibility` as the merge commit `c9227a4`, with the
+landing record and this section's update in `c1d95d2`. It was blocked by
+`plugin-abi-core` and `plugin-contract-v1`, both landed. Version tolerance on
+top of the revised v1 layout: additive change inside the major, per-capability
+version gating, unknown payload fields, and the refusal of a plugin built
+against the retired pre-release table, whose typed error landed with
+`plugin-contract-v1`.
+
+The surfaces below are the measured ones. The implementation was verified on the
+working branch `ticket/plugin-compatibility` at HEAD `602b348`, nine `wip:`
+commits off `main`, where `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, the workspace `cargo test`,
+`bash scripts/regenerate-abi-header.sh --check`, and
+`cargo run -p plugin-fixture --bin abi-harness` (`[result] PASS (73 checks)`)
+were all green. The divergences from the plan are folded in below: the minor
+rule is one-directional in code, the fixture advertises eight capabilities, the
+major seam is driven by a second compiled library, the faulting-page probes are
+Linux only, and the gating policy lives in the harness as well as in the
+runtime.
 
 ### Exports
 
+- `crates/plugin-contract/src/abi/version.rs`: `metis_read_table` now compares
+  the minor additively, `if prefix.abi_minor < METIS_ABI_MINOR`, so a newer
+  minor is accepted and a lower one is still refused. No signature changed and
+  no variant was added; `MinorMismatch` keeps its `known` and `found` fields and
+  its doc states the one-directional rule. The check order is now documented in
+  that file as part of the contract: major first, then minor, then the first
+  entry the reported `size` does not cover. `plugin-runtime` inherits the
+  relaxation through the shared `MetisAbiError` with no code change; only its
+  `CallError::Version` doc text moved.
 - The size-based presence predicate landed by `plugin-contract-v1`, next to
   `metis_read_prefix`, is consumed here rather than exported. It answers whether
   the table's reported `size` covers a given entry
@@ -1029,7 +1052,7 @@ error landed with `plugin-contract-v1`.
   `crates/plugin-contract/src/abi/version.rs`, with `Unreadable`,
   `MajorMismatch { expected, found }`, `MinorMismatch { known, found }` and
   `EntryMissing { entry }`, returned by the landed `metis_read_table`. The
-  variant this ticket relaxes to additive tolerance is `MinorMismatch`, and the
+  variant this ticket relaxed to additive tolerance is `MinorMismatch`, and the
   size cases it exercises are `EntryMissing` and `Unreadable`. It is Rust-only,
   absent from the generated header, and `plugin-runtime` inherits it instead of
   inventing its own (`CallError::Version(MetisAbiError)`). The symbol half of the
@@ -1040,23 +1063,60 @@ error landed with `plugin-contract-v1`.
 - The per-capability gate, demonstrated in the fixture and the harness: a host
   refuses a capability whose descriptor version it does not support with
   `Unsupported` for that capability alone. The plugin still loads, still lists
-  its other capabilities, and still serves them. The fixture gains one
-  capability descriptor with a version the harness refuses, which moves the
-  harness's expected capability list and its check count.
+  its other capabilities, and still serves them. The fixture declares eight
+  capabilities, not the seven `plugin-contract-v1` landed: it gained `tool.newer`
+  at descriptor version 2, plus the public constants `NEWER_CAPABILITY` and
+  `NEWER_CAPABILITY_VERSION` and the private `CAPABILITY_VERSION`. Its public
+  `CAPABILITIES` array is therefore `[&str; 8]`, and a consumer reads that array
+  rather than its length. The cbindgen rule is satisfied trivially here: the
+  constants live in `plugin-fixture`, which cbindgen never processes, and the
+  generated header contains no `NEWER_` symbol. The harness applies its own gate
+  policy, `HOST_CAPABILITY_VERSION = 1` in `capability_gate`, and
+  `crates/plugin-runtime/tests/registry.rs` moved its "every descriptor is
+  version 1" assertion to expect the gated version for that one name.
 - `crates/plugin-fixture/src/payload.rs`: the unknown-field rule stays intact.
   No payload type sets `serde(deny_unknown_fields)`, and a new field is optional
   with a default, so a body carrying a field this build does not know decodes
-  and the call succeeds.
+  and the call succeeds. The three tests that assert it live in that module:
+  `a_request_with_a_field_this_build_does_not_know_decodes`,
+  `a_request_without_a_field_that_has_a_default_decodes`, and
+  `a_response_with_a_field_this_build_does_not_know_decodes`.
 - `crates/plugin-fixture/src/bin/abi-harness.rs`: new checks for the seams
-  below. The fixture library is not replaced, the harness keeps its
-  rebuild-first step and its real library load, and no second copy of the ABI
-  appears anywhere.
+  below, and the harness baseline moved from 62 to 73 checks. The old
+  `symbol.wrong_major_absent` check is gone, because it looked up a symbol the
+  fixture never exported and could not fail; four checks replaced it
+  (`symbol.other_major_library_present`, `symbol.other_major_library_loaded`,
+  `symbol.other_major_exactly_one_symbol`, `symbol.other_major_typed_error`),
+  and they load a real other-major library, report
+  `MajorMismatch { expected: 1, found: 2 }`, and see exactly one exported
+  symbol, `metis_plugin_entry_v2`. `HostState::invoke` was split into a typed
+  body encoder plus `invoke_body`, which takes raw bytes, so the unknown-field
+  check can send a body this build has no type for. The fixture library is not
+  replaced, the harness keeps its rebuild-first step and its real library load,
+  and no second copy of the ABI appears anywhere.
+- `crates/plugin-fixture/c/other-major-plugin.c` and
+  `scripts/build-c-plugin.sh`: a 19-line C library whose only export is
+  `metis_plugin_entry_v2`, built into `target/c-plugin/libother-major.so` with
+  gcc only, because the header is already through both compilers. The harness's
+  rebuild-first step builds it, so no CI step was added. The file is beyond the
+  plan's export list: the major seam needs a case that can fail, and this is the
+  real other-major library the four `symbol.other_major_*` checks drive.
 - This ticket adds no layout: the revised table `plugin-contract-v1` landed is
   the one it reads, so `MetisPluginTableV1` keeps its eight entries and its 80
-  bytes on 64-bit, and the Rust const assertions and the C translation unit stay
-  as they are. A new capability descriptor field is a payload change, not a table
-  change. Any public constant it adds needs a cbindgen `exclude` entry, or it
-  lands in the header.
+  bytes on 64-bit, and the Rust const assertions and the C translation unit
+  changed by comment only, correcting text that still described the exact-minor
+  rule. The harness still reports `table.size_matches_layout: size=80` and
+  `symbol.exactly_one_metis_symbol`. A new capability descriptor field is a
+  payload change, not a table change, and the cbindgen rule did not bite: the
+  two new public constants are in `plugin-fixture`, which cbindgen never
+  processes.
+- `crates/plugin-contract/include/metis_plugin_abi.h`: regenerated, and it
+  changed by doc comments only, in the `METIS_ABI_MINOR` block and the
+  `abi_minor` field doc, because the Rust docs were rewritten for the relaxed
+  rule. `bash scripts/regenerate-abi-header.sh --check` exits 0. Any branch
+  carrying the pre-relaxation header must regenerate it.
+- `docs/testing.md` documents the compatibility checks in the harness and the
+  second C library. The plan did not ask for that doc update.
 
 ### Existing abstractions to use
 
@@ -1078,7 +1138,8 @@ error landed with `plugin-contract-v1`.
 
 - Do not append a field or an entry to `MetisPluginTableV1` or
   `MetisHostApiV1`: this ticket is additive in code, not in layout, and the Rust
-  const assertions and the C static asserts stay exactly as they are.
+  const assertions and the C static asserts keep their numbers, with comment
+  corrections only.
 - Do not decide presence from a null pointer, and do not read a field past the
   `size` the plugin reported.
 - Do not add a second capability descriptor type or a second payload shape: the
@@ -1092,43 +1153,76 @@ error landed with `plugin-contract-v1`.
   bounded wait, and the `[ok]`/`[fail]` plus `[result]` contract stay.
 - Do not add a gating check the fixture cannot make fail: the landed effort
   removed exactly such a check because the fixture advertised no version a host
-  would refuse, and this ticket is where that gap is closed.
+  would refuse. This ticket closed that gap with `tool.newer` and the harness's
+  own gate policy, and the same rule is why `symbol.wrong_major_absent` was
+  replaced by four checks against a real other-major library.
 
 ### Seams
 
 1. **Prefix seam.** A table whose reported `size` covers only the prefix this
    build knows is read through `metis_read_prefix` and the predicate: the entries
    inside the reported size are read with their real values, the entry outside it
-   is refused with the typed error, and no field is reached past the size. Driven
-   with a shortened table whose uncovered tail is a canary that would be
-   observable if it were touched.
+   is refused with the typed error, and no field is reached past the size. Two
+   mechanisms assert it. In `plugin-contract`'s tests, `ExtendedTableV1` carries
+   an appended entry and a canary counter, and
+   `abi.rs::an_appended_entry_and_a_newer_minor_still_interoperate` drives it, so
+   the canary check runs on every target. In the harness,
+   `table.appended_entry_not_read`, `table.uncovered_entry_not_read`, and
+   `table.stale_minor_entries_not_read` place the table in an `mmap`ed page whose
+   uncovered tail is `PROT_NONE` through a local `mprotect` binding, so a read
+   past the reported size faults instead of returning a canary value. Those three
+   checks are Linux only; on another target they print a note and skip rather
+   than fail. The harness reports the shortened read as
+   `table.appended_entry_not_read: the reader took this build's 80 bytes of the
+   88-byte table it was shown and read no further`.
 2. **Major seam.** A differing ABI major fails before any table is interpreted:
-   the `metis_plugin_entry_v2` lookup fails, the harness reports the typed error
-   rather than a raw loader error, and nothing in the table is read.
+   the `metis_plugin_entry_v2` lookup fails against a real other-major library,
+   the harness reports `MajorMismatch { expected: 1, found: 2 }` rather than a
+   raw loader error, and nothing in the table is read. The retired pre-release
+   v1 table's minor-0 refusal is the same gate in the other direction: additive
+   tolerance leaves minor 0 refused, and the harness and
+   `abi.rs::a_retired_minor_is_refused_before_any_table_entry_is_read` assert it
+   by patching the live table's prefix rather than by compiling a second reject
+   plugin. The symbol half holds by construction, because the probe goes through
+   `metis_plugin_entry_v1`.
 3. **Gating seam.** One capability whose descriptor version the host does not
    support is refused with `Unsupported` for that capability alone, while
    `list_capabilities` still lists the rest and the other capabilities still
-   serve, asserted against the real fixture through the harness.
+   serve, asserted against the real fixture through the harness checks
+   `gate.declared_versions`, `gate.version_refused_for_one_capability`,
+   `gate.refusal_is_the_hosts`, and `gate.rest_of_plugin_still_serves` (eight
+   capabilities, only `tool.newer` refused). The gate policy the harness applies
+   is its own constant; `plugin-runtime::Registry::gate` keeps its unit test
+   `the_version_gate_is_per_capability`, which drives synthetic names rather
+   than the real fixture.
 4. **Unknown-field seam.** A request body carrying a field this build does not
-   know decodes and the call succeeds, asserted across the boundary from the
-   harness and on the payload types in a unit test.
-5. **Additivity seam.** The layout checks are unchanged and still pass: the Rust
+   know decodes and the call succeeds, asserted across the boundary by the
+   harness check `payload.unknown_field_tolerated` and on the payload types by
+   the three unit tests the exports list names.
+5. **Additivity seam.** The layout numbers are unchanged and still pass: the Rust
    const assertions in `src/abi/layout.rs`, the C translation unit compiled on
    every build, and the comparison in `crates/plugin-contract/tests/c_layout.rs`.
-   The header regenerates with no diff, and the entry-symbol check still sees
-   exactly one `metis_*` symbol in the fixture.
+   `src/abi/mod.rs` and `c/layout_static_asserts.c` changed by comment only. The
+   header changed by doc comments only and regenerates with no drift, and the
+   entry-symbol check still sees exactly one `metis_*` symbol in the fixture.
 
-Test types: the harness binary for seams 1, 2, 3, and 4; unit tests in
-`plugin-contract` for the predicate, the typed error, and the payload tolerance;
-the existing layout, C, and header checks for seam 5.
+Test types: the harness binary for seams 1, 2, 3, and 4 (73 checks, and every
+check runs on Linux); unit tests in `plugin-contract` for the predicate, the
+typed error, and the payload tolerance, including `abi.rs` for the appended
+entry, newer minor, other major, and retired minor cases; the existing layout,
+C, and header checks for seam 5.
 
 ### Interface contract
 
 - The compatibility surface is exactly this sequence: read the prefix with
   `metis_read_prefix`, decide presence with the size predicate, refuse a
-  differing major with the typed error before interpreting anything, relax the
-  exact-minor refusal `metis_read_table` shipped to additive tolerance, and gate
-  each capability by its own descriptor version. Nothing else moves.
+  differing major with the typed error before interpreting anything, compare the
+  minor additively (`prefix.abi_minor < METIS_ABI_MINOR`, so a lower minor is
+  refused and a newer one is accepted), and gate each capability by its own
+  descriptor version. Nothing else moved. The exact-minor refusal
+  `metis_read_table` shipped is relaxed in that one comparison, in
+  `crates/plugin-contract/src/abi/version.rs`, with no signature change and no
+  new variant.
 - `plugin-runtime` (metis-plugins) applies the same sequence at load time and
   per capability. The fixture and the harness here are the measured
   demonstration; the loader itself stays in that effort.
@@ -1139,20 +1233,40 @@ the existing layout, C, and header checks for seam 5.
 - Descriptor gating is per capability and never fails the whole plugin: a
   refused capability is `Unsupported` for that name, the plugin keeps its other
   capabilities, and unknown payload fields stay ignorable (D5, D10).
-- The fixture and the harness are the ones `plugin-contract-v1` landed: seven
-  capabilities through the routed trait, the C section, and the `[ok]`/`[fail]`
-  plus `[result]` check printing. This ticket extends them in place. The earlier
-  ordering note against `plugin-authoring-trait` is spent: both of those chains
-  have landed, and `plugin-contract-v1` revised the fixture on top of them.
+- The fixture and the harness are the ones `plugin-contract-v1` landed, extended
+  in place: eight capabilities through the routed trait, the eighth of them
+  `tool.newer` at descriptor version 2, the C section, and the `[ok]`/`[fail]`
+  plus `[result]` check printing. The earlier ordering note against
+  `plugin-authoring-trait` is spent: both of those chains have landed, and
+  `plugin-contract-v1` revised the fixture on top of them. `plugin-runtime`'s
+  only change is one doc comment on `CallError::Version` and the
+  descriptor-version expectation in `crates/plugin-runtime/tests/registry.rs`;
+  its loader behaviour is unchanged.
+
+### Residual, recorded rather than resolved
+
+- The per-capability gate policy exists in two places: the harness's own
+  `HOST_CAPABILITY_VERSION` constant and `plugin-runtime::Registry::gate`. The
+  runtime applies its gate at load time in the metis-plugins effort, and the
+  fixture's `tool.newer` is the capability that effort can reuse.
+- The retired pre-release v1 case is simulated by patching the live table's
+  prefix, not by a separately compiled minor-0 plugin, so no check loads such a
+  binary.
+- The three faulting-page prefix checks are Linux only, so a non-Linux host
+  loses that canary; the Rust canary test still asserts the rule there.
+- `scripts/build-c-plugin.sh` hard-requires `gcc` on the PATH, not `cc`. A shell
+  with clang only (the default PATH outside `devenv shell`) makes the harness
+  fail `cplugin.compiled_by_gcc_and_clang`. The CI gates run through
+  `devenv shell`, where gcc is present.
 
 ---
 
 ## Downstream interface contracts (outline)
 
-These tickets are not pending yet; the one pending section above
-(`plugin-compatibility`) is. Their sections are added when they reach the
-frontier, and the commitments below are what the landed and pending tickets must
-already support.
+These tickets are not pending yet, and no ticket section is pending now: every
+ticket that has reached the frontier has landed. Their sections are added when
+they reach the frontier, and the commitments below are what the landed tickets
+must already support.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
@@ -1227,10 +1341,20 @@ already support.
   `task/plugin-contract-v1`, on top of every earlier landing merge, plus
   `0008ba4` carrying the ticket note and the committed deviation report. It
   revises two landed surfaces rather than adding a crate, so after it the only
-  ticket still pending in the plugin chain is `plugin-compatibility`; the other
+  ticket still pending in the plugin chain was `plugin-compatibility`; the other
   pending tickets in the effort (`event-stream`, `local-identity-and-acl`,
   `tcp-listener`, `windows-named-pipe`) read the contract and transport
   surfaces, which this ticket left unchanged.
+- `plugin-compatibility` landed as the merge commit `c9227a4` on
+  `task/plugin-compatibility`, with the landing record and this section's update
+  in `c1d95d2`. It relaxes the minor comparison to one direction
+  (`prefix.abi_minor < METIS_ABI_MINOR`), drives the major seam with a second
+  compiled library, and takes the fixture to eight capabilities with
+  `tool.newer` gated at descriptor version 2, which moved the harness baseline to
+  73 checks. The tickets still pending in the effort (`event-stream`,
+  `local-identity-and-acl`, `tcp-listener`, `windows-named-pipe`) read the
+  contract and transport surfaces, which this ticket left unchanged, so no
+  pending chain builds against the changed plugin surfaces.
 
 ---
 
@@ -1490,10 +1614,12 @@ thread-count tests for seam 8; the feature-gate test for seam 9.
   rather than driven: the ordering ledger records that nothing is dropped after
   the unload, and no test deliberately drops a future into an unloaded library,
   because that is the use-after-unload bug the ordering exists to prevent.
-- The harness does not yet refuse a capability by descriptor version: the
-  fixture advertises version 1 only, so that check could not fail. The gate
-  itself is implemented and unit-tested in `plugin-runtime`, and no check drives
-  the version gate across the ABI.
+- The harness did not refuse a capability by descriptor version: the fixture
+  advertised version 1 only, so that check could not fail. The gate itself is
+  implemented and unit-tested in `plugin-runtime`, and no check drove the
+  version gate across the ABI. `plugin-compatibility` closed that gap: the
+  fixture's `tool.newer` is descriptor version 2, the harness applies its own
+  gate policy, and four harness checks drive the refusal.
 - The missed-cancel check covers a capability that ignores its cancellation
   token, not one that never answers at all.
 - `plugin-runtime`'s integration tests and the harness both rebuild the fixture
@@ -1509,7 +1635,8 @@ thread-count tests for seam 8; the feature-gate test for seam 9.
   exact-minor refusal in `metis_read_table`, which it relaxes to additive
   tolerance (`found >= known`), the typed `MetisAbiError`, the presence
   predicates and the slot constants, and the per-capability descriptor gate. It
-  must not need any change to the table shape.
+  landed needing no change to the table shape, which is the surface it inherited
+  intact.
 - `metis-plugins` consumes `plugin-runtime`'s loader, registry and quarantine.
   `metis-plugin-sdk` re-exports the routed trait and adds typed facades.
   `metis-daemon` owns the real poll loop and the reaper thread, and it is the
