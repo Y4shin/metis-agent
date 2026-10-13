@@ -195,6 +195,11 @@ streaming assumptions before anything is built on top.
   every out-of-surface public constant in its `exclude` list, because it emits
   the crate's public constants regardless of that list. `plugin-compatibility`
   and `plugin-authoring-trait` extend this layout additively.
+- The contract gates move their configuration to the repository root and take a
+  `BUF_TOKEN` in CI, tracked as `contract-gate-hardening`. `buf lint` reading
+  `contracts/buf.yaml` while `buf breaking` and generation read buf's defaults
+  from the root is a divergence that would let a declared breaking policy go
+  unlived, and anonymous BSR resolution can fail a run for a non-code reason.
 
 ## Fog
 
