@@ -2,10 +2,15 @@
 //!
 //! The seams are the transport loop, the served path over a real Unix socket,
 //! the endpoint rule, and the wrapper call that names no transport. The
-//! skeleton service and a temporary socket directory are the shared setup.
+//! skeleton service and a temporary socket directory are the shared setup. The
+//! platform-default half of the endpoint rule is unit-tested in the crate's
+//! `lib.rs` tests, where no test needs a temporary directory: this binary
+//! builds its socket directory from `std::env::temp_dir()`, and mutating
+//! `TMPDIR` here would race those tests.
 
 #![cfg(unix)]
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -37,6 +42,12 @@ impl TempSocket {
         let dir =
             std::env::temp_dir().join(format!("metis-echo-{}-{sequence}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create the temporary socket directory");
+        // The daemon refuses a socket directory that is wider than its rule
+        // allows, so the test's base is private, exactly as a runtime directory
+        // is. The daemon applies its own mode and group to the directory the
+        // socket lives in.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict the temporary socket directory");
         let path = dir.join("daemon.sock");
         Self { dir, path }
     }
