@@ -11,8 +11,8 @@ blocked_by: [metis-foundations]
 
 Metis has user-facing shells. A Tauri 2 desktop application and an Android
 application share one SvelteKit frontend, statically built for Tauri, and both
-reach the daemon only through the shared Rust `client` crate over HTTP and
-WebSocket. The desktop shell owns the Rust client and exposes application
+reach the daemon only through the shared Rust `client` crate over Connect. The
+desktop shell owns the Rust client and exposes application
 operations to SvelteKit through Tauri commands and events or channels. On
 Android, the shell integrates with the system assistant: an `ACTION_ASSIST`
 activity for assistant activation and, where needed, `VoiceInteractionService`

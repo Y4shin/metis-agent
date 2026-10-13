@@ -132,3 +132,11 @@ target, which is a build decision for `metis-daemon` and CI.
 - Where the client stores the pin, presumably beside the credential.
 - Whether the daemon prints its certificate fingerprint for pairing, which the
 pairing flow decides.
+
+## Later amendment
+
+The transport is ConnectRPC rather than a JSON HTTP API, per `realtime-semantics`
+D16. D1 to D10 hold in substance, with one open question: whether the ConnectRPC
+Rust stack accepts the same rustls configuration and static-linking posture,
+since the spike proved a static musl build without TLS. That is recorded as fog
+on the map.

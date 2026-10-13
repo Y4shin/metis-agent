@@ -546,7 +546,13 @@ confirm the compile inside `devenv shell`.
   generator feature lists; superseded by the primary READMEs, generator
   metadata files, and issue trackers above.
 
-## Next steps
+## Later amendment
+
+Superseded in conclusion by `protobuf-connect-research` and `connectrpc-spike`:
+the contract is Protobuf with ConnectRPC, so no JSON-schema or OpenAPI generator
+is used. The findings below remain the evidence for why the OpenAPI generator
+path was not taken, and the measured baseline the Protobuf path was compared
+against.
 
 1. In the `api-contracts` ticket, create the xtask, generate the first real
    payload models with a pinned `typify`, and confirm `cargo build`, `cargo fmt

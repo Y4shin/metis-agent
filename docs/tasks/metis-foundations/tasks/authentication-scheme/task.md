@@ -68,8 +68,8 @@ There are no per-client permissions: every paired client can reach every agent
 and personality. Agent permissions are resolved server-side from the agent
 context.
 
-**D4, credential transport.** `Authorization: Bearer` on HTTP and on the
-WebSocket upgrade request. The credential never appears in a URL.
+**D4, credential transport.** `Authorization: Bearer` on every RPC, including the
+event stream, carried as request metadata. The credential never appears in a URL.
 
 **D5, client storage.** Best effort against the platform keychain by invoking
 its CLI, falling back to a file with owner-only permissions. Android uses its
@@ -165,3 +165,10 @@ free-form.
 
 Recorded above: decisions D1 to D12, the alternatives considered, the
 dependent-task implications, and the remaining fog.
+
+## Later amendment
+
+The transport is now ConnectRPC rather than HTTP with server-sent events, per
+`realtime-semantics` D16. The credential still travels as an `Authorization`
+header, which Connect carries as request metadata, so D4 holds in substance. The
+connection handshake in D12 becomes connection metadata.

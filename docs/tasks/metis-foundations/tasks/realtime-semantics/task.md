@@ -180,6 +180,21 @@ subscription handling, the daemon's event bus and subscription bookkeeping
 behaviour the surfaces have to handle. Any of these can graduate into its own
 ticket when the answer is recorded.
 
+**D16, the realtime transport is a Connect server-streaming RPC.** The contract
+architecture changed after this task closed: HTTP with server-sent events is gone,
+and events arrive on a server-streaming RPC declared in the same proto as the
+rest of the API. This supersedes D14, changes D9 (versioning is the proto package
+`metis.v1`, not a URL path prefix) and D2's notion of operations (RPCs, not
+operation ids). Unchanged: D3, the daemon-wide event id and ring; D4,
+ephemerality and resync; D5 in substance, a request selects channels and the
+stream begins with a snapshot; D6, one delivery queue per stream with ordering
+structural per stream; D7, an explicit idempotent cancel RPC, where dropping a
+stream cancels nothing by itself; D8, bounded backpressure and then a plain
+stream drop that the client answers with a resync; D10, resync as a fresh
+stream; and D12, client-generated correlation ids carried in request metadata.
+Heartbeats are ordinary stream messages, and the cursor is the `last_event_id`
+request field.
+
 ## Alternatives considered
 
 - Transport split: everything over one multiplexed WebSocket, and a hybrid

@@ -52,7 +52,7 @@ end and work can land as vertical slices rather than as an untested layer.
 
 ## Decisions so far
 
-- From `docs/rough-plan.md`, "daemon": HTTP and WebSocket API handlers, local
+- From `docs/rough-plan.md`, "daemon": Connect service handlers, local
   IPC listeners and an optional TCP/TLS listener feeding the same handlers,
   session and task orchestration with storage implementing the harness's
   `SessionStore` trait, scheduling and application policy, configuration and

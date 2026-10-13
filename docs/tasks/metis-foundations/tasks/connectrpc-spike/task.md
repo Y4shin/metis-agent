@@ -3,7 +3,7 @@ type: task
 subtype: prototype
 title: Does the Connect and Protobuf path work here, and what does it cost?
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 ---
 
