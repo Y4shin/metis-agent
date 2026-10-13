@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Local access control and surface identity
 status: stable
-workflow_state: ready
-blocked_by: [local-transport-rpc-skeleton]
+workflow_state: done
+blocked_by:
+- local-transport-rpc-skeleton
 size: s
 ---
 
@@ -190,3 +191,12 @@ Residual risks carried forward:
   step, so its RED evidence is the client crate's earlier `unresolved import
   api_contracts::identity` rather than a per-test RED run. Every other seam has a
   real RED run.
+
+Knowledge harvested at finalize: the effort map gained the decision bullet for
+the ACL, the identity declaration and the endpoint rule, and the fog entry that
+recorded the `/tmp` conflict is removed because the rule settles it.
+`docs/testing.md` and `docs/dev-env.md` already carried the run commands, the new
+default endpoint and the socket-directory rule from the implementation, so they
+needed no further change. Known wording debt, recorded rather than fixed:
+acceptance criterion 1 says "a configured owner and group", but only the group is
+configurable, and the arch spec's residual list states the actual rule.
