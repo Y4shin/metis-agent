@@ -54,7 +54,7 @@ const BLOCKING: Duration = Duration::from_millis(250);
 pub struct Fixture;
 
 /// The descriptor version every capability but the gated one advertises.
-pub const CAPABILITY_VERSION: u32 = 1;
+const CAPABILITY_VERSION: u32 = 1;
 
 /// The capability a newer plugin build advertises: its descriptor version is
 /// one a host of this revision does not support.

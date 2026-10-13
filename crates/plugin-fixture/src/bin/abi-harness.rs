@@ -553,8 +553,8 @@ fn resolve_entry(
 /// past the size it was allowed does not get a wrong value out of a copy: it
 /// faults, and the harness stops with the fault, so "the reader touches only the
 /// entries its own size covers" is asserted by the memory rather than by a
-/// comment. Linux only, because the guard is `mmap` and a page: the platforms
-/// without it print a note and run the same checks without the guard.
+/// comment. Linux only, because the guard is `mmap` and a page: a platform
+/// without it prints a note and skips these three checks.
 #[cfg(target_os = "linux")]
 struct GuardedTable {
     base: *mut u8,

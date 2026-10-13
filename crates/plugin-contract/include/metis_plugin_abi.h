@@ -546,7 +546,8 @@ typedef struct MetisPluginTableV1 {
      */
     uint32_t abi_major;
     /**
-     * ABI minor version, which must be the one this build speaks.
+     * ABI minor version. A reader accepts the one it speaks and any newer one,
+     * and refuses an older one.
      */
     uint32_t abi_minor;
     /**
