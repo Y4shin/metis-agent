@@ -183,3 +183,73 @@ follows, and an implementer should not silently reopen them:
   poll 947 to 1288 ns, full host-polled path p50 6893 to 8165 ns, and the naive
   launch-and-await bridge costing 1.7 to 2.2 us per call that a real executor
   should not pay.
+
+Landed on `task/plugin-contract-v1` as the merge commit `83c0660`
+("ticket(plugin-contract-v1): Plugin contract v1, futures-only ABI with routed
+authoring and host enforcement"), parents `c1650a5` (the landing branch, created
+at this ticket's arch spec commit, which is also `main`'s tip and carries every
+earlier landing merge) and `af09b33` (working branch
+`ticket/plugin-contract-v1`). The merge was clean with no conflicts, the landing
+tree is byte-identical to `af09b33` except for this note and the committed
+report, and `ticket/plugin-contract-v1` was deleted after the merge.
+
+At landing, on the landing branch: the verification gate's full workspace
+`cargo test` run is green on the identical tree (46 passed, 0 failed) together
+with `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test -p plugin-contract --features authoring` (33 passed, covering abi,
+authoring, payload, feature_gate, c_layout and no_plugin_thread),
+`cargo test -p plugin-runtime` (6 passed), the fixture harness
+`[result] PASS (62 checks)` with exit 0, the gcc and clang C builds under
+`-std=c11 -Wall -Wextra -Werror`, and `cargo check -p plugin-contract
+--no-default-features`. Re-run on the landing branch:
+`scripts/regenerate-abi-header.sh --check` reports that the ABI header matches
+the crate.
+
+Divergences, from `deviation-reports/plugin-contract-v1.md` (committed with this
+note) and the implementation report:
+
+1. `CapabilityDescriptor` carries `request_schema: Schema` and
+   `response_schema: Schema` rather than schema text. The wire payload is
+   unchanged; a Rust author names `schemars::Schema`.
+2. The C-side presence rule is written from per-entry slot constants in the
+   header (`METIS_PLUGIN_TABLE_V1_*_SLOT`, `METIS_HOST_API_V1_*_SLOT` and the two
+   counts), because cbindgen renders neither a `const fn` nor a `size`-computed
+   constant. The Rust predicates exist as `const fn` and
+   `c/layout_static_asserts.c` asserts the C form.
+3. `Accounting` lost its public `suppressed` field; the rule it counted died
+   with the completion callback. Only the fixture and the harness constructed
+   it.
+4. `plugin-runtime` parses the capability declaration into its own
+   `registry::Capability` rather than enabling `plugin-contract`'s `authoring`
+   feature, keeping the host on the primitives and the payload envelope alone. A
+   test asserts the two declarations agree against the real fixture.
+5. The C implementer is compiled by `scripts/build-c-plugin.sh` plus a CI step,
+   not a `build.rs`, because it is a second cdylib for the harness rather than
+   something the Rust build links. CI also gains the `--no-default-features` step
+   for `plugin-contract`.
+6. Added surface beyond the plan text: `MetisFutureHandle` is `Copy`, `CallError`,
+   `RouteError` and `RegistryError` are exported, `plugin-runtime` exposes
+   `Loaded`, `Host`, `Instance` and `PluginCall`, and `Call::service_request`
+   returns a `ServiceAnswer<R>` future. `plugin-fixture` gained a direct
+   `schemars` dependency for its derives.
+
+Residual risks, as the implementation and verification report them: a wake after
+drop and a drop after unload have counters and ordering refusals but no fixture
+capability that deliberately provokes either; the missed-cancel check covers a
+plugin that ignores its token, not one that never answers; the per-capability
+version gate is unit-tested in `plugin-runtime` but not driven across the ABI
+(the fixture advertises version 1 only); `plugin-runtime`'s integration tests and
+the harness both rebuild the fixture cdylib, so those targets serialise on the
+cargo locks; event and progress callbacks are read and released but only logged,
+pending the daemon effort; and the C plugin keeps file-scope globals with a
+single-instance assumption. There is no `async-ffi` dependency anywhere outside
+`spikes/`.
+
+Pointers: the ADR is `docs/adr/0002-plugin-contract-futures-only.md`, the C
+implementer is `crates/plugin-fixture/c/c-plugin.c`, the build is
+`scripts/build-c-plugin.sh` with its CI step, the arch spec's
+`plugin-contract-v1` section is reconciled to the landed code, and the review
+artifact is `deviation-reports/plugin-contract-v1.md`. The remaining cosmetic
+item in that report is a stale rustdoc link to `Call::service` in
+`crates/plugin-contract/src/authoring/traits.rs`; the method is
+`Call::service_request`, and no deny is configured for broken links.
