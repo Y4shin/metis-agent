@@ -3398,14 +3398,217 @@ workspace total of 173 passed, 0 failed, 7 pre-existing ignored.
 
 ---
 
+## Pending ticket: `cancellation-and-slow-consumers`
+
+Blocked by the landed stream. It adds the two guarantees that stream still lacks: a
+caller can stop work it started with an explicit idempotent call naming the
+request, and a caller that cannot keep up is dropped rather than silently missing
+events, with the drop crossing the wire as a typed refusal the caller answers with
+a resync.
+
+### Exports
+
+- `crates/api-contracts/src/request.rs` (new, mounted as `pub mod request;`): the
+  correlation vocabulary, in the shape `identity` and `auth` set for their own
+  headers.
+  - `pub const REQUEST_ID_HEADER: &str = "metis-request-id";`
+  - `pub struct RequestId(String)` with `parse(&str) -> Result<Self, RequestIdError>`,
+    `as_str()`, `Display`, and `from_headers(&HeaderMap) -> Result<Option<RequestId>,
+    RequestIdError>`. The rule: at most 64 bytes, every byte in `0x21..=0x7E`, so an
+    identifier is header-safe, bounded and printable. `None` means the call declared
+    no request, which is legal and means the call is not cancellable.
+  - `pub enum RequestIdError { Malformed }`. A malformed identifier is refused with
+    a plain `InvalidArgument` and no new refusal header: unlike a cursor or a
+    credential, no client can act differently on it, and the effort's refusal
+    headers exist for meanings a client maps to behaviour.
+  - **The echo**: `pub struct EchoRequestId`, an `Interceptor` that copies the
+    incoming identifier into the response metadata of unary and streaming responses
+    alike, so the map's decision that correlation ids are "carried in request
+    metadata and echoed verbatim in the response metadata" lands once rather than
+    per handler. `Service::mount` and the skeleton's serve path both mount it, so
+    the daemon and the in-process service echo identically.
+- `contracts/proto/metis/v1/daemon.proto`:
+  - `rpc Cancel(CancelRequest) returns (CancelResponse);` appended to
+    `DaemonService`, with `string request_id = 1;` in the request and
+    `CancelOutcome outcome = 1;` in the response.
+  - `enum CancelOutcome { CANCEL_OUTCOME_UNSPECIFIED = 0; CANCEL_OUTCOME_CANCELLED =
+    1; CANCEL_OUTCOME_ALREADY_FINISHED = 2; }`. `CANCELLED` means an in-flight
+    request under that identifier was found and is being stopped;
+    `ALREADY_FINISHED` means none was in flight, which covers work that finished,
+    work already cancelled and work never seen, and is what makes a second call
+    idempotent. One RPC, two messages and one enum are additive, so `buf breaking`
+    stays green; the comments move both generated trees through
+    `scripts/regenerate-contracts.sh`.
+- `crates/api-contracts/src/cancel.rs` (new, mounted as `pub mod cancel;`): the
+  in-flight registry, in the shared crate for the reason the ring is, because the
+  daemon and the client's in-process test service both need one and it is the only
+  crate both reach.
+  - `pub struct Registry`, cheap to clone, one per daemon, keyed by the pair of the
+    declaring surface and the request identifier, so a cancel stops only work its
+    own surface started. A cancel naming another surface's request finds nothing in
+    flight and answers `ALREADY_FINISHED`, which is both the idempotent answer and
+    no oracle.
+  - `register(&self, surface: &str, id: RequestId) -> InFlight`: the RAII guard for
+    one request, holding a cancellation token. The entry lives exactly as long as
+    the guard, so it is removed when the work ends for any reason: finished,
+    cancelled or dropped.
+  - `InFlight::cancelled(&self)` (the signal a handler's work selects on),
+    `is_cancelled()`, `request_id()`.
+  - `cancel(&self, surface: &str, id: &RequestId) -> CancelOutcome`: removes the
+    entry, fires its token, answers `Cancelled`; with no entry, `AlreadyFinished`.
+  - `in_flight(&self) -> usize` and `cancellations(&self) -> u64`, so a test can
+    assert that a client's disconnect cancelled nothing.
+- `crates/api-contracts/src/events.rs` (extended): the drop vocabulary, beside the
+  cursor vocabulary that landed there.
+  - `pub const STREAM_ERROR_HEADER: &str = "metis-stream-error";`, `pub enum
+    StreamRefusal { SlowConsumer, Cancelled }` with `as_str`, `parse`, `Display` and
+    the non-exhaustive escape an unknown value parses to, and `pub fn
+    stream_refusal_headers(&StreamError) -> HeaderMap`.
+  - `pub enum StreamError { SlowConsumer { skipped: u64 }, Cancelled }`.
+  - `Ring::stream`'s item type is unchanged, which is the seam `event-stream`
+    reserved for this policy. `Subscription::recv` stops hiding a lag: it reports
+    what the window lost, and `Ring::stream` turns the first lag into the terminal
+    refusal instead of continuing with a gap. The bound is the broadcast channel's
+    capacity, which is the ring's window, and it stays unconfigurable.
+- `crates/daemon/src/service.rs`: `Cancel` as a handler (`identity::from_headers`
+  first, as every handler here does, then the registry lookup), the `stream_events`
+  handler registering the stream under the declared surface and request identifier
+  when the request declares one and carrying the guard inside the serving stream,
+  and `Service::cancellations() -> Registry` as the handle a test or the daemon
+  effort reads, named after `Service::ring()`.
+- `crates/client/src/skeleton.rs`: the same registry and the same registration in
+  the in-process service, so the client tests drive cancellation and the drop policy
+  without a TCP listener.
+- `crates/client/src/lib.rs`:
+  - `Client::stream_events` generates a `RequestId` from the operating system's
+    random source (the `getrandom` dependency the daemon already uses), sends it as
+    request metadata on that call, and the returned handle exposes it as
+    `EventStream::request_id()`.
+  - `Client::cancel(&self, request_id: &RequestId) -> Result<CancelOutcome,
+    ClientError>`.
+  - One typed failure per terminal refusal: `ClientError::StreamDropped` for a slow
+    consumer and `ClientError::StreamCancelled` for a cancelled stream, read from
+    `STREAM_ERROR_HEADER` rather than from message text. A stopped stream yields no
+    further events, so a caller cannot mistake a gap for current state, and the
+    documented answer is the landed cursorless resync.
+- `crates/client/src/stream.rs`: `EventStream::message()` maps a terminal error
+  through the refusal chain extended to trailers, because a Connect streaming
+  failure carries the daemon's metadata in the end-of-stream envelope rather than in
+  the response headers the stream was established with. The response-header read
+  stays first, so the landed cursor and credential refusals are untouched.
+- `docs/testing.md`: the `Event stream` section gains the cancellation and
+  slow-consumer commands and the property each asserts.
+- `crates/client/examples/events.rs`: one more step, `[cancel]`, cancelling the
+  stream it still holds and printing the outcome, then `[result] PASS`.
+
+### Existing abstractions to use
+
+- The landed refusal machinery on both ends, extended rather than duplicated:
+  `ConnectError::with_trailers` on the daemon's side, and the `refusal` /
+  `typed_refusal` chain on the client's side, which currently reads response headers
+  only and gains the trailer read for this one path.
+- The landed `Result` item seam, the suppression floor and `Ring::stream` as the one
+  assembly of a stream's shape: the drop policy is implemented once, for the daemon
+  and the skeleton together.
+- `identity::from_headers` and `ClientIdentity::surface()`, which is what the
+  registry keys on, and the interceptor chain `Service::mount` already builds, since
+  `with_interceptor` appends rather than replaces.
+- `getrandom` as the client's source for a generated identifier, and the landed test
+  fixtures: the daemon stream test's `Fixture`, `serve` and `serve_over_tcp`, the
+  client stream test's socket base, and the skeleton's `serve_uds_with`.
+
+### Do NOT reimplement
+
+- Do not tie a stream's lifetime to cancellation: a dropped stream stays a
+  disconnect, and that it "cancels nothing by itself" is what criterion 2 asserts.
+- Do not add a second buffering layer, a per-subscriber queue, or a retry inside the
+  daemon. The bound is the landed broadcast window and the answer to falling behind
+  is the drop.
+- Do not add an automatic resync, a retry loop or a backoff in the wrapper.
+- Do not add a second identifier space for requests, a handshake that registers
+  identifiers up front, or cancellation RPCs per call shape.
+- Do not change `Echo`, `Pair`, the cursor and expiry semantics, the ABI, or the
+  plugin crates. The request header is optional, so a call that declares none
+  behaves exactly as before.
+
+### Seams
+
+1. **Request-id seam.** Bounds and parse rules are unit-tested (empty, 65 bytes, a
+   control byte, and a valid identifier round-tripping); a call that declares none
+   is served exactly as before; and a declared identifier comes back in the response
+   metadata over a socket, for a unary call and for the stream.
+2. **Cancel seam.** With a stream in flight under a generated identifier, the first
+   `Cancel` answers `CANCELLED` and the stream stops; the second answers
+   `ALREADY_FINISHED`; an identifier that was never in flight answers
+   `ALREADY_FINISHED`; a malformed identifier is refused as `InvalidArgument`; and a
+   cancel under another surface's identifier answers `ALREADY_FINISHED` without
+   touching that work. This is criterion 1.
+3. **Disconnect seam.** The test disconnects a client mid-stream and observes the
+   work continuing: a second stream under its own identifier keeps receiving events,
+   a `Cancel` for the second still answers `CANCELLED` afterwards, the ring still
+   holds every published event, and the registry's cancellation count is unchanged by
+   the disconnect. `Cancel` for the disconnected stream's identifier answers
+   `ALREADY_FINISHED`, because its work ended as finished and never as cancelled.
+   This is criterion 2.
+4. **Slow-consumer seam.** A reader that stops reading, followed by publishes past
+   the buffer bound, gets the terminal refusal on the next read: the serving stream
+   ends with `ResourceExhausted` carrying `metis-stream-error: slow-consumer`, no
+   events are delivered after it, and the events it lost are named in the message
+   text rather than skipped in silence. A reader that keeps up never sees the
+   refusal, under the same publish load. Criteria 3 and 5.
+5. **Client seam.** The drop reaches the wrapper as the typed
+   `ClientError::StreamDropped` read from the trailer metadata, not as a transport
+   error and not as a clean end; the handle yields no event afterwards; and the
+   cursorless resync opens with a snapshot whose heads replace the caller's stale
+   state rather than appending to it. Criterion 4.
+6. **Additivity seam.** The ABI layout and plugin crates are untouched, the harness
+   stays at 73 checks, the cursor, expiry, resume and authorization behaviour of the
+   stream is unchanged, and a call with no request identifier behaves exactly as it
+   did before this ticket.
+
+Test types: unit tests in `api-contracts` for the identifier rules, the refusal
+vocabulary and the registry's outcomes; unit tests in `daemon` for the registry
+through the service; integration tests over a socket in a new
+`crates/daemon/tests/cancel.rs` for the cancel, disconnect and slow-consumer seams,
+with the drop also asserted on the skeleton path in `crates/client/tests/stream.rs`;
+the example for its own step; the contract and workspace gates for the rest.
+
+### Interface contract
+
+- `reverse-proxy-mode` and `windows-named-pipe` inherit all of this unchanged:
+  cancellation is a handler-level RPC and the drop is an ordinary handler-level
+  stream failure, so every front-end carries both without knowing about them.
+- The daemon effort registers its real work in `Registry` through the handle
+  `Service::cancellations()` returns, and it must not turn the drop into a retry
+  inside the daemon: the answer to falling behind is the caller's resync.
+- The plugin line keeps its own cancellation: the plugin table's `cancel` stops one
+  invoke inside an instance, while this ticket's `Cancel` names a daemon request
+  identifier. The two must not be conflated, and the daemon effort is where they
+  meet.
+- The map's fog entry asking how a client distinguishes a deliberate slow-consumer
+  drop from a transport failure is closed for the drops the daemon causes: the
+  deliberate drop is the typed `ClientError::StreamDropped` and a transport failure
+  stays `ClientError::Call`. What a caller should do about a transport failure stays
+  where the map put it.
+- Recorded residuals: the drop bound is the ring capacity and remains unconfigurable,
+  so the daemon and the skeleton drop at different points (1024 and 64); the ring is
+  daemon-wide, so a caller behind on one channel can be dropped because of traffic on
+  another; cancellation stops work but cannot undo what the work already published;
+  the registry is in memory, so a restart forgets in-flight work and a cancel for a
+  pre-restart identifier reports `ALREADY_FINISHED`; and a cancelled stream's own end
+  signal says the stream stopped, not that its work was undone.
+
+---
+
 ## Downstream interface contracts (outline)
 
-The tickets still pending in this effort are `cancellation-and-slow-consumers`,
-`reverse-proxy-mode` and `windows-named-pipe`. Their sections are added when their
-chains reach the frontier, and every ticket landed so far has one; the commitments
-below are what the landed tickets must already support, including the surfaces
-`local-identity-and-acl`, `state-store`, `pairing-and-tokens`, `remote-pairing`,
-`event-stream` and `stream-resume-and-expiry` landed.
+The tickets still pending in this effort are `reverse-proxy-mode` and
+`windows-named-pipe`. Their sections are added when their chains reach the
+frontier, apart from `cancellation-and-slow-consumers`, whose pending section is
+above; the commitments below are what the landed tickets must already support,
+including the surfaces `local-identity-and-acl`, `state-store`,
+`pairing-and-tokens`, `remote-pairing`, `event-stream` and
+`stream-resume-and-expiry` landed.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
