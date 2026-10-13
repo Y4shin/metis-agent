@@ -2326,7 +2326,9 @@ with 0 failed.
   one shared `admit`, and `event-stream` owns the wire test.
 - A dependent that maps a credential refusal reads `api_contracts::auth`
   (`CredentialRefusal`, `AUTH_ERROR_HEADER`, `bearer_token`), not the daemon's
-  own spelling; `daemon::auth` re-exports both header names for its refusals.
+  own spelling; `daemon::auth` re-exports both header names for its refusals
+  (the landed `remote-pairing` added a third, `PAIR_ERROR_HEADER`, and its
+  `PairRefusal` vocabulary to that surface).
   `reverse-proxy-mode` and the daemon effort consume `SecretRef` for their own
   settings, `api_contracts::keychain` is the one place the platform tool is
   called, and `api_contracts::time` is the one calendar implementation.
@@ -2345,9 +2347,11 @@ Recorded residuals:
   is inferred from the tool's exit status and standard error, so a silently
   failing tool reads as absence. macOS compiles but is never run against the real
   `security` tool.
-- A wrong preshared key reaches the client as `ClientError::Call` with
-  `PermissionDenied` rather than as a typed pairing error; the spec names none,
-  and the typed credential mapping covers the credential path only.
+- A wrong preshared key reached the client as `ClientError::Call` with
+  `PermissionDenied` rather than as a typed pairing error; the spec named none,
+  and the typed credential mapping covered the credential path only. Closed by
+  `remote-pairing`, which landed the `metis-pair-error` channel and
+  `ClientError::Pairing`; recorded here as the state at this landing.
 - The `Pair` exemption is by procedure path, so a future pre-auth RPC must be
   added to that list deliberately; there is no token rotation or expiry.
 - `client::skeleton` remains a second `DaemonService` implementation used by the
@@ -2549,37 +2553,94 @@ seams 4 and 5.
 
 ---
 
-## Pending ticket: `remote-pairing`
+## Landed ticket: `remote-pairing`
 
-Blocked by `pairing-and-tokens` and `serve-tcp-service`, both landed. Pairing
-from a device with no access to the daemon's local socket, so a phone can set
-itself up over the network. Mostly a rule change plus the first test that pairs
-across the TCP front-end.
+Landed on `task/remote-pairing` as the merge commit `adb4c5d`, parents `fd65ccc`
+(the landing branch, created at `main`'s tip because it did not exist before this
+landing, the convention this spec records) and `4651798` (the working branch
+`ticket/remote-pairing`, four `wip:` commits off `main` at `fd65ccc`, deleted
+after the merge); the docs commit `1d29511` carries the ticket note and the
+committed deviation report. The merge was clean and `git diff 4651798 HEAD` is
+empty, so the landing tree is byte for byte the tree the verify worker gated. The
+gates were green on `4651798` through `devenv shell --`: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test -p daemon --test auth`
+(16 passed), `cargo test -p daemon --test secret` (12 passed), the workspace
+`cargo test` (146 passed, 0 failed, 7 ignored), `buf lint`,
+`buf breaking --against '.git#branch=main' --against-config buf.yaml`, both drift
+checks (`scripts/regenerate-contracts.sh --check` and
+`scripts/regenerate-abi-header.sh --check`) and the ABI harness
+(`[result] PASS (73 checks)`).
+
+Pairing from a device with no access to the daemon's local socket, so a phone can
+set itself up over the network: the `Pair` procedure is reachable on the TCP
+front-end `serve-tcp-service` landed, gated by the same preshared key, and the
+call after a successful pairing carries the minted token over the same transport.
+Removing the key closes pairing on both transports and revokes nothing.
+
+Nine tracked files changed (+577/-76): `crates/api-contracts/src/auth.rs`,
+`crates/daemon/src/auth.rs`, `crates/daemon/src/secret.rs`,
+`crates/daemon/src/service.rs`, `crates/daemon/tests/auth.rs`,
+`crates/daemon/tests/secret.rs`, `crates/client/src/lib.rs`, `docs/dev-env.md`
+and `docs/testing.md`. The tenth change in the working tree is the uncommitted
+orchestration pointer `docs/tasks/state.yaml`, as in the earlier landings.
+
+The surfaces below are the measured ones. The divergences from the plan are
+folded in below: `pair_refusal_headers` returns `Option<HeaderMap>` so the
+internal store fault carries no wire value; `PairError::PairingDisabled` maps to
+`FailedPrecondition`, which the plan left unnamed; the public `Service::new`
+takes the key, because the service is the value that holds it;
+`api_contracts::auth` gained the `PairRefusal` type the plan described without
+naming; and seam 4 gained no dedicated parity test, for the reason recorded at
+that seam.
 
 ### Exports
 
-- `crates/daemon/src/secret.rs`: `resolve_preshared_key() ->
+- `crates/daemon/src/secret.rs`: `pub fn resolve_preshared_key() ->
   Result<Option<Secret>, SecretError>`. An unset or empty `METIS_PRESHARED_KEY`
   is `Ok(None)`, which means pairing is not configured; a configured reference
   that cannot be resolved stays a typed error, so a typo is loud rather than
-  silently disabling pairing.
-- `crates/daemon/src/service.rs`: `service(store, preshared: Option<Secret>,
-  policy) -> ConnectRpcService<Router>`; `None` builds a service whose pairing
-  handler refuses with `PairingDisabled` while the rest of the surface still
-  serves.
-- `crates/daemon/src/auth.rs`: `PairError::PairingDisabled` beside the landed
-  `WrongPresharedKey` and `AlreadyPaired`, plus the refusal channel
-  `PAIR_ERROR_HEADER = "metis-pair-error"` with `pair_refusal_headers(&PairError)`
-  and the values `disabled`, `wrong-key` and `already-paired`, mirroring
-  `AUTH_ERROR_HEADER` and `identity::refusal_headers`.
-- `crates/api-contracts/src/auth.rs`: the pair-error header name and value
-  vocabulary join the credential vocabulary there, so both ends of the channel
-  spell it once, which is the rule `identity` and `auth` already follow.
+  silently disabling pairing. A caller that ignores the `None` arm would treat a
+  closed pairing as a configured one, and the daemon effort is the next caller.
+- `crates/daemon/src/service.rs`:
+  - `pub fn service(store: Store, preshared: Option<Secret>, policy: AuthPolicy)
+    -> ConnectRpcService<Router>`; `None` builds a service whose pairing handler
+    refuses with `PairError::PairingDisabled` while the rest of the surface still
+    serves.
+  - `pub fn Service::new(store: Store, preshared: Option<Secret>) -> Self`, the
+    key-taking constructor the plan did not name: the service is the value that
+    holds the key, so a caller building one passes `Some(key)` or `None`. Only the
+    landed test fixture does that today; the daemon effort is the first product
+    caller.
+  - The private `refuse_pair(&PairError)` maps a refusal onto the wire: the
+    headers when `pair_refusal_headers` has some, and the status code
+    `FailedPrecondition` for `PairingDisabled`, `PermissionDenied` for
+    `WrongPresharedKey`, `AlreadyExists` for `AlreadyPaired` and `Internal` for
+    `Store`. The status code is not what a client acts on, because the typed
+    refusal is read from the header; a client that inspects codes only sees a new
+    code for the closed state.
+- `crates/daemon/src/auth.rs`: `PairError::{PairingDisabled, WrongPresharedKey,
+  AlreadyPaired, Store}` (non-exhaustive) plus the refusal channel
+  `pub fn pair_refusal_headers(error: &PairError) -> Option<HeaderMap>`, mirroring
+  `refusal_headers`. The header spelling is not declared here: `daemon::auth`
+  re-exports `api_contracts::auth::{AUTH_ERROR_HEADER, AUTHORIZATION_HEADER,
+  PAIR_ERROR_HEADER}`, exactly as it re-exported the first two. `None` is the
+  `PairError::Store` case, which carries no wire value: a store fault is an
+  internal failure rather than a pairing state a client should act on, so that
+  case keeps its status code and stays `ClientError::Call` at the client.
+- `crates/api-contracts/src/auth.rs`: `pub const PAIR_ERROR_HEADER =
+  "metis-pair-error"` and the non-exhaustive `pub enum PairRefusal { Disabled,
+  WrongKey, AlreadyPaired }` with `as_str`, `parse` and `Display`, spelling the
+  header values `disabled`, `wrong-key` and `already-paired`. This is the type
+  the plan described without naming it, and it mirrors the landed
+  `CredentialRefusal`, so both ends of the pair-error channel spell the
+  vocabulary once, which is the rule `identity` and `auth` already follow.
 - `crates/client/src/lib.rs`: `ClientError::Pairing { cause: PairingCause }` with
-  `PairingCause::{Disabled, WrongKey, AlreadyPaired}`, read from the pair-error
-  header and never from message text. This closes the residual the last ticket
-  recorded, that a wrong preshared key currently arrives as `ClientError::Call`
-  carrying `PermissionDenied`.
+  `PairingCause::{Disabled, WrongKey, AlreadyPaired}`, read through
+  `PairRefusal::parse` from `auth::PAIR_ERROR_HEADER` and never from message text;
+  a header value this build does not know is left as `ClientError::Call` rather
+  than guessed at. This closes the residual the `pairing-and-tokens` section
+  recorded, that a wrong preshared key arrived as `ClientError::Call` carrying
+  `PermissionDenied`.
 - `docs/dev-env.md` and `docs/testing.md`: pairing is optional, an absent key
   means pairing is closed rather than broken, and the remote run commands.
 
@@ -2589,9 +2650,9 @@ attached by `pair` as a default header.
 
 ### Existing abstractions to use
 
-- `serve_tcp_service` and `serve_tcp_listener_service`, landed last ticket, mount
-  the policy on TCP; `AuthInterceptor` already exempts the `Pair` procedure, so the
-  preshared key reaches the handler there.
+- `serve_tcp_service` and `serve_tcp_listener_service`, landed in
+  `serve-tcp-service`, mount the policy on TCP; `AuthInterceptor` already exempts
+  the `Pair` procedure, so the preshared key reaches the handler there.
 - The landed fixture in `crates/daemon/tests/auth.rs` with its `serve_over_tcp`,
   `remote_client` and `reserve_loopback_port` helpers, and the port-0 pattern in
   `crates/client/tests/remote.rs`.
@@ -2619,51 +2680,111 @@ attached by `pair` as a default header.
    TCP listener and the key configured, a client pairs over TCP with the preshared
    key, receives a token, and a following call over the same transport is served.
    The `Pair` path stayed exempt, and neither the key nor the token appears in a
-   URL.
+   URL. Asserted by
+   `pairing_over_the_remote_listener_is_gated_by_the_preshared_key`, which also
+   asserts that the configured key alone pairs, that a wrong key writes no row,
+   and that the recorded request paths are the bare procedure path with neither a
+   query nor the key.
 2. **Closed-pairing seam.** A service built with `None` refuses `Pair` on both the
    Unix socket and TCP, with `disabled` on the wire and
-   `ClientError::Pairing::Disabled` at the client, while a surface paired before
-   the key was removed still serves. That is the property that closing pairing
-   revokes nothing.
+   `ClientError::Pairing { cause: PairingCause::Disabled }` at the client, while a
+   surface paired before the key was removed still serves. That is the property
+   that closing pairing revokes nothing. Asserted by
+   `removing_the_preshared_key_closes_pairing_on_both_transports`, which pairs one
+   surface on each transport, unsets `METIS_PRESHARED_KEY`, rebuilds both
+   listeners from `resolve_preshared_key()` (`Ok(None)`) over a reopened store on
+   the same file, and then asserts the refusal on both transports, an unchanged
+   token table and both previously paired surfaces still served.
 3. **Typed-refusal seam.** A wrong key is `WrongKey` and a repeated pairing is
    `AlreadyPaired` at the client, both read from the pair-error header, with
-   message text never parsed.
+   message text never parsed. The wrong key is asserted on the remote transport by
+   `pairing_over_the_remote_listener_is_gated_by_the_preshared_key` and the
+   repeated pairing on the local socket by the landed
+   `pairing_mints_one_token_the_daemon_keeps_only_as_a_hash`; the landed
+   `the_pairing_gate_uses_the_configured_key_reference` and
+   `a_wrong_preshared_key_is_refused_and_mints_nothing` now expect the typed
+   wrong-key refusal in place of `Call` carrying `PermissionDenied`, and
+   `the_configured_preshared_key_is_a_secret_reference` in
+   `crates/daemon/tests/secret.rs` now expects `Ok(None)` for an unset or empty
+   variable in place of `SecretError::Unresolved`.
 4. **Two-transport seam.** The same assertions run over the Unix socket and TCP
-   through the landed fixture, so the transports are compared rather than tested
-   in isolation.
+   through the landed fixture. The closed-pairing test drives both transports in
+   one body, and the typed refusals are asserted on the remote transport by the
+   new test and on the local socket by the landed ones. No separate parity test
+   was added, because a third test repeating wrong-key and already-paired over
+   both transports would be verbatim duplication; the two-transport claim
+   therefore rests on the closed-pairing test, and the landed
+   `a_service_mounted_on_both_front_ends_answers_the_same_way` still covers the
+   interceptor path itself.
 5. **Additivity seam.** No contract, generated tree, ABI layout, or plugin
    change. The wire gains a response header only, which is not a proto change, so
    the drift, lint, breaking and harness gates stay green.
 
-Test types: integration tests in `crates/daemon/tests/` for seams 1 to 4,
-reusing the auth fixture, plus the workspace and contract gates for seam 5. The
-four TCP tests that file already has are Unix-gated, and these inherit that.
+Test types: two new integration tests in `crates/daemon/tests/auth.rs`, that file
+being 14 tests before and 16 after, for seams 1 to 4, reusing its landed fixture
+(`Served`, `serve_over_tcp`, `remote_client`, `reserve_loopback_port`, `AuthEnv`)
+plus `daemon::secret::resolve_preshared_key`, and the workspace and contract gates
+for seam 5. The fixture's `RecordingDaemon` was strengthened into a decorator that
+records the request path and then delegates to the daemon's own `Service` instead
+of answering with canned payloads, and `AuthEnv::unset`, `Fixture::unset_var` and
+`Fixture::serve_configured_daemon_over_tcp` were added; no landed assertion was
+dropped or loosened by that change. The file carries `#![cfg(unix)]`, so all 16
+tests are Unix-gated, and these two inherit that.
 
 ### Interface contract
 
 - `reverse-proxy-mode` owns the trusted-proxy rule and the plaintext warning for
-  remote exposure; this ticket changes nothing about plaintext, which ADR 0004
+  remote exposure; this ticket changed nothing about plaintext, which ADR 0004
   records as the operator's chosen posture.
 - `event-stream` owns the stream half of this ticket's second acceptance
   criterion, and inherits both the token requirement and the pairing exemption
-  through the interceptor.
+  through the interceptor, which applies the same `admit` to the streaming shape
+  through `intercept_streaming`.
 - The daemon effort mounts the remote listener with `AuthPolicy::TokenRequired`
-  and the optional resolved key; the binary still runs no listener, so the wiring
-  remains the daemon effort's.
-- Recorded residual: a client that pairs over the plaintext remote transport
-  exposes the preshared key to anyone who can read the connection. The map records
-  it and ADR 0004 accepts it, since remote exposure is meant to sit behind a
-  proxy.
+  and the key `resolve_preshared_key` resolved, passing `None` when the
+  configuration names no key; the binary still runs no listener, so the wiring
+  remains the daemon effort's. A caller that builds `Service` directly passes
+  `Some(key)` or `None`, and the `None` arm is the closed-pairing state rather
+  than a misconfiguration.
+- A later pairing refusal is additive at both ends: `PairRefusal` and `PairError`
+  are non-exhaustive, a new variant travels through `pair_refusal_headers`
+  unchanged, and the client's mapper leaves a header value this build does not
+  know as `ClientError::Call` rather than guessing at it.
+
+### Residual, recorded rather than resolved
+
+- A client that pairs over the plaintext remote transport exposes the preshared
+  key to anyone who can read the connection. The map records it and ADR 0004
+  accepts it, since remote exposure is meant to sit behind a proxy;
+  `reverse-proxy-mode` owns the warning and the trusted-proxy rule.
+- The two new tests live in `crates/daemon/tests/auth.rs`, whose `#![cfg(unix)]`
+  gates the whole binary, so remote pairing has no test coverage on non-Unix
+  targets. That is the gate `serve-tcp-service` recorded and it is unchanged.
+- The event-stream half of criterion 2 is unproven by design: the contract declares
+  no streaming RPC, and `event-stream` owns that wire test.
+- Closing pairing revokes nothing, as approved and asserted: a surface paired
+  before the key was removed keeps serving until its token row is deleted.
+- Pairing over a network-reachable listener has no rate limit and no lockout, and
+  this ticket is what makes repeated attempts reachable over the network. The
+  constant-time comparison is unchanged from `pairing-and-tokens`.
+- The daemon binary still mounts no listener, so wiring the optional key and
+  `AuthPolicy::TokenRequired` into a real remote listener remains the daemon
+  effort's work.
+- One assertion was lost rather than moved when the refusing tests moved to the
+  typed channel: the landed test required the unset-key refusal text to name
+  `METIS_PRESHARED_KEY`, and an unset key now has no refusal text, because it is
+  `Ok(None)`. The variable appears only in `PairError::PairingDisabled`'s
+  `Display`, which no test asserts. No other assertion was weakened.
 
 ---
 
 ## Downstream interface contracts (outline)
 
-The tickets still pending in this effort are `event-stream`, `reverse-proxy-mode`,
-`windows-named-pipe` and `remote-pairing`. Their sections are added when their
-chains reach the frontier, apart from `remote-pairing`, whose pending section is
-above. The tickets the bullets below also name
-(`stream-resume-and-expiry`, `cancellation-and-slow-consumers`) are not pending
+The tickets still pending in this effort are `event-stream`, `reverse-proxy-mode`
+and `windows-named-pipe`. Their sections are added when their chains reach the
+frontier; `remote-pairing` has landed and its section is above. The tickets the
+bullets below also name (`stream-resume-and-expiry`,
+`cancellation-and-slow-consumers`) are not pending
 yet, and the commitments below are what the landed tickets must already support,
 including the surfaces `local-identity-and-acl`, `state-store` and
 `pairing-and-tokens` landed.
@@ -2849,6 +2970,17 @@ including the surfaces `local-identity-and-acl`, `state-store` and
   `windows-named-pipe` and `remote-pairing`; the earlier notes in this section
   carry the pending set at their own landing moment, and this note carries the
   current set.
+- `remote-pairing` landed as the merge commit `adb4c5d` on `task/remote-pairing`,
+  parents `fd65ccc` (the landing branch, created at `main`'s tip) and `4651798`
+  (the working branch `ticket/remote-pairing`, four `wip:` commits off `main` at
+  `fd65ccc`, deleted after the merge), with the ticket note and the committed
+  deviation report in the docs commit `1d29511`. It closes the residual the
+  `pairing-and-tokens` note recorded: the client reads a typed pairing refusal
+  from the `metis-pair-error` response header, so a wrong preshared key no longer
+  arrives as a `Call` carrying `PermissionDenied`. The tickets still pending in
+  the effort are `event-stream`, `reverse-proxy-mode` and `windows-named-pipe`;
+  the earlier notes in this section carry the pending set at their own landing
+  moment, and this note carries the current set.
 
 ---
 

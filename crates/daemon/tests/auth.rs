@@ -26,18 +26,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use api_contracts::connect::metis::v1::{
-    DAEMON_SERVICE_ECHO_SPEC, DaemonService, DaemonServiceExt,
+    DAEMON_SERVICE_ECHO_SPEC, DAEMON_SERVICE_PAIR_SPEC, DaemonService, DaemonServiceExt,
 };
 use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse, PairRequest, PairResponse};
 use api_contracts::transport::{serve_tcp_listener_service, serve_tcp_service, serve_uds_service};
 use client::credential::{self, Backend};
-use client::{Client, ClientError, CredentialCause, Surface};
+use client::{Client, ClientError, CredentialCause, PairingCause, Surface};
 use connectrpc::{
-    ConnectError, ConnectRpcService, ErrorCode, RequestContext, Response, Router, ServiceRequest,
+    ConnectError, ConnectRpcService, RequestContext, Response, Router, ServiceRequest,
 };
 use daemon::auth::{AuthInterceptor, AuthPolicy};
 use daemon::secret::{Secret, SecretRef};
-use daemon::service::service;
+use daemon::service::{Service, service};
 use daemon::state::{Store, Verify};
 use daemon::token::Token;
 
@@ -136,6 +136,13 @@ impl AuthEnv {
         // SAFETY: the guard holds `ENV_LOCK` for its whole lifetime.
         unsafe { std::env::set_var(name, value) };
     }
+
+    /// Remove one of the variables this guard holds, which is how an operator
+    /// takes a setting away before a restart.
+    fn unset(&self, name: &str) {
+        // SAFETY: the guard holds `ENV_LOCK` for its whole lifetime.
+        unsafe { std::env::remove_var(name) };
+    }
 }
 
 impl Drop for AuthEnv {
@@ -209,21 +216,34 @@ impl Fixture {
 
     /// Serve the daemon's own service with `policy`.
     async fn serve_daemon(&self, path: &Path, policy: AuthPolicy) {
-        let service = service(self.store.clone(), self.secret.clone(), policy);
+        let service = service(self.store.clone(), Some(self.secret.clone()), policy);
         serve(path, service).await;
     }
 
     /// Serve the daemon's own service with the key its configuration names,
-    /// resolved the way the daemon resolves it at startup.
+    /// resolved the way the daemon resolves it at startup. An absent key is not
+    /// an error: it is a daemon with pairing closed.
     async fn serve_configured_daemon(&self, path: &Path, policy: AuthPolicy) {
-        let secret =
+        let preshared =
             daemon::secret::resolve_preshared_key().expect("the configured preshared key resolves");
-        serve(path, service(self.store.clone(), secret, policy)).await;
+        serve(path, service(self.store.clone(), preshared, policy)).await;
+    }
+
+    /// The same, over TCP, the way a remote listener serves it.
+    async fn serve_configured_daemon_over_tcp(&self, policy: AuthPolicy) -> SocketAddr {
+        let preshared =
+            daemon::secret::resolve_preshared_key().expect("the configured preshared key resolves");
+        serve_over_tcp(service(self.store.clone(), preshared, policy)).await
     }
 
     /// Set one of the daemon's or the client's configuration variables.
     fn set_var(&self, name: &str, value: &str) {
         self._env.set(name, value);
+    }
+
+    /// Take one of them away, as an operator does before a restart.
+    fn unset_var(&self, name: &str) {
+        self._env.unset(name);
     }
 
     /// Every byte the daemon keeps for this database: the file and, when a
@@ -246,6 +266,7 @@ impl Fixture {
     fn recording_service(&self, policy: AuthPolicy, served: &Served) -> ConnectRpcService<Router> {
         let router = Arc::new(RecordingDaemon {
             served: served.clone(),
+            inner: Service::new(self.store.clone(), Some(self.secret.clone())),
         })
         .register(Router::new());
         ConnectRpcService::new(router)
@@ -271,7 +292,12 @@ impl Fixture {
     /// Serve the daemon's own service with `policy` over TCP, the way a remote
     /// listener serves it.
     async fn serve_daemon_over_tcp(&self, policy: AuthPolicy) -> SocketAddr {
-        serve_over_tcp(service(self.store.clone(), self.secret.clone(), policy)).await
+        serve_over_tcp(service(
+            self.store.clone(),
+            Some(self.secret.clone()),
+            policy,
+        ))
+        .await
     }
 
     /// A client that reaches `addr` over TCP and declares `surface`, which
@@ -359,11 +385,14 @@ impl Served {
     }
 }
 
-/// A service that records what reached it. It answers every call, so a test
-/// that sees a refusal knows the refusal came from the interceptor in front of
-/// it, and its recorder is empty exactly when the handler never ran.
+/// A service that records what reached it, then serves it the way the daemon's
+/// own service does. A test that sees a refusal therefore knows the refusal came
+/// from the interceptor in front of it: the recorder is empty exactly when no
+/// handler ran, and the path it records is the one the handler was reached
+/// with.
 struct RecordingDaemon {
     served: Served,
+    inner: Service,
 }
 
 // The generated trait uses an explicit RPITIT signature; an `async fn` impl
@@ -376,23 +405,16 @@ impl DaemonService for RecordingDaemon {
         request: ServiceRequest<'_, EchoRequest>,
     ) -> Result<Response<EchoResponse>, ConnectError> {
         self.served.record(ctx.path());
-        Response::ok(EchoResponse {
-            message: request.message.to_owned(),
-            received_at: String::new(),
-            ..Default::default()
-        })
+        self.inner.echo(ctx, request).await
     }
 
     async fn pair(
         &self,
         ctx: RequestContext,
-        _request: ServiceRequest<'_, PairRequest>,
+        request: ServiceRequest<'_, PairRequest>,
     ) -> Result<Response<PairResponse>, ConnectError> {
         self.served.record(ctx.path());
-        Response::ok(PairResponse {
-            token: String::new(),
-            ..Default::default()
-        })
+        self.inner.pair(ctx, request).await
     }
 }
 
@@ -469,15 +491,21 @@ async fn pairing_mints_one_token_the_daemon_keeps_only_as_a_hash() {
     );
 
     // A second pairing is refused, and the first token is still the surface's:
-    // the same call cannot mint a second credential.
+    // the same call cannot mint a second credential. The refusal is typed, so it
+    // is read from the daemon's own header rather than from its message text.
     let error = caller
         .pair(PRESHARED_KEY)
         .await
         .expect_err("an already paired surface is refused");
-    match error {
-        ClientError::Call(source) => assert_eq!(source.code, ErrorCode::AlreadyExists),
-        other => panic!("expected the already-paired refusal, got {other}"),
-    }
+    assert!(
+        matches!(
+            error,
+            ClientError::Pairing {
+                cause: PairingCause::AlreadyPaired
+            }
+        ),
+        "expected the typed already-paired refusal, got {error}"
+    );
     assert_eq!(
         fixture
             .store
@@ -520,10 +548,15 @@ async fn the_pairing_gate_uses_the_configured_key_reference() {
         .pair("not-the-configured-key")
         .await
         .expect_err("the configured key is the only one that pairs");
-    match wrong {
-        ClientError::Call(source) => assert_eq!(source.code, ErrorCode::PermissionDenied),
-        other => panic!("expected the pairing refusal, got {other}"),
-    }
+    assert!(
+        matches!(
+            wrong,
+            ClientError::Pairing {
+                cause: PairingCause::WrongKey
+            }
+        ),
+        "expected the typed wrong-key refusal, got {wrong}"
+    );
     assert!(
         fixture
             .store
@@ -559,10 +592,15 @@ async fn a_wrong_preshared_key_is_refused_and_mints_nothing() {
         .pair("not-the-key")
         .await
         .expect_err("the key does not match");
-    match error {
-        ClientError::Call(source) => assert_eq!(source.code, ErrorCode::PermissionDenied),
-        other => panic!("expected the pairing refusal, got {other}"),
-    }
+    assert!(
+        matches!(
+            error,
+            ClientError::Pairing {
+                cause: PairingCause::WrongKey
+            }
+        ),
+        "expected the typed wrong-key refusal, got {error}"
+    );
     assert!(
         fixture
             .store
@@ -802,7 +840,7 @@ async fn removing_one_row_and_restarting_revokes_only_that_surface() {
         &second_socket,
         service(
             restarted.clone(),
-            fixture.secret.clone(),
+            Some(fixture.secret.clone()),
             AuthPolicy::TokenRequired,
         ),
     )
@@ -1036,5 +1074,225 @@ async fn a_service_mounted_on_both_front_ends_answers_the_same_way() {
             DAEMON_SERVICE_ECHO_SPEC.procedure.to_owned(),
         ],
         "the mounted handler served one call per front-end"
+    );
+}
+
+/// Pairing is reachable on the remote listener, gated by the same preshared key
+/// the local one is, and the token it mints is what the call after it carries.
+///
+/// A device that cannot reach the local socket pairs here: the pairing call is
+/// exempt from the credential check, so it is the first call a surface with no
+/// credential can make, and the token it answers with is what makes the next one
+/// land. The key travels in the request body, never in a URL.
+#[tokio::test]
+async fn pairing_over_the_remote_listener_is_gated_by_the_preshared_key() {
+    let fixture = Fixture::new("remote-pairing").await;
+    let served = Served::default();
+    let addr = serve_over_tcp(fixture.recording_service(AuthPolicy::TokenRequired, &served)).await;
+
+    // The surface has no credential yet, so the pairing call is the only call it
+    // can make, and only the configured key pairs it.
+    let mut caller = fixture.remote_client(addr, Surface::Cli).await;
+    let error = caller
+        .pair("not-the-configured-key")
+        .await
+        .expect_err("only the configured key pairs");
+    assert!(
+        matches!(
+            error,
+            ClientError::Pairing {
+                cause: PairingCause::WrongKey
+            }
+        ),
+        "expected the typed wrong-key refusal, got {error}"
+    );
+    assert!(
+        fixture
+            .store
+            .surfaces()
+            .await
+            .expect("the rows read")
+            .is_empty(),
+        "a wrong key pairs nothing"
+    );
+
+    // The refused pairing call reached the remote handler as the procedure path
+    // alone: the key is in the request body, never in a URL.
+    assert_eq!(
+        served.paths(),
+        vec![DAEMON_SERVICE_PAIR_SPEC.procedure.to_owned()],
+        "the pairing handler ran"
+    );
+    assert!(
+        !served.paths()[0].contains('?') && !served.paths()[0].contains(PRESHARED_KEY),
+        "the path carries neither a query nor the key: {}",
+        served.paths()[0]
+    );
+
+    let backend = caller
+        .pair(PRESHARED_KEY)
+        .await
+        .expect("the configured preshared key pairs the surface over the remote listener");
+    let Backend::File(path) = &backend else {
+        panic!("the file backend answers when no keychain tool is on PATH");
+    };
+    assert!(
+        path.file_name().is_some_and(|name| name == "cli.token"),
+        "the credential is filed under the declared surface: {}",
+        path.display()
+    );
+    assert_eq!(
+        fixture.store.surfaces().await.expect("the rows read"),
+        vec!["cli".to_owned()]
+    );
+
+    // The pairing call reached the remote handler as the procedure path alone:
+    // the key is in the request body, not in a URL.
+    assert_eq!(
+        served.paths(),
+        vec![
+            DAEMON_SERVICE_PAIR_SPEC.procedure.to_owned(),
+            DAEMON_SERVICE_PAIR_SPEC.procedure.to_owned(),
+        ],
+        "both pairing calls reached the handler"
+    );
+
+    // The token the pairing call minted is what the authenticated call after it
+    // carries, over the same transport.
+    assert_eq!(
+        caller
+            .echo("paired over the remote listener")
+            .await
+            .expect("the minted token is served"),
+        "paired over the remote listener"
+    );
+    assert_eq!(
+        served.paths(),
+        vec![
+            DAEMON_SERVICE_PAIR_SPEC.procedure.to_owned(),
+            DAEMON_SERVICE_PAIR_SPEC.procedure.to_owned(),
+            DAEMON_SERVICE_ECHO_SPEC.procedure.to_owned(),
+        ],
+        "both pairing calls and the call after them reached the handler"
+    );
+}
+
+/// Removing the preshared key and restarting closes pairing on both transports,
+/// and revokes nothing: the surfaces that paired before the key was removed keep
+/// serving, because revocation stays the token-row delete.
+///
+/// Pairing is optional, so an absent key is not a broken configuration: the
+/// daemon starts, every call keeps working, and the one surface that has no
+/// credential left is answered with a typed refusal that says pairing is closed.
+#[tokio::test]
+async fn removing_the_preshared_key_closes_pairing_on_both_transports() {
+    let fixture = Fixture::new("closed-pairing").await;
+    fixture.set_var(
+        daemon::secret::PRESHARED_KEY_ENV,
+        &format!("literal:{PRESHARED_KEY}"),
+    );
+
+    let socket = fixture.socket("closed-pairing");
+    fixture
+        .serve_configured_daemon(&socket, AuthPolicy::TokenRequired)
+        .await;
+    let addr = fixture
+        .serve_configured_daemon_over_tcp(AuthPolicy::TokenRequired)
+        .await;
+
+    // One surface pairs on each transport while the key is configured, and both
+    // are served.
+    let mut local = fixture.client(&socket, Surface::Ui).await;
+    local
+        .pair(PRESHARED_KEY)
+        .await
+        .expect("the key pairs the surface on the local transport");
+    let mut remote = fixture.remote_client(addr, Surface::Cli).await;
+    remote
+        .pair(PRESHARED_KEY)
+        .await
+        .expect("the key pairs the surface on the remote transport");
+    for (transport, caller) in [("local", &local), ("remote", &remote)] {
+        assert_eq!(
+            caller
+                .echo("paired before the key was removed")
+                .await
+                .expect("a paired surface is served"),
+            "paired before the key was removed",
+            "the {transport} transport serves the surface it paired"
+        );
+    }
+
+    // The operator removes the key and restarts: a fresh store on the same file
+    // and fresh listeners on both transports, built from the configuration the
+    // way the daemon reads it at startup. An unset key resolves to no key rather
+    // than to an error.
+    fixture.unset_var(daemon::secret::PRESHARED_KEY_ENV);
+    let restarted = Store::open(fixture.database())
+        .await
+        .expect("the restarted daemon opens the same database");
+    let second_socket = fixture.socket("closed-pairing-again");
+    serve(
+        &second_socket,
+        service(
+            restarted.clone(),
+            daemon::secret::resolve_preshared_key().expect("an unset key is not an error"),
+            AuthPolicy::TokenRequired,
+        ),
+    )
+    .await;
+    let second_addr = serve_over_tcp(service(
+        restarted.clone(),
+        daemon::secret::resolve_preshared_key().expect("an unset key is not an error"),
+        AuthPolicy::TokenRequired,
+    ))
+    .await;
+
+    // Pairing is closed on both transports, and the refusal reaches the client
+    // as the typed state it is rather than as a transport failure.
+    for (transport, mut caller) in [
+        ("local", fixture.client(&second_socket, Surface::Test).await),
+        (
+            "remote",
+            fixture.remote_client(second_addr, Surface::Test).await,
+        ),
+    ] {
+        let error = caller
+            .pair(PRESHARED_KEY)
+            .await
+            .expect_err("there is no key to pair with any more");
+        assert!(
+            matches!(
+                error,
+                ClientError::Pairing {
+                    cause: PairingCause::Disabled
+                }
+            ),
+            "the {transport} transport: expected the disabled-pairing refusal, got {error}"
+        );
+    }
+    assert_eq!(
+        restarted.surfaces().await.expect("the rows read"),
+        vec!["cli".to_owned(), "ui".to_owned()],
+        "a closed pairing writes nothing"
+    );
+
+    // Nothing was revoked: the tokens minted before the restart are still what
+    // the calls carry, on both transports.
+    let local = fixture.client(&second_socket, Surface::Ui).await;
+    let remote = fixture.remote_client(second_addr, Surface::Cli).await;
+    assert_eq!(
+        local
+            .echo("still served")
+            .await
+            .expect("closing pairing revokes nothing on the local transport"),
+        "still served"
+    );
+    assert_eq!(
+        remote
+            .echo("still served")
+            .await
+            .expect("closing pairing revokes nothing on the remote transport"),
+        "still served"
     );
 }

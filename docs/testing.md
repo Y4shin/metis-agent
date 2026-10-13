@@ -60,6 +60,11 @@ is no default bind address, so remote access cannot be enabled by accident:
   `Client::with_remote_addr`; it also asserts that an unset variable binds no
   socket, and that the listener task releases its port when it is dropped. TCP
   is the first front-end every target has, so the test is not Unix-gated.
+- `cargo test -p daemon --test auth` pairs over that same listener (below), so a
+  device with no access to the local socket is set up the way the remote
+  transport is reached: the daemon's own service mounted with
+  `AuthPolicy::TokenRequired`, a client built with `Client::with_remote_addr` and
+  a declared surface, and the preshared key presented on the pairing call.
 - The configuration rule is unit-tested in
   `crates/api-contracts/src/transport.rs` (`cargo test -p api-contracts`): unset
   and empty resolve to `None`, an `IP:port` literal resolves to `Some`, and
@@ -185,7 +190,10 @@ the store:
   refuses an unset variable, a missing file, a keychain tool that is there but
   refuses, and a secret file group or others can read. The keychain halves run
   against a stub tool on a narrowed `PATH`, so the machine's real keychain is
-  never touched.
+  never touched. The daemon's own configuration follows the same rule with one
+  difference: an unset or empty `METIS_PRESHARED_KEY` resolves to no key, because
+  pairing is optional, while a configured reference that cannot be resolved stays
+  a typed error.
 - `cargo test -p daemon --test auth` serves the daemon's own service over a
   real socket and drives it through the client harness: pairing mints one token
   whose hash is the only thing the daemon keeps, a wrong preshared key and a
@@ -200,7 +208,16 @@ the store:
   interceptor chain lives on the service, so the `Router`-taking `serve_tcp` and
   `serve_tcp_listener` cannot carry a credential policy. The parity assertion
   mounts one service on the Unix and the TCP front-end and requires the same
-  refusal and the same served answer from both.
+  refusal and the same served answer from both. Pairing over the remote listener
+  is driven the same way: the surface pairs with the preshared key over TCP, the
+  minted token is what the authenticated call after it carries, and the pairing
+  call reaches the handler as the procedure path alone. Removing the preshared
+  key and restarting closes pairing on both transports, asserted by the same test
+  family: the pairing call is refused as disabled over the Unix socket and over
+  TCP, while a surface paired before the key was removed keeps being served on
+  both. A wrong key and a repeated pairing reach the client as the typed
+  `ClientError::Pairing` errors, read from the `metis-pair-error` response header
+  and never from message text.
 - `cargo test -p daemon` also covers the unit halves: the digest contract
   between the token `Pair` returns and the row the store wrote, the refusal
   headers, and the policy's exemption of the pairing procedure.
