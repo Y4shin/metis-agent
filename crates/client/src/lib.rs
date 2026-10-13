@@ -341,10 +341,11 @@ impl Client {
 
     /// Open the daemon's event stream for `channels`, after `last_event_id`.
     ///
-    /// The stream's first messages are the snapshot of each selected channel,
-    /// what follows them are the events published while the stream is open, and
-    /// an idle stretch is filled with heartbeats. `last_event_id` is the cursor:
-    /// `0` means no cursor, and the identifiers it names start at `1`.
+    /// The stream opens with the snapshot of the selected channels (one empty
+    /// snapshot message when they hold nothing), what follows are the events
+    /// published while the stream is open, and an idle stretch is filled with
+    /// heartbeats. `last_event_id` is the cursor: `0` means no cursor, and the
+    /// identifiers it names start at `1`.
     ///
     /// # Errors
     ///

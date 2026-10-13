@@ -101,10 +101,11 @@ enum EventKind {
   // Not set. A receiver treats it as a message it cannot act on.
   EVENT_KIND_UNSPECIFIED = 0;
 
-  // The current head of a selected channel, sent before any event that
-  // follows. A selected channel with nothing in the window contributes no
-  // message, so a stream opened before anything was published begins with the
-  // first event or heartbeat that comes after it.
+  // The opening message of every stream. A selected channel that holds an
+  // event contributes its head, and when no selected channel holds anything the
+  // snapshot is one empty message: no channel, no payload, and the daemon's
+  // latest identifier. A receiver therefore always sees the snapshot before any
+  // live traffic.
   EVENT_KIND_SNAPSHOT = 1;
 
   // A liveness message on an otherwise idle stream. It carries the id of the

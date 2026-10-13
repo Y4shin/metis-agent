@@ -203,11 +203,14 @@ impl Ring {
     /// The stream one subscriber is served: the snapshot for `channels` first,
     /// then the events that follow it, with a heartbeat on an idle stream.
     ///
-    /// The subscription is taken before the snapshot, so an event published
-    /// between the two is not lost; events at or below the snapshot's head are
-    /// then suppressed, so the stream carries each event once. A non-zero
-    /// `cursor` is a floor on the same terms, which is the placeholder rule
-    /// `stream-resume-and-expiry` replaces.
+    /// Every stream opens with the snapshot rather than with live traffic: a
+    /// selected channel holding an event contributes its head, and a selection
+    /// holding nothing contributes one empty snapshot message carrying the
+    /// daemon's latest identifier. The subscription is taken before the
+    /// snapshot, so an event published between the two is not lost; events at or
+    /// below the snapshot's head are then suppressed, so the stream carries
+    /// each event once. A non-zero `cursor` is a floor on the same terms, which
+    /// is the placeholder rule `stream-resume-and-expiry` replaces.
     ///
     /// The item is a `Result` because that is the body a streaming handler
     /// answers with: nothing fails today, and the ring going away ends the
@@ -220,10 +223,23 @@ impl Ring {
         heartbeat: Duration,
     ) -> impl Stream<Item = Result<v1::Event, ConnectError>> + Send + 'static {
         let subscription = self.subscribe();
-        let snapshot = self.snapshot(channels);
-        let floor = cursor.max(snapshot.iter().map(|event| event.id).max().unwrap_or(0));
+        let heads = self.snapshot(channels);
+        let floor = cursor.max(heads.iter().map(|event| event.id).max().unwrap_or(0));
+        let mut pending: VecDeque<Event> = heads.into();
+        if pending.is_empty() {
+            // Nothing to report, and the stream still opens with the snapshot:
+            // the empty one names no channel and carries no payload, and its
+            // identifier is the daemon's latest, so a receiver always knows the
+            // snapshot has been taken before live traffic reaches it.
+            pending.push_back(Event {
+                id: self.latest_id(),
+                kind: EventKind::Snapshot,
+                channel: String::new(),
+                payload: String::new(),
+            });
+        }
         let state = StreamState {
-            pending: snapshot.into(),
+            pending,
             selected: channels
                 .iter()
                 .map(|channel| (*channel).to_owned())
@@ -548,14 +564,23 @@ mod tests {
         Ok(())
     }
 
-    /// A closed ring ends the serving stream rather than hanging it.
+    /// A stream over a selection that holds nothing opens with the empty
+    /// snapshot, and a closed ring ends the stream rather than hanging it.
     #[tokio::test]
-    async fn the_serving_stream_ends_when_the_ring_is_gone() {
+    async fn the_serving_stream_opens_with_the_empty_snapshot_and_ends_with_the_ring()
+    -> Result<(), ConnectError> {
         let ring = Ring::new(4);
         let mut stream = Box::pin(ring.stream(&["daemon"], 0, Duration::from_secs(60)));
 
+        let snapshot = stream.next().await.expect("the stream is live")?;
+        assert_eq!(snapshot.kind, EventKind::Snapshot);
+        assert_eq!(snapshot.id, 0, "nothing has been published yet");
+        assert!(snapshot.channel.is_empty());
+        assert!(snapshot.payload.is_empty());
+
         drop(ring);
         assert!(stream.next().await.is_none());
+        Ok(())
     }
 
     /// The message mirror keeps the wire message's fields, and the unknown

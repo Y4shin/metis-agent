@@ -326,9 +326,10 @@ async fn a_stream_opens_with_the_snapshot_and_then_carries_the_next_event() {
     );
 }
 
-/// A stream opened before anything was published opens with the event that
-/// follows, and an idle stream carries heartbeats as ordinary messages: the
-/// same message type, the same identifier space.
+/// A stream opened before anything was published opens with the empty snapshot,
+/// heartbeats while it is idle, and carries the event that follows. The
+/// heartbeat is an ordinary message: the same message type, the same identifier
+/// space.
 #[tokio::test]
 async fn an_idle_stream_carries_heartbeats_and_then_the_event_that_follows() {
     let fixture = Fixture::new("heartbeat").await;
@@ -343,8 +344,15 @@ async fn an_idle_stream_carries_heartbeats_and_then_the_event_that_follows() {
         .await
         .expect("the stream is established");
 
-    // Nothing has been published, so there is nothing to snapshot: the first
-    // message is the heartbeat of an idle stream.
+    // Nothing has been published, so the snapshot is the empty one: no channel,
+    // no payload, and the daemon's latest identifier, which is `0` here.
+    let empty = next(&mut stream).await;
+    assert_eq!(empty.kind, EventKind::Snapshot);
+    assert_eq!(empty.id, 0, "nothing has been assigned an identifier yet");
+    assert!(empty.channel.is_empty());
+    assert!(empty.payload.is_empty());
+
+    // The stream then heartbeats while it stays idle.
     let heartbeat = tokio::time::timeout(Duration::from_secs(5), next(&mut stream))
         .await
         .expect("the stream heartbeats an idle stretch");

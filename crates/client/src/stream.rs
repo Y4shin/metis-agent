@@ -17,10 +17,11 @@ type Body = hyper::body::Incoming;
 
 /// A live event stream from the daemon.
 ///
-/// The stream opens with the snapshot for the channels it selected, then carries
-/// the events that follow, with heartbeats on an idle stretch. Its identifiers
-/// never decrease. Dropping the stream drops the connection, and opening a new
-/// one is how a caller resyncs.
+/// The stream opens with the snapshot for the channels it selected (one empty
+/// snapshot message when they hold nothing), then carries the events that
+/// follow, with heartbeats on an idle stretch. Its identifiers never decrease.
+/// Dropping the stream drops the connection, and opening a new one is how a
+/// caller resyncs.
 pub struct EventStream {
     inner: ServerStream<Body, EventView<'static>>,
 }

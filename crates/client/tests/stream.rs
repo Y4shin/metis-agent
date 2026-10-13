@@ -114,8 +114,9 @@ async fn the_wrapper_drains_the_stream_the_skeleton_serves() {
     assert_eq!(event.payload, "{\"next\":true}");
 }
 
-/// A stream over a channel nothing was published to carries only heartbeats,
-/// and those are ordinary messages with the ring's latest identifier.
+/// A stream over a channel nothing was published to still opens with the
+/// snapshot, which is the empty one, and then carries heartbeats: ordinary
+/// messages carrying the ring's latest identifier.
 #[tokio::test]
 async fn a_channel_with_no_events_carries_the_skeleton_heartbeat() {
     let directory = TempDir::new("quiet");
@@ -131,6 +132,15 @@ async fn a_channel_with_no_events_carries_the_skeleton_heartbeat() {
         .stream_events(&["daemon"], 0)
         .await
         .expect("the stream is established");
+
+    let empty = stream
+        .message()
+        .await
+        .expect("the stream carries a message")
+        .expect("the stream has not ended");
+    assert_eq!(empty.kind, EventKind::Snapshot);
+    assert_eq!(empty.id, 0);
+    assert!(empty.channel.is_empty());
 
     // An event on a channel this stream did not select must not reach it, so
     // what arrives is the heartbeat of the idle selected channel.
