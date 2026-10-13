@@ -34,7 +34,7 @@ back. The same convention applies to every session that continues this work:
 - Say explicitly when nothing is needed from the operator. That is the common case
   and it is what makes the channel trustworthy.
 
-## Status as of commit `4dbf5ce`
+## Status as of the prototype commit `25bb165`
 
 - The main prototype now lives in the repository at `spikes/plugin-registry`
   (see its `README.md`). It is throwaway: not product code, not a committed ABI,
