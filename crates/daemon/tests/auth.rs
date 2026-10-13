@@ -13,6 +13,7 @@
 #![cfg(unix)]
 
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,7 +23,7 @@ use api_contracts::connect::metis::v1::{
     DAEMON_SERVICE_ECHO_SPEC, DaemonService, DaemonServiceExt,
 };
 use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse, PairRequest, PairResponse};
-use api_contracts::transport::serve_uds_service;
+use api_contracts::transport::{serve_tcp_listener_service, serve_uds_service};
 use client::credential::{self, Backend};
 use client::{Client, ClientError, CredentialCause, Surface};
 use connectrpc::{
@@ -234,16 +235,21 @@ impl Fixture {
         bytes
     }
 
-    /// Serve a recording service with `policy`, so a test can prove whether a
-    /// handler ran.
-    async fn serve_recording(&self, path: &Path, policy: AuthPolicy, served: &Served) {
+    /// The recording service with `policy`, so a test can prove whether a
+    /// handler ran, on either front-end.
+    fn recording_service(&self, policy: AuthPolicy, served: &Served) -> ConnectRpcService<Router> {
         let router = Arc::new(RecordingDaemon {
             served: served.clone(),
         })
         .register(Router::new());
-        let service = ConnectRpcService::new(router)
-            .with_interceptor(AuthInterceptor::new(self.store.clone(), policy));
-        serve(path, service).await;
+        ConnectRpcService::new(router)
+            .with_interceptor(AuthInterceptor::new(self.store.clone(), policy))
+    }
+
+    /// Serve a recording service with `policy`, so a test can prove whether a
+    /// handler ran.
+    async fn serve_recording(&self, path: &Path, policy: AuthPolicy, served: &Served) {
+        serve(path, self.recording_service(policy, served)).await;
     }
 
     /// A client that declares `surface`, which loads that surface's stored
@@ -255,6 +261,36 @@ impl Fixture {
             .with_surface(surface)
             .expect("the stored credential is readable")
     }
+
+    /// A client that reaches `addr` over TCP and declares `surface`, which
+    /// loads that surface's stored credential.
+    async fn remote_client(&self, addr: SocketAddr, surface: Surface) -> Client {
+        Client::with_remote_addr(addr)
+            .await
+            .expect("the remote transport builds")
+            .with_surface(surface)
+            .expect("the stored credential is readable")
+    }
+}
+
+/// Serve `service` on a loopback TCP listener the kernel binds, and report the
+/// address it chose.
+///
+/// The listener is bound here rather than by the front-end, so the test never
+/// guesses a port: this is the entry point a caller that must report the bound
+/// address uses, and the one every TCP test below mounts a credential policy
+/// through.
+async fn serve_over_tcp(service: ConnectRpcService<Router>) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
+    tokio::spawn(async move {
+        if let Err(err) = serve_tcp_listener_service(listener, service).await {
+            eprintln!("remote service listener error: {err}");
+        }
+    });
+    addr
 }
 
 /// Serve `service` on `path`, and return once the socket is bound.
@@ -765,5 +801,35 @@ async fn removing_one_row_and_restarting_revokes_only_that_surface() {
     assert_eq!(
         restarted.surfaces().await.expect("the rows read"),
         vec!["ui".to_owned()]
+    );
+}
+
+/// A service carrying `AuthPolicy::TokenRequired`, served over a real TCP
+/// socket, refuses a call with no credential.
+///
+/// This is what the landed TCP front-ends cannot do: they take a bare `Router`,
+/// and the interceptor chain lives on the service, so the policy only travels
+/// through a front-end that takes a service.
+#[tokio::test]
+async fn the_tcp_service_front_end_refuses_a_call_with_no_credential() {
+    let fixture = Fixture::new("tcp-missing").await;
+    let served = Served::default();
+    let service = fixture.recording_service(AuthPolicy::TokenRequired, &served);
+    let addr = serve_over_tcp(service).await;
+
+    // The surface has no stored credential, so the call carries none.
+    let caller = fixture.remote_client(addr, Surface::Cli).await;
+    let error = caller
+        .echo("who am i")
+        .await
+        .expect_err("a credential is required here");
+    assert!(
+        matches!(error, ClientError::CredentialMissing),
+        "expected the missing-credential refusal, got {error}"
+    );
+    assert!(
+        served.paths().is_empty(),
+        "the handler never ran: {served:?}",
+        served = served.paths()
     );
 }

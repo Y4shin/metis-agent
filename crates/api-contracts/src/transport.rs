@@ -6,8 +6,10 @@
 //! in-memory duplex pair all reach the same Connect service without a second
 //! serve loop. `serve_uds` and `uds_transport` are the Unix front-ends;
 //! `serve_tcp` (`serve_tcp_listener` when the caller must report the bound
-//! address) and `tcp_transport` are the TCP ones; the later transport tickets
-//! add their own listener and connector against the same shapes.
+//! address) and `tcp_transport` are the TCP ones, with `serve_tcp_service` and
+//! `serve_tcp_listener_service` as the service-taking twins a caller mounts an
+//! interceptor chain through; the later transport tickets add their own
+//! listener and connector against the same shapes.
 //!
 //! The remote front-end is off unless the operator names a bind address:
 //! `REMOTE_ADDR_ENV` carries an `IP:port` literal, `resolve_remote_addr` reads
@@ -148,9 +150,10 @@ pub fn uds_transport(path: impl Into<std::path::PathBuf>) -> connectrpc::client:
 /// Serve a Connect router over a TCP socket.
 ///
 /// The listener is bound here, so a requested port of `0` is resolved by the
-/// operating system. Each accepted stream is handed to [`serve_stream`] on its
-/// own task, with a clone of the one router. The transport is plaintext: TLS
-/// and the proxy trust rule belong to their own tickets.
+/// operating system. Each accepted stream is handed to the shared connection
+/// body on its own task, carrying one service built from the router. The
+/// transport is plaintext: TLS and the proxy trust rule belong to their own
+/// tickets.
 ///
 /// # Errors
 ///
@@ -162,24 +165,57 @@ pub async fn serve_tcp(addr: SocketAddr, router: Router) -> io::Result<()> {
 
 /// Serve a Connect router over an already bound TCP listener.
 ///
-/// This is the same accept loop [`serve_tcp`] runs, not a second one. The split
-/// exists for a caller that must report the address the operating system
+/// This is the same accept loop [`serve_tcp_service`] runs, not a second one: it
+/// builds the service once and hands each accepted stream the same one. The
+/// split exists for a caller that must report the address the operating system
 /// assigned to a port of `0`: it binds first, reads `local_addr`, and hands the
 /// listener on. `client::skeleton::serve_remote` is that caller.
 ///
 /// # Errors
 ///
 /// Returns the accept error. Accepting runs until the task is dropped.
-pub async fn serve_tcp_listener(
-    listener: tokio::net::TcpListener,
-    router: Router,
+pub async fn serve_tcp_listener(listener: tokio::net::TcpListener, router: Router) -> io::Result<()> {
+    serve_tcp_listener_service(listener, ConnectRpcService::from_arc(Arc::new(router))).await
+}
+
+/// Serve an already built Connect service over a TCP socket.
+///
+/// The listener is bound here, so a requested port of `0` is resolved by the
+/// operating system, exactly as [`serve_tcp`] resolves it. The transport is
+/// plaintext: TLS and the proxy trust rule belong to their own tickets.
+///
+/// # Errors
+///
+/// Returns the bind or accept error. Accepting runs until the task is dropped.
+pub async fn serve_tcp_service(
+    addr: SocketAddr,
+    service: ConnectRpcService<Router>,
 ) -> io::Result<()> {
-    let router = Arc::new(router);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_tcp_listener_service(listener, service).await
+}
+
+/// Serve an already built Connect service over an already bound TCP listener.
+///
+/// The accept loop is the same one [`serve_tcp_listener`] runs, and each
+/// accepted stream reaches the same private connection body [`serve_stream`]
+/// runs. A caller reaches this instead of `serve_tcp_listener` when it mounted
+/// an interceptor chain, which lives on the service rather than on the router:
+/// a remote listener that enforces a credential policy mounts a service.
+///
+/// # Errors
+///
+/// Returns the accept error. Accepting runs until the task is dropped.
+pub async fn serve_tcp_listener_service(
+    listener: tokio::net::TcpListener,
+    service: ConnectRpcService<Router>,
+) -> io::Result<()> {
+    let service = Arc::new(service);
     loop {
         let (stream, _) = listener.accept().await?;
-        let router = Arc::clone(&router);
+        let service = Arc::clone(&service);
         tokio::spawn(async move {
-            if let Err(err) = serve_stream(stream, router).await {
+            if let Err(err) = serve_connection(stream, (*service).clone()).await {
                 eprintln!("remote connection ended with error: {err}");
             }
         });
