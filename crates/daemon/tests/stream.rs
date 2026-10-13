@@ -211,10 +211,15 @@ impl Fixture {
     }
 }
 
-/// Serve `service` on `path`, and return once the socket is bound.
-async fn serve(path: &Path, service: ConnectRpcService<Router>) {
+/// Serve `service` on `path`, and return the listener task once the socket is
+/// bound.
+///
+/// Dropping the returned handle detaches the listener, which is what the other
+/// tests do; aborting it drops the served service, which is what "the daemon
+/// restarted" means to the restart test.
+async fn serve(path: &Path, service: ConnectRpcService<Router>) -> tokio::task::JoinHandle<()> {
     let served_path = path.to_path_buf();
-    tokio::spawn(async move {
+    let listener = tokio::spawn(async move {
         if let Err(err) = serve_uds_service(&served_path, service).await {
             eprintln!("daemon listener error: {err}");
         }
@@ -223,6 +228,7 @@ async fn serve(path: &Path, service: ConnectRpcService<Router>) {
         client::skeleton::wait_for_socket(path).await,
         "the listener binds its socket"
     );
+    listener
 }
 
 /// Serve `service` on a loopback listener the kernel binds, and report the
@@ -278,7 +284,7 @@ async fn a_stream_opens_with_the_snapshot_and_then_carries_the_next_event() {
     let socket = fixture.socket("snapshot");
     let service = fixture.service();
     let ring: Ring = service.ring();
-    serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
+    let _served = serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
 
     // The event the stream will open with: it was published before the stream
     // existed, so it can only reach the client through the snapshot.
@@ -355,7 +361,7 @@ async fn an_idle_stream_carries_heartbeats_and_then_the_event_that_follows() {
     let socket = fixture.socket("heartbeat");
     let service = fixture.service();
     let ring = service.ring();
-    serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
+    let _served = serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
 
     let client = fixture.client(&socket, Surface::Test).await;
     let mut stream = client
@@ -391,6 +397,46 @@ async fn an_idle_stream_carries_heartbeats_and_then_the_event_that_follows() {
     assert_eq!(event.payload, "{\"late\":true}");
 }
 
+/// A stream opened with a cursor delivers only the events that follow it: the
+/// replay is what the ring still holds after the identifier, in order, typed as
+/// the events they are, and it carries no snapshot.
+#[tokio::test]
+async fn a_stream_opened_with_a_cursor_replays_only_what_follows_it() {
+    let fixture = Fixture::new("replay").await;
+    let socket = fixture.socket("replay");
+    let service = fixture.service();
+    let ring = service.ring();
+    let _served = serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
+
+    let first = ring.publish("daemon", EventKind::Event, "1");
+    let cursor = ring.publish("daemon", EventKind::Event, "2");
+    let third = ring.publish("daemon", EventKind::Event, "3");
+    assert_eq!([first, cursor, third], [1, 2, 3]);
+
+    let client = fixture.client(&socket, Surface::Test).await;
+    let mut stream = client
+        .stream_events(&["daemon"], cursor)
+        .await
+        .expect("a cursor the ring still holds is served");
+
+    let replayed = next(&mut stream).await;
+    assert_eq!(
+        replayed.kind,
+        EventKind::Event,
+        "a resumed stream carries no snapshot"
+    );
+    assert_eq!(replayed.id, third, "only what follows the cursor");
+    assert_eq!(replayed.payload, "3");
+
+    // The live subscription follows the replay, so the stream keeps carrying.
+    let fourth = ring.publish("daemon", EventKind::Event, "4");
+    let live = tokio::time::timeout(Duration::from_secs(5), next(&mut stream))
+        .await
+        .expect("the stream keeps carrying messages");
+    assert_eq!(live.kind, EventKind::Event);
+    assert_eq!(live.id, fourth);
+}
+
 /// A stream opened with a cursor older than the ring is refused before any
 /// message is served, and the client reads the refusal as the typed expired
 /// cursor. The answer is the resync, which is the cursorless form of the same
@@ -401,7 +447,7 @@ async fn an_expired_cursor_is_refused_and_the_resync_opens_with_the_snapshot() {
     let socket = fixture.socket("expired");
     let service = fixture.service();
     let ring = service.ring();
-    serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
+    let _served = serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
 
     expire_cursor_one(&ring);
     assert!(
@@ -429,6 +475,146 @@ async fn an_expired_cursor_is_refused_and_the_resync_opens_with_the_snapshot() {
     assert_eq!(snapshot.kind, EventKind::Snapshot);
     assert_eq!(snapshot.id, ring.latest_id());
     assert_eq!(snapshot.channel, "daemon");
+}
+
+/// A disconnect and a reconnect with the last seen identifier lose nothing and
+/// repeat nothing: the events published while nothing was connected arrive once,
+/// in order, and the ones already delivered do not come back.
+#[tokio::test]
+async fn a_reconnect_resumes_without_a_gap_or_a_duplicate() {
+    let fixture = Fixture::new("reconnect").await;
+    let socket = fixture.socket("reconnect");
+    let service = fixture.service();
+    let ring = service.ring();
+    let _served = serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
+
+    let client = fixture.client(&socket, Surface::Test).await;
+    let mut stream = client
+        .stream_events(&["daemon"], 0)
+        .await
+        .expect("the stream is established");
+
+    // The stream opens with the empty snapshot, which names no channel and
+    // therefore advances no cursor.
+    let opening = next(&mut stream).await;
+    assert_eq!(opening.kind, EventKind::Snapshot);
+    assert_eq!(opening.id, 0);
+
+    let delivered = ring.publish("daemon", EventKind::Event, "seen");
+    let seen = next(&mut stream).await;
+    assert_eq!(seen.kind, EventKind::Event);
+    assert_eq!(seen.id, delivered);
+    // The cursor a caller resumes by is the highest `EVENT` identifier it has
+    // processed.
+    let cursor = seen.id;
+
+    // Disconnect, then publish while nothing is connected.
+    drop(stream);
+    let missed = [
+        ring.publish("daemon", EventKind::Event, "missed-1"),
+        ring.publish("daemon", EventKind::Event, "missed-2"),
+    ];
+
+    let mut resumed = client
+        .stream_events(&["daemon"], cursor)
+        .await
+        .expect("the ring still holds the cursor");
+
+    let mut history = vec![seen.id];
+    for _ in 0..missed.len() {
+        let message = tokio::time::timeout(Duration::from_secs(5), next(&mut resumed))
+            .await
+            .expect("the resumed stream carries the missed events");
+        assert_eq!(
+            message.kind,
+            EventKind::Event,
+            "the replay carries no snapshot"
+        );
+        history.push(message.id);
+    }
+
+    assert_eq!(
+        history,
+        vec![delivered, missed[0], missed[1]],
+        "exactly the missed events, in order, each once"
+    );
+    assert!(
+        history.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "the identifiers are contiguous after the cursor: {history:?}"
+    );
+}
+
+/// A restart expires every cursor: the identifiers a previous daemon assigned
+/// are not in the new daemon's window at all, so a resume is refused and the
+/// answer is a cursorless stream, which opens with the new ring's snapshot.
+#[tokio::test]
+async fn a_restart_expires_every_cursor_and_a_cursorless_stream_starts_fresh() {
+    let fixture = Fixture::new("restart").await;
+    let first_socket = fixture.socket("restart-first");
+    let first = fixture.service();
+    let ring = first.ring();
+    let listener = serve(
+        &first_socket,
+        Arc::clone(&first).mount(AuthPolicy::LocalAcl),
+    )
+    .await;
+
+    let head = ring.publish("daemon", EventKind::Event, "{\"head\":true}");
+    let client = fixture.client(&first_socket, Surface::Test).await;
+    let mut stream = client
+        .stream_events(&["daemon"], 0)
+        .await
+        .expect("the stream is established");
+    let snapshot = next(&mut stream).await;
+    assert_eq!(snapshot.kind, EventKind::Snapshot);
+    assert_eq!(snapshot.id, head);
+    let cursor = ring.publish("daemon", EventKind::Event, "{\"next\":true}");
+    let live = next(&mut stream).await;
+    assert_eq!(live.kind, EventKind::Event);
+    assert_eq!(live.id, cursor);
+    drop(stream);
+
+    // The restart: the service, its listener, and its ring are gone. The socket
+    // file the landed listener leaves behind is why the second service is served
+    // on a second socket.
+    listener.abort();
+    drop(first);
+    let _ = listener.await;
+
+    let second_socket = fixture.socket("restart-second");
+    let second = fixture.service();
+    assert_eq!(
+        second.ring().latest_id(),
+        0,
+        "a restarted daemon begins with an empty ring"
+    );
+    let _restarted = serve(
+        &second_socket,
+        Arc::clone(&second).mount(AuthPolicy::LocalAcl),
+    )
+    .await;
+
+    let restarted = fixture.client(&second_socket, Surface::Test).await;
+    let refused = restarted
+        .stream_events(&["daemon"], cursor)
+        .await
+        .expect_err("the cursor is from the previous identifier space");
+    assert!(
+        matches!(refused, ClientError::CursorExpired),
+        "expected the typed expired-cursor refusal, got {refused}"
+    );
+
+    // The resync: a fresh cursorless stream, opening with the new ring's
+    // snapshot.
+    let mut fresh = restarted
+        .stream_events(&["daemon"], 0)
+        .await
+        .expect("a cursorless stream is served");
+    let snapshot = next(&mut fresh).await;
+    assert_eq!(snapshot.kind, EventKind::Snapshot);
+    assert_eq!(snapshot.id, 0, "the new ring has assigned no identifier");
+    assert!(snapshot.channel.is_empty());
+    assert!(snapshot.payload.is_empty());
 }
 
 /// The credential check runs at stream establishment: a stream without a
