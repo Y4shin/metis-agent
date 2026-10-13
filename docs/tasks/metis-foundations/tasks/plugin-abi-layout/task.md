@@ -221,6 +221,14 @@ Contract gaps the trait exposed, to settle in the spec:
   capability future, because the worker hop moves the future. This constrains
   plugin authors and belongs on the trait documentation.
 
+**D15, authoring surface decisions.** Both questions the trait spike left open are
+settled. The authoring trait exposes a cancellation token on the per-request
+`Call` context, so a plugin can select on it and a call blocked in I/O is dropped
+promptly, with the poll flag kept as a convenience. The trait adapter always
+returns pending and completes through the host callback, which is what the spike
+measured; the ABI keeps its inline path for plugins that implement the ABI
+directly, so nothing is lost and the trait path stays uniform.
+
 ## Alternatives considered
 
 - Mirroring the Rust trait in C. Rejected by the user's design principle: the

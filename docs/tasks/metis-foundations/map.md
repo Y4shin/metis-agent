@@ -110,9 +110,11 @@ streaming assumptions before anything is built on top.
   compile check all work and are cheap.
 - The authoring trait spike is also conclusive: a trait dispatches through one
   generic `invoke`, and only about 90 of roughly 780 translation lines know
-  about the trait, so no macro is justified. It leaves two decisions for
-  `plugin-contract` (the cancellation shape, and always-pending versus a
-  first-poll inline attempt) and exposes gaps: no lifecycle hook, `Default`
+  about the trait, so no macro is justified. Its two open questions are settled:
+  the authoring trait carries a cancellation token on the per-request context, so
+  a call blocked in I/O is dropped promptly, and the adapter always returns
+  pending while the ABI keeps its inline path for direct implementers. The gaps
+  it exposed are recorded: no lifecycle hook, `Default`
   being required for construction, no route for `emit_event`, no consistency
   check between descriptor names and dispatch names, and an error variant that
   carries control flow.
