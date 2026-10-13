@@ -17,8 +17,9 @@ phone can set itself up over the network.
 
 - [ ] The pairing call is reachable on the remote listener and gated by the same
       preshared key.
-- [ ] A test pairs over the remote transport, then completes an authenticated RPC
-      and an authenticated event stream.
+- [ ] A test pairs over the remote transport, then completes an authenticated RPC.
+      The authenticated event stream is asserted by the ticket that owns the first
+      streaming RPC, because the contract has none until `event-stream` lands.
 - [ ] Removing the preshared key and restarting closes pairing on both
       transports, asserted by a test.
 
