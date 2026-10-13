@@ -3,7 +3,7 @@ type: ticket
 subtype: feature
 title: Service-taking TCP front-end
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 size: s
 ---
@@ -96,3 +96,12 @@ loopback port by bind-and-release, so it is racy under a very busy host; and two
 parallel front-end families now exist over one connection body, with the parity
 test as the guard, covering the unary path only because the contract declares no
 streaming RPC yet.
+
+Knowledge harvested at finalize: the effort map's constraint bullet now records
+that both transports mount a `ConnectRpcService` and enforce the credential
+policy, with the `serve-tcp-service` follow-up closed. `docs/testing.md` already
+carried the service-taking TCP front-ends and the parity assertion from the
+implementation, so it needed no further change. The arch spec's landed section
+records the measured surface, including that the accept loop clones the service
+rather than the router and that `serve_tcp_service` cannot report a
+kernel-assigned address.

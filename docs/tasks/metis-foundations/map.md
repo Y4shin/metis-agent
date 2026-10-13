@@ -290,17 +290,18 @@ streaming assumptions before anything is built on top.
   environment reference, a keystore or a secret file and refuses a group- or
   world-readable file, and `daemon::auth::AuthInterceptor` authorizes unary and
   streaming calls. A listener mounts a `ConnectRpcService`, not a `Router`:
-  `serve_uds_service` mounts the policy on the Unix socket, and the TCP front-end
-  that would carry it is the `serve-tcp-service` ticket, which `remote-pairing`
-  is blocked by. The client keeps its token in the keychain or in a 600 file
+  `serve_uds_service` mounts the policy on the Unix socket and `serve_tcp_service`
+  carries it on TCP. The client keeps its token in the keychain or in a 600 file
   under the data directory and attaches it as a default header, and
   `Client::with_surface` is fallible because it loads that credential.
 - A listener mounts a `ConnectRpcService`, not a `Router`: `connectrpc` 0.9.1
-  keeps the interceptor chain on the service, so the credential policy cannot
-  travel through the landed `serve_tcp(addr, Router)`. `serve_uds_service` mounts
-  a policy on the Unix socket, and the TCP twin is the follow-up ticket
-  `serve-tcp-service`, which `remote-pairing` is blocked by. Until it lands, a
-  TCP listener mounted through the landed surface serves unauthenticated.
+  keeps the interceptor chain on the service, so a policy cannot travel through a
+  `Router`. `serve_uds_service` mounts one on the Unix socket and
+  `serve_tcp_service` with `serve_tcp_listener_service` mounts one on TCP, so both
+  transports enforce the credential policy with no peer-address sniffing.
+  `serve_tcp_listener` and `serve_stream` were reduced to delegations over the one
+  private connection body, keeping their signatures and behaviour, and the parity
+  test asserts the two front-ends answer the same way.
 
 ## Fog
 
