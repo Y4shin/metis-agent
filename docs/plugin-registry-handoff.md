@@ -83,6 +83,18 @@ inside the plugin, a synchronous fast path where the future completes on first
 poll, or keeping thread-per-call and accepting the cost. Note the constraint
 that `plugin-contract` must stay runtime-free, so any executor lives in the SDK.
 
+Discussion input, not a decision: the daemon and each plugin cannot share one
+runtime object, because a runtime is a Rust library type with no stable ABI, and
+a cdylib that statically links its own copy has its own statics and
+thread-locals, so the plugin cannot see the daemon's runtime context even at the
+same version. The cost is therefore per plugin build, not per call: one pool per
+plugin turns the 26 us into roughly a task dispatch. Native in-process plugins
+are the exception, since they are compiled into the daemon and can be awaited on
+its executor with no extra threads. The counterweights are that N plugins with
+default runtimes means N thread pools sized from the CPU count, so the SDK
+should own a bounded, lazily created, idling policy; and that separate executors
+keep plugin work off the daemon's executor threads, which is real isolation.
+
 ### Q2. Host and plugin payload types disagreeing, and only failing at runtime
 
 Only bytes cross the boundary, so the compiler never sees both sides. Host
