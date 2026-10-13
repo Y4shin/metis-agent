@@ -23,9 +23,7 @@ use api_contracts::connect::metis::v1::{
     DAEMON_SERVICE_ECHO_SPEC, DaemonService, DaemonServiceExt,
 };
 use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse, PairRequest, PairResponse};
-use api_contracts::transport::{
-    serve_tcp_listener_service, serve_tcp_service, serve_uds_service,
-};
+use api_contracts::transport::{serve_tcp_listener_service, serve_tcp_service, serve_uds_service};
 use client::credential::{self, Backend};
 use client::{Client, ClientError, CredentialCause, Surface};
 use connectrpc::{
@@ -981,7 +979,10 @@ async fn a_service_mounted_on_both_front_ends_answers_the_same_way() {
     // handler ran.
     for (front_end, caller) in [
         ("local", fixture.client(&socket, Surface::Cli).await),
-        ("remote", fixture.remote_client(reserved, Surface::Cli).await),
+        (
+            "remote",
+            fixture.remote_client(reserved, Surface::Cli).await,
+        ),
     ] {
         let error = caller
             .echo("who am i")

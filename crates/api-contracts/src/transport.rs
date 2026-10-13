@@ -174,7 +174,10 @@ pub async fn serve_tcp(addr: SocketAddr, router: Router) -> io::Result<()> {
 /// # Errors
 ///
 /// Returns the accept error. Accepting runs until the task is dropped.
-pub async fn serve_tcp_listener(listener: tokio::net::TcpListener, router: Router) -> io::Result<()> {
+pub async fn serve_tcp_listener(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> io::Result<()> {
     serve_tcp_listener_service(listener, ConnectRpcService::from_arc(Arc::new(router))).await
 }
 
