@@ -27,15 +27,16 @@ use std::time::Duration;
 use api_contracts::cancel::CancelOutcome;
 use api_contracts::connect::metis::v1::DaemonServiceClient;
 use api_contracts::events::{Event, Ring};
-use api_contracts::proto::metis::v1::{CancelRequest, EventKind};
-use api_contracts::request::RequestId;
+use api_contracts::proto::metis::v1::{CancelRequest, EchoRequest, EventKind, StreamEventsRequest};
+use api_contracts::request::{REQUEST_ID_HEADER, RequestId};
 use api_contracts::transport::{serve_uds_service, uds_transport};
 use client::{Client, ClientError, EventStream, Surface};
-use connectrpc::client::ClientConfig;
+use connectrpc::client::{CallOptions, ClientConfig};
 use connectrpc::{ConnectRpcService, Router};
 use daemon::auth::AuthPolicy;
 use daemon::service::Service;
 use daemon::state::Store;
+use http::HeaderValue;
 
 /// The heartbeat the fixture's service answers with. Short, so a test never
 /// waits on the production interval; the daemon's own default is fifteen
@@ -423,5 +424,72 @@ async fn the_stream_carries_the_identifier_the_wrapper_declared() {
             .await
             .expect("the cancel reaches the daemon"),
         CancelOutcome::Cancelled
+    );
+}
+
+/// A declared identifier comes back in the response metadata, for a unary call
+/// and for the stream alike: correlation is a property of the interface rather
+/// than something each handler remembers, and a call that declares none is
+/// served exactly as it was before identifiers existed.
+#[tokio::test]
+async fn a_declared_identifier_comes_back_in_the_response_metadata() {
+    let fixture = Fixture::new("echo").await;
+    let socket = fixture.socket("echo");
+    let service = fixture.service();
+    let ring: Ring = service.ring();
+    let _served = serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
+    ring.publish("daemon", EventKind::Event, "{\"head\":true}");
+
+    let daemon = raw_client(&socket);
+
+    let declared = CallOptions::default()
+        .try_with_header(REQUEST_ID_HEADER, "cli-7")
+        .expect("a printable identifier is a header value");
+    let response = daemon
+        .echo_with_options(
+            EchoRequest {
+                message: "hello".to_owned(),
+                ..Default::default()
+            },
+            declared,
+        )
+        .await
+        .expect("the call is served");
+    assert_eq!(
+        response.headers().get(REQUEST_ID_HEADER),
+        Some(&HeaderValue::from_static("cli-7")),
+        "the declared identifier is copied into the response metadata"
+    );
+
+    let response = daemon
+        .echo(EchoRequest {
+            message: "hello".to_owned(),
+            ..Default::default()
+        })
+        .await
+        .expect("a call that declares nothing is served");
+    assert_eq!(
+        response.headers().get(REQUEST_ID_HEADER),
+        None,
+        "a call with no identifier gets none back"
+    );
+
+    let declared = CallOptions::default()
+        .try_with_header(REQUEST_ID_HEADER, "cli-8")
+        .expect("a printable identifier is a header value");
+    let stream = daemon
+        .stream_events_with_options(
+            StreamEventsRequest {
+                channels: vec!["daemon".to_owned()],
+                ..Default::default()
+            },
+            declared,
+        )
+        .await
+        .expect("the stream is established");
+    assert_eq!(
+        stream.headers().get(REQUEST_ID_HEADER),
+        Some(&HeaderValue::from_static("cli-8")),
+        "the stream answer carries the identifier the call declared"
     );
 }

@@ -7,7 +7,11 @@
 
 use std::fmt;
 
-use http::HeaderMap;
+use connectrpc::interceptor::{
+    Next, NextStream, StreamRequest, StreamResponse, UnaryRequest, UnaryResponse,
+};
+use connectrpc::{ConnectError, Interceptor, PayloadStream};
+use http::{HeaderMap, HeaderValue};
 
 /// The request header carrying the identifier a caller declares.
 pub const REQUEST_ID_HEADER: &str = "metis-request-id";
@@ -93,6 +97,57 @@ impl fmt::Display for RequestId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// The echo that makes a declared identifier part of the interface rather than
+/// something each handler remembers to return.
+///
+/// The incoming identifier is copied verbatim into the response metadata of a
+/// unary call and of a stream alike, so a caller correlates an answer with the
+/// call it made without the daemon's handlers knowing about it. A call that
+/// declares no identifier has nothing copied, and it is served exactly as it was
+/// before identifiers existed.
+///
+/// A malformed identifier is echoed as it came, because echoing is not the place
+/// that judges it: the handler that acts on the identifier refuses what it
+/// cannot read, and the response metadata still says which call was answered.
+pub struct EchoRequestId;
+
+// The interceptor trait is async, and the macro is the framework's own
+// re-export so this crate needs no second async-trait dependency.
+#[connectrpc::async_trait]
+impl Interceptor for EchoRequestId {
+    async fn intercept_unary(
+        &self,
+        req: UnaryRequest,
+        next: Next<'_>,
+    ) -> Result<UnaryResponse, ConnectError> {
+        let declared = declared_id(req.ctx.headers());
+        let mut response = next.run(req).await?;
+        if let Some(declared) = declared {
+            response.headers.insert(REQUEST_ID_HEADER, declared);
+        }
+        Ok(response)
+    }
+
+    async fn intercept_streaming(
+        &self,
+        req: StreamRequest,
+        inbound: PayloadStream,
+        next: NextStream<'_>,
+    ) -> Result<StreamResponse, ConnectError> {
+        let declared = declared_id(req.ctx.headers());
+        let mut response = next.run(req, inbound).await?;
+        if let Some(declared) = declared {
+            response.headers.insert(REQUEST_ID_HEADER, declared);
+        }
+        Ok(response)
+    }
+}
+
+/// The identifier a call declared, as the header value that is copied back.
+fn declared_id(headers: &HeaderMap) -> Option<HeaderValue> {
+    headers.get(REQUEST_ID_HEADER).cloned()
 }
 
 #[cfg(test)]

@@ -25,11 +25,11 @@ use api_contracts::proto::metis::v1::{
     CancelRequest, CancelResponse, EchoRequest, EchoResponse, Event, PairRequest, PairResponse,
     StreamEventsRequest,
 };
-use api_contracts::request::{self, RequestId};
+use api_contracts::request::{self, EchoRequestId, RequestId};
 use api_contracts::transport::{self, ConfigError};
 use connectrpc::{
-    ConnectError, ErrorCode, RequestContext, Response, Router, ServiceRequest, ServiceResult,
-    ServiceStream,
+    ConnectError, ConnectRpcService, ErrorCode, RequestContext, Response, Router, ServiceRequest,
+    ServiceResult, ServiceStream,
 };
 
 /// How long the skeleton's streams may carry nothing before they carry a
@@ -387,7 +387,7 @@ fn echo_body(message: &str) -> EchoResponse {
 /// Returns the bind or accept error from the transport front-end.
 #[cfg(unix)]
 pub async fn serve_uds(path: &std::path::Path) -> std::io::Result<()> {
-    api_contracts::transport::serve_uds(path, router()).await
+    api_contracts::transport::serve_uds_service(path, service(Ring::new(EVENT_CAPACITY))).await
 }
 
 /// Serve the skeleton on a Unix domain socket, streaming `ring`.
@@ -405,7 +405,20 @@ pub async fn serve_uds_with(
     ring: Ring,
     heartbeat: Duration,
 ) -> std::io::Result<()> {
-    api_contracts::transport::serve_uds(path, router_with(ring, heartbeat)).await
+    api_contracts::transport::serve_uds_service(path, service_with(ring, heartbeat)).await
+}
+
+/// The service the skeleton's socket serves: the router with the request
+/// identifier echo mounted, so the in-process service and the daemon's own
+/// service answer a declared identifier identically.
+#[cfg(unix)]
+fn service(ring: Ring) -> ConnectRpcService<Router> {
+    service_with(ring, HEARTBEAT_DEFAULT)
+}
+
+#[cfg(unix)]
+fn service_with(ring: Ring, heartbeat: Duration) -> ConnectRpcService<Router> {
+    ConnectRpcService::new(router_with(ring, heartbeat)).with_interceptor(EchoRequestId)
 }
 
 /// Wait, bounded, for a listener to create its socket file.

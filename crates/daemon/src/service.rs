@@ -18,7 +18,7 @@ use api_contracts::proto::metis::v1::{
     CancelRequest, CancelResponse, EchoRequest, EchoResponse, Event, PairRequest, PairResponse,
     StreamEventsRequest,
 };
-use api_contracts::request::{self, RequestIdError};
+use api_contracts::request::{self, EchoRequestId, RequestIdError};
 use connectrpc::{
     ConnectError, ConnectRpcService, ErrorCode, RequestContext, Response, Router, ServiceRequest,
     ServiceResult, ServiceStream,
@@ -107,7 +107,13 @@ impl Service {
     pub fn mount(self: Arc<Self>, policy: AuthPolicy) -> ConnectRpcService<Router> {
         let interceptor = AuthInterceptor::new(self.store.clone(), policy);
         let router = self.register(Router::new());
-        ConnectRpcService::new(router).with_interceptor(interceptor)
+        // The credential check is registered first, so it is the outer layer and
+        // a refused call never reaches the echo. The echo is registered for the
+        // whole service rather than per handler, so the daemon and the client's
+        // in-process service answer a declared identifier identically.
+        ConnectRpcService::new(router)
+            .with_interceptor(interceptor)
+            .with_interceptor(EchoRequestId)
     }
 }
 
