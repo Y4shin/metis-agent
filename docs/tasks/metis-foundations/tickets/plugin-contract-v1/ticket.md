@@ -27,12 +27,15 @@ deliberately.
 
 **The ABI and the contract crate**
 
-- [ ] The plugin table is a clean v2, not an append: `size`, `abi_major`,
+- [ ] The plugin table is a clean revision of the v1 table, not an append: `size`, `abi_major`,
       `abi_minor`, `create_instance`, `destroy_instance`, `list_capabilities`,
       `invoke_future`, `cancel`, `release_buffer`, `shutdown`,
       `service_complete`. `invoke` and the `complete` callback are deleted, not
-      deprecated, and `metis_plugin_entry_v2` with `abi_major = 2` is the only
-      exported entry symbol.
+      deprecated, and `metis_plugin_entry_v1` with `abi_major = 1` is the only
+      exported entry symbol. The entry order changed while the symbol and major
+      did not, so `abi_minor` becomes 1 and the loader refuses a minor it does
+      not know, which refuses a stale pre-release plugin instead of reading it
+      through the new entry order.
 - [ ] The host table is `size`, `user_data`, `progress`, `emit_event`, `log`,
       `service_request`, with `complete` deleted.
 - [ ] `MetisFutureHandle`, `MetisFutureVtable` (poll, drop), `MetisWaker` and
@@ -99,7 +102,7 @@ deliberately.
       harness drives the futures path end to end, prints one PASS or FAIL line
       per check, flushes stdout per line, builds the cdylib before the harness
       runs, and exits non-zero on any failure.
-- [ ] A C implementer of the v2 table exists and is compiled in CI with
+- [ ] A C implementer of the revised v1 table exists and is compiled in CI with
       `-std=c11 -Wall -Wextra -Werror` under both gcc and clang, and the harness
       drives it end to end: the ready path, a host-answered timer, cancel, and a
       drop with its service reply in flight, with the C-side allocation ledger
@@ -113,7 +116,7 @@ deliberately.
 **Records**
 
 - [ ] `arch-spec.md` is reconciled: it no longer calls `plugin-authoring-trait`
-      pending, it describes the v2 surface as landed, and it matches the code.
+      pending, it describes the revised v1 surface as landed, and it matches the code.
 - [ ] An ADR under `docs/adr/` records the contract-level decision: futures-only
       ABI, the routed authoring surface, no `async-ffi`, and the quarantine
       unload rule.
@@ -130,9 +133,12 @@ then the C implementer and the hazard checks, then the records.
 The contract leaves five points open on purpose. This ticket resolves them as
 follows, and an implementer should not silently reopen them:
 
-- The entry symbol becomes `metis_plugin_entry_v2` and the ABI major becomes 2.
-  The v1 table's append-only promise retires with it; within major 2, additive
-  change is still append-only by `size`.
+- The entry symbol stays `metis_plugin_entry_v1` and the ABI major stays 1,
+  because this revision lands before the first release and no plugin exists in the
+  wild to stay compatible with. The entry order inside the table does change, so
+  `abi_minor` becomes 1 and the loader refuses a minor it does not know until
+  `plugin-compatibility` relaxes that to additive tolerance. Additive change
+  inside major 1 is still append-only by `size`.
 - The two unread vtable `size` fields are deleted, with the residual above.
 - The control plane stays workable by keeping `list_capabilities` synchronous and
   on the table, while the per-call `metis.*` control capabilities (configure,
@@ -163,12 +169,12 @@ follows, and an implementer should not silently reopen them:
 
 - `plugin-compatibility` now depends on this ticket, because version tolerance is
   a property of the table this ticket replaces. Its prefix-tolerance criterion
-  was removed there and the rest was restated for the v2 table.
+  was removed there and the rest was restated for the revised v1 table.
 - The three effort maps that carried the superseded decisions are amended in the
   same change, and `docs/plugin-contract.md` section 16 lists what was
   superseded.
 - Prototype evidence worth reading before starting: the deleted-surface table and
-  v2 sketch in `round-3/shape/FINDINGS-shape.md`, the reclaim ledger in
+  the contract sketch in `round-3/shape/FINDINGS-shape.md` (the lane calls it the
   `round-3/reclaim/FINDINGS-reclaim.md`, the ownership clause and the C plugin in
   `round-3/ownership/`, and the drop-panic probe in
   `round-3/asyncffi/FINDINGS-async-ffi.md`.

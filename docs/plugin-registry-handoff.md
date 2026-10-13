@@ -93,7 +93,7 @@ that item is picked up.
   `round-3/verification/`.
 - Nothing is folded into the prototype yet. The operator approved the revised
   contract as the v1 shape on 2026-10-13. The contract text now lives at
-  `docs/plugin-contract.md`, and `spikes/plugin-registry/CONTRACT-V2-PROPOSAL.md`
+  `docs/plugin-contract.md`, and `spikes/plugin-registry/ROUND3-CONTRACT-PROPOSAL.md`
   is the proposal record (decisions D1 to D7) behind it. Folding the approved
   shape into the prototype still has to happen, and where it lands depends on
   which ticket owns it.
@@ -118,7 +118,7 @@ that item is picked up.
   because D1 deletes the executor seam and the pool; **O7** becomes moot because
   D1 deletes the landed `HostAdapter`, so no separate fix ticket is needed;
   **O10** resolved for today's table by a real C implementer, and re-opened for
-  the v2 table if D1 and D2 are approved; **O16** answered by D2, awaiting
+  the revised v1 table if D1 and D2 are approved; **O16** answered by D2, awaiting
   approval. Still untouched: O6, O8, O9, O11, O12, O13, O14, O15, O17, O18.
 - The approved contract is now a ticket:
   `docs/tasks/metis-foundations/tickets/plugin-contract-v1` (size xl, ready, no
@@ -287,8 +287,11 @@ This supersedes the earlier "refuse duplicate capability names at load" rule.
 primitives crate, because it is serde and JSON shaped; the primitives crate stays
 dependency-small and runtime-free.
 
-**A11. Append or a clean v2.** Append now. A v2 is worth its recompile cost only
-when the future seam replaces `Pending`/`complete`, not while both coexist.
+**A11. Append or a clean replacement.** Append now. A clean replacement is worth
+its recompile cost only when the future seam replaces `Pending`/`complete`, not
+while both coexist. Resolved: that trigger arrived, and `plugin-contract-v1`
+takes the clean replacement. It keeps the name v1, because nothing has been
+released yet.
 
 **A12. Earlier decisions still standing.** The trait's four role-named arms and
 their capability-count cap are a known defect, and the fix is folded into the open
@@ -386,7 +389,8 @@ settle.
 ## Next round (not started)
 
 Superseded in part: round three has now run (see the round 3 status above). What
-remains is the approval round on `CONTRACT-V2-PROPOSAL.md` and then the fold, not
+remains is the fold of the approved contract into the prototype and then the
+implementation ticket `plugin-contract-v1`, not
 another round of the shape below. This is the historical plan the next step was
 drawn from, not something already run. An earlier attempt was stopped
 before producing findings, so start fresh from the repository copy. Reuse or

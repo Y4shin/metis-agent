@@ -64,10 +64,10 @@ A plugin exports exactly one symbol. The daemon resolves it, checks `size` and
 the ABI version, and reads the table.
 
 ```
-metis_plugin_entry_v2() -> *const MetisPluginTableV2
+metis_plugin_entry_v1() -> *const MetisPluginTableV1
 ```
 
-The entry symbol's exact name and the major version bump are open (section 15).
+The symbol and the ABI major stay `v1` and 1, because this revision lands before the first release (section 15).
 
 ## 5. The plugin table
 
@@ -75,10 +75,10 @@ The entry symbol's exact name and the major version bump are open (section 15).
 | --- | --- | --- |
 | `size` | `usize` | Bytes of the table the plugin provides. Read first, always. |
 | `abi_major`, `abi_minor` | `u32` | Major is part of the symbol name; minor is advisory. |
-| `create_instance` | `(host: *const MetisHostApiV2, out_instance: **mut c_void) -> MetisStatus` | Builds an instance, stores the host table, runs the plugin's `started`. No instance on failure. |
+| `create_instance` | `(host: *const MetisHostApiV1, out_instance: **mut c_void) -> MetisStatus` | Builds an instance, stores the host table, runs the plugin's `started`. No instance on failure. |
 | `destroy_instance` | `(instance) -> MetisStatus` | Releases the instance. Only valid after `shutdown`. |
 | `list_capabilities` | `(instance, out_payload: *mut MetisBuffer) -> MetisStatus` | Returns a plugin-allocated payload listing capabilities, each with its name, version, and request and response schemas. |
-| `invoke_future` | `(instance, capability: *const u8, capability_len: usize, request_id: u64, payload: MetisBuffer, host: *const MetisHostApiV2, out: *mut MetisFutureHandle) -> MetisStatus` | The only call entry. On success `*out` holds a plugin-owned future. The request payload stays valid for the call only. |
+| `invoke_future` | `(instance, capability: *const u8, capability_len: usize, request_id: u64, payload: MetisBuffer, host: *const MetisHostApiV1, out: *mut MetisFutureHandle) -> MetisStatus` | The only call entry. On success `*out` holds a plugin-owned future. The request payload stays valid for the call only. |
 | `cancel` | `(instance, request_id: u64) -> MetisStatus` | Marks that call's cancellation token. The plugin's future is expected to resolve as `Cancelled` rather than be dropped mid-flight. |
 | `release_buffer` | `(buffer: MetisBuffer) -> MetisStatus` | The host frees a plugin-allocated buffer by calling this. The host never frees plugin memory itself. |
 | `shutdown` | `(instance) -> MetisStatus` | Quiesces the instance. The host drops every future before calling it, so nothing may arrive after it returns. |
@@ -253,7 +253,7 @@ boxed-future helper that replaces `async-ffi`.
 ## 14. What changed relative to the shape the prototype carried
 
 1. `invoke` and `complete` are gone: futures are the only call path, as a clean
-   v2 table. The legacy path and the executor seam it needed are what the 40
+   revised v1 table. The legacy path and the executor seam it needed are what the 40
    percent release-cdylib reduction measures.
 2. The four-arm authoring vocabulary (four capability consts, four associated
    request types) became one `call` routed by capability name, which removes the
@@ -271,20 +271,30 @@ boxed-future helper that replaces `async-ffi`.
    futures path so `invoke` can be deleted structurally rather than surviving as
    an inline side channel.
 
-## 15. Open for implementation
+## 15. Decisions the implementation ticket took
 
-- The control plane consequence: it becomes asynchronous, so `create_instance`
-  can no longer synchronously fetch a schema list. Accept that, or keep a
-  synchronous control entry.
-- The export name: `metis_plugin_entry_v2` with a major bump, or keep the current
-  symbol and let the version fields carry it.
-- Typed facades: ship the erased `call` alone, or make a generated typed facade
-  the recommended author experience from day one.
-- The two vtable `size` fields: delete them, or read them as presence
-  predicates.
-- Reclaim: the prototype reclaims on the calling thread; a real daemon probably
-  wants a reaper thread. Designed but not built, and it is the one part of rule 6
-  not proven under load.
+These were open when the contract was approved. `plugin-contract-v1` closes them
+as recorded here, so an implementer does not reopen them.
+
+- **Export name and version.** The symbol stays `metis_plugin_entry_v1` and the
+  ABI major stays 1, because this revision lands before the first release and no
+  plugin exists in the wild to be compatible with. The entry order does change,
+  so a stale pre-release plugin would be silently misread if it loaded:
+  `abi_minor` becomes 1 and the loader refuses a minor it does not know, which
+  refuses that stale plugin instead. `plugin-compatibility` later relaxes that to
+  additive tolerance inside the major. Additive change inside major 1 stays
+  append-only by `size`.
+- **Typed facades.** Not in this revision. The erased `call` plus published
+  schemas lands; generated typed facades belong to the SDK effort.
+- **The two vtable `size` fields.** Deleted, with the residual recorded: a
+  wrong-size plugin vtable is that plugin's own bug and is not detectable at
+  load.
+- **Control plane.** `list_capabilities` stays synchronous on the table, and only
+  the per-call control capabilities (configure, counters) move onto the futures
+  path, so `create_instance` never needs a schema fetch mid-call.
+- **Reclaim.** Caller-driven on the poll return, which is what the prototype
+  proved. A daemon-side reaper thread stays daemon work, and it is the one part
+  of rule 6 not proven under load.
 
 ## 16. Recorded decisions this contract supersedes
 

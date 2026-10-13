@@ -16,7 +16,9 @@ are ephemeral; the lane findings and their evidence are copied into `round-3/`.
 Four of four lanes completed. **Nothing is folded into the prototype yet**, and
 that is deliberate: the operator asked for an approval round on the final FFI/ABI
 and trait shape before the prototype takes it. The proposal to approve is
-`CONTRACT-V2-PROPOSAL.md` beside this file.
+`ROUND3-CONTRACT-PROPOSAL.md` beside this file; it was approved as
+`docs/plugin-contract.md`, and the implementation ticket is
+`docs/tasks/metis-foundations/tickets/plugin-contract-v1`.
 
 ## Answers at the top
 
@@ -221,4 +223,5 @@ against 825/818/593 ns over three runs, so the crate does not win per call.
 - `round-3/shape/`, `round-3/reclaim/`, `round-3/ownership/`,
   `round-3/asyncffi/`: lane findings, evidence, and the C plugin source.
 - `round-3/verification/`: the parent's own re-runs, one log per configuration.
-- `CONTRACT-V2-PROPOSAL.md`: the shape awaiting operator approval.
+- `ROUND3-CONTRACT-PROPOSAL.md`: the proposal record behind the approved
+  contract, kept for provenance.

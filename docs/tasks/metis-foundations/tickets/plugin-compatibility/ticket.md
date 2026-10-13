@@ -15,9 +15,10 @@ current ABI major, and that a newer plugin's unsupported capability is refused o
 its own rather than taking the whole plugin down.
 
 This ticket used to own the tolerance for a shorter table. That criterion moved
-out: `plugin-contract-v1` replaces the v1 table with a clean v2, so there is no
+out: `plugin-contract-v1` replaces the pre-release v1 table with a revised v1
+shape, so there is no
 longer an older table to tolerate across the boundary. What remains here is
-tolerance within the v2 table and the per-capability and payload promises.
+tolerance within the revised v1 table and the per-capability and payload promises.
 
 ## Acceptance criteria
 
@@ -35,5 +36,5 @@ tolerance within the v2 table and the per-capability and payload promises.
 
 - `plugin-abi-core`, because version tolerance is a property of the table and the
   descriptors.
-- `plugin-contract-v1`, because tolerance has to be asserted against the v2 table
-  that ticket lands, not against the v1 table it deletes.
+- `plugin-contract-v1`, because tolerance has to be asserted against the revised
+  v1 table that ticket lands, not against the pre-release table it replaces.

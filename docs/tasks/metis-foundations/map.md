@@ -96,9 +96,9 @@ streaming assumptions before anything is built on top.
   capability listing, one generic `invoke`, `cancel`, `release_buffer`,
   `shutdown`) plus host callbacks (`complete`, `progress`, `emit_event`, `log`).
   Everything else is payload. **Superseded by `docs/plugin-contract.md` and the
-  `plugin-contract-v1` ticket:** the futures-only v2 table deletes `invoke` and
-  `complete`, so the delivered v1 table is replaced rather than extended, while
-  additive change inside ABI major 2 stays append-only by `size`. Capability descriptors
+  `plugin-contract-v1` ticket:** the futures-only revised v1 table deletes `invoke` and
+  `complete`, so the delivered pre-release v1 table is replaced rather than extended, while
+  additive change inside ABI major 1 stays append-only by `size`. Capability descriptors
   name a kind, and V1 kinds are `tool` and `provider`.
 - Two throwaway prototypes validate that ABI strategy: an ABI mechanics spike
   and an authoring trait spike. Either may be abandoned with an inconclusive
@@ -267,7 +267,7 @@ streaming assumptions before anything is built on top.
   routed surface. The macro alternative stays rejected at this size.
 - Answered in part by `docs/plugin-contract.md`: the inline `invoke` result
   question is moot because `invoke` is deleted, and the host adapter's
-  pending-slot machinery goes with it. Still open: which of the v2 adapter's
+  pending-slot machinery goes with it. Still open: which of the revised adapter's
   helpers a dependent effort re-exports and which it hides.
 - The feature-off path is not compiled by the workspace build: `cargo test`
   enables `authoring` because the fixture turns it on, so only
