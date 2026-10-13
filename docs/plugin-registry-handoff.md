@@ -18,7 +18,7 @@ questions), let the parent analyse the findings, fold the agreed findings back
 into the main prototype with one writer, update this document, and repeat until
 the open list is empty of things that matter.
 
-## Status as of commit `25bb165`
+## Status as of commit `4dbf5ce`
 
 - The main prototype now lives in the repository at `spikes/plugin-registry`
   (see its `README.md`). It is throwaway: not product code, not a committed ABI,
@@ -34,6 +34,13 @@ the open list is empty of things that matter.
   `FINDINGS2.md` (async and lifecycle surface, registry proper, descriptor and
   naming fixes), `FINDINGS3.md` (the folded host-polled future seam, hazard
   handling, versioning evidence, measurements).
+
+A first attempt at the next prototyping round was started and then stopped on
+request before it produced findings. Nothing from it is folded and none of its
+numbers are trusted. Its only output is partial scratch under
+`/tmp/metis-plugin-registry-round-2/`, which is not committed and may vanish. One
+lane there drafted a patch shape for open item O7, which is worth reading before
+that item is picked up.
 
 ### How to run the prototype
 
@@ -130,6 +137,9 @@ Techniques that worked, to reuse in later rounds:
 11. **Keep the artifact self-contained.** Commit the spec, the findings, and a
     README with the run commands beside the prototype, so a later session needs
     only the repository.
+12. **One question per lane.** A lane briefed with four unrelated items ran out of
+    its tool budget without measuring any of them. Prefer fewer, sharper items per
+    lane, each with a single measurable outcome.
 
 ## Answered
 
@@ -230,7 +240,13 @@ accepting runtime validation as the only tie.
 **O7. The landed `HostAdapter` pending-slot leak.** When `invoke` returns a
 synchronous non-`Pending` error, the slot registered before the call is never
 retired, and there is no `unregister`, no `Drop` on `Await`, and no cleanup on
-timeout. Fix belongs in `plugin-contract`.
+timeout. This is a code fix in a real crate rather than prototype material, so
+make it a small ticket in `plugin-contract` with a test. A lane drafted the shape
+(`unregister`, retire the slot on a non-`Pending` return in `invoke`, and an
+adapter-level `wait_timeout` that retires on expiry) and identified two residual
+leaks it did not fix, a drop without a completion and the plugin-side request
+record, in `/tmp/metis-plugin-registry-round-2/legacy/FINDINGS-round2-legacy.md`
+(scratch).
 
 **O8. Error taxonomy against the frozen status space.** The registry must
 distinguish a bad request, a version refusal, an unregistered capability, a
@@ -275,10 +291,14 @@ an instance is unregistered, and whether the plugin ever sees the instance name.
 reflected in it. Reconcile with the spec-reconciler when the plugin decisions
 settle.
 
-## Next round
+## Next round (not started)
 
-Start from the repository copy, fan out one copy per lane under
-`/tmp/metis-plugin-registry-round-2/<lane>`, one writer per copy:
+This is the next step, not something already run. An earlier attempt was stopped
+before producing findings, so start fresh from the repository copy. Reuse or
+ignore the abandoned scratch under `/tmp/metis-plugin-registry-round-2/` as you
+like.
+
+Fan out one copy per lane under a fresh round directory, one writer per copy:
 
 1. **Blocked-poll reclaim and unload safety** (O1, O2). Design and prove a reclaim
    or quarantine path, and propose the host rule for unload.
@@ -287,9 +307,10 @@ Start from the repository copy, fan out one copy per lane under
    not use any Rust async machinery.
 3. **`async-ffi` breadth** (O4). A second independent implementation using the
    crate, exercising cancellation and the drop-panic path.
-4. **Legacy path hardening** (O5, and O7 if it moves into code). The pooled
-   executor in the daemon's real shape, a timer wheel instead of a thread per
-   request, a per-poll watchdog, and pool sizing plus idle re-init.
+4. **Legacy path hardening** (O5 only). A timer wheel or deadline queue instead of
+   a thread per request, a per-poll watchdog, and pool sizing plus the idle
+   re-init race, each with one measured outcome. Keep O7 out of this lane: it is a
+   small ticket in `plugin-contract`, not a prototype.
 
 Then fold the agreed findings into `spikes/plugin-registry` with one writer, add
 `FINDINGS4.md`, update this document's open list, and start the next round.
