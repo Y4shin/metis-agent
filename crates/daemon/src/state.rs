@@ -126,6 +126,14 @@ impl Store {
         let pool = SqlitePool::connect_with(options)
             .await
             .map_err(StateError::Database)?;
+
+        // The schema is embedded in the binary and applied here, so a fresh
+        // database is usable without a separate migration step and no tool has
+        // to run beside the daemon.
+        sqlx::migrate!()
+            .run(&pool)
+            .await
+            .map_err(|source| StateError::Database(source.into()))?;
         Ok(Self { pool })
     }
 }

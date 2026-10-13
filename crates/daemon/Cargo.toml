@@ -32,3 +32,7 @@ subtle.workspace = true
 # The store's interface is asynchronous, so the tests are too, and the
 # in-memory database runs on this runtime.
 tokio.workspace = true
+# The migration seam reads the file the store created with an independent
+# connection, because what the migration left behind is what it asserts: the
+# token table and the ledger row that records the migration as applied.
+sqlx.workspace = true
