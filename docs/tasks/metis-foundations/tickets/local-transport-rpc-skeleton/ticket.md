@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Local transport and the echo RPC skeleton
 status: stable
-workflow_state: ready
-blocked_by: [contract-pipeline]
+workflow_state: done
+blocked_by:
+- contract-pipeline
 size: m
 ---
 
