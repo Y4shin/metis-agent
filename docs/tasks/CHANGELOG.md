@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Daemon state store on SQLite (state-store)
+
+`crates/daemon` now has a library target, and `daemon::state::Store` opens and migrates one SQLite database through sqlx runtime queries: `METIS_STATE_DB` first, then `$XDG_DATA_HOME/metis/metis.db`, then `$HOME/.local/share/metis/metis.db`, with the directory at mode 700 and the file at 600 through the same private-path rule the socket uses. The `tokens` table holds a surface name, the 32-byte SHA-256 of the token's canonical lowercase hex text, and the pairing time, so per-surface revocation is a row delete and the token itself is never stored; `daemon::token` mints and parses it, with the digest pinned by a known-answer test. CI needs no database server, no `DATABASE_URL` and no `.sqlx` offline data, because the store uses runtime queries and embeds its migration.
+
 ## 2026-10-13, Local access control and surface identity (local-identity-and-acl)
 
 The daemon now creates its socket directory and the socket itself with mode 700, or 770 when `METIS_SOCKET_GROUP` names a group its user belongs to, and refuses a pre-existing directory that is a symlink, is owned by someone else, or is wider than the rule, instead of chmodding it. Every client call declares `metis-protocol-version`, `metis-surface` and `metis-client-version` as Connect default headers, the service records them, and a missing, malformed or unsupported version is refused with `InvalidArgument` carrying `metis-supported-versions`, which the wrapper turns into `ClientError::ProtocolVersion`; the declaration is not authentication, and credentials arrive with `pairing-and-tokens`. The default endpoint moved off `/tmp/metis-daemon.sock` to `$XDG_RUNTIME_DIR/metis/daemon.sock`, then `$TMPDIR/metis/daemon.sock`, then a typed `NoPrivateBase` error, which closes the conflict between the old `/tmp` default and the ownership rule.
