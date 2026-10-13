@@ -8,6 +8,8 @@ members = [
     "crates/workflow",
     "crates/plugin-contract",
     "crates/plugin-runtime",
+    # The fixture cdylib and its harness: test support for the plugin boundary.
+    "crates/plugin-fixture",
     "crates/api-contracts",
     "crates/client",
     "crates/daemon",
