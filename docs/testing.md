@@ -35,6 +35,11 @@ the repository root, where the one `buf.yaml` lives:
 - `buf breaking --against '.git#branch=main' --against-config buf.yaml` --
   contract compatibility against the landing branch, scoped to the same module
   on both sides.
+- `bash scripts/probe-contract-gates.sh` -- the on-demand acceptance probe for
+  the gate configuration: root configuration, deliberate-edit verdict flips for
+  lint and breaking, the `BUF_TOKEN` forms, and the drift check. It restores
+  every file it touches, and it skips the network-only halves when the anonymous
+  BSR rate limit is exhausted. It is not part of CI.
 
 Plugin ABI, documented in `crates/plugin-contract/src/abi` and
 `crates/plugin-fixture`:

@@ -79,12 +79,14 @@ deleted after the merge. The review artifact
    rather than on documentation. `buf lint` and `buf breaking` resolve no
    plugins and pass even under a token buf refuses, so only the
    `Contract regeneration check` step carries `BUF_TOKEN`.
-4. The ticket's acceptance test is the committed
-   `docs/tasks/metis-foundations/tickets/contract-gate-hardening/.work/probe.sh`,
-   one section per arch-spec seam, restoring every file it touches through a
-   `trap` and reporting a rate-limited probe as skipped rather than as a pass.
-   It is scaffolding rather than product, it is not wired into CI, and its
-   landing is the one open item below.
+4. The ticket's acceptance test now lives at
+   `scripts/probe-contract-gates.sh`, one section per arch-spec seam, restoring
+   every file it touches through a `trap` and reporting a rate-limited probe as
+   skipped rather than as a pass. It was written inside the ticket's transient
+   `.work/` channel; the effort owner moved it to the scripts directory at
+   finalization so the evidence survives without putting scaffolding in the
+   ticket's uncertainty channel. It is not wired into CI, and `docs/testing.md`
+   documents it as an on-demand probe.
 5. `crates/api-contracts/src/lib.rs` had a doc comment pointing generated code
    at `contracts/buf.gen.yaml`, a location this ticket deletes; it now names the
    root `buf.gen.yaml` (comment only, no API change).
@@ -94,10 +96,10 @@ deleted after the merge. The review artifact
    here, so the CI wiring is asserted by text probes plus the measured buf
    behaviour. The landing tree is byte-identical to the tree the verify worker
    tested, so no gate was re-run at landing.
-7. Open item for the effort owner, not blocking the acceptance criteria: whether
-   `.work/probe.sh` should reach `main`. The merge carries it onto
-   `task/contract-gate-hardening`, and the root `/.work/` gitignore pattern does
-   not cover a nested `.work/`. If it should land it needs a durable home, for
-   example beside the other gate scripts under `scripts/` with a line in
-   `docs/testing.md`; if it should not, it has to be removed before the effort
-   reaches `main`.
+7. Open item: resolved at finalization. The review artifact and the land note
+   both flagged that the merge carried `.work/probe.sh` onto the landing branch
+   and that the root `/.work/` gitignore pattern does not cover a nested
+   `.work/`. The probe has a durable home at `scripts/probe-contract-gates.sh`
+   with a line in `docs/testing.md`, the `.work/` directory is gone, and the
+   committed path was re-run green from its new location (2 network-only probes
+   skipped under anonymous BSR rate limiting).

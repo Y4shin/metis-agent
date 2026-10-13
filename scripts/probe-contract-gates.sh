@@ -25,10 +25,10 @@
 # reported as skipped rather than as a failing probe.
 #
 # Run from inside the devenv shell, from anywhere in the repository:
-#   devenv shell -- bash docs/tasks/metis-foundations/tickets/contract-gate-hardening/.work/probe.sh
+#   devenv shell -- bash scripts/probe-contract-gates.sh
 set -uo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../../" && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 work="$(mktemp -d)"
