@@ -47,6 +47,13 @@ jobs:
         run: devenv shell -- buf breaking --against '.git#branch=main' --against-config buf.yaml
 
       - name: Contract regeneration check
+        env:
+          # The two codegen plugins are BSR remote plugins, so this step
+          # resolves them over the network. A configured secret lifts the
+          # anonymous rate limit; an absent secret arrives as the empty string,
+          # which buf treats like an unset variable (measured), so the gate
+          # still works unauthenticated.
+          BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
         run: devenv shell -- bash scripts/regenerate-contracts.sh --check
 
       # The harness rebuilds the fixture cdylib itself before loading it, so a
