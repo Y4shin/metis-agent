@@ -54,17 +54,20 @@ end to end.
   callbacks, request lifecycle, cancellation, shutdown, and lifetime.
 - From "Native plugin design": the conceptual bundle layout, the proposed ABI
   direction, and the distinction between bundle, ABI, and plugin versions.
-- From "Async boundary": do not pass futures across the ABI. The
-  start/completion protocol registers a request ID and completion channel
-  before calling start; the plugin schedules work, returns promptly, and
-  invokes a host completion callback. Pending state is registered first
-  because completion may precede the return from start. Cancellation is an
-  explicit request whose acknowledgement and race semantics are defined.
+- From "Async boundary", **superseded by `docs/plugin-contract.md`:** futures do
+  cross the ABI now. The plugin returns an opaque context plus a poll and drop
+  vtable, the daemon polls it on its own runtime and awaits it, and the plugin
+  keeps no executor and no thread. The old start and completion protocol
+  (register a request id, return promptly, invoke a host `complete` callback) is
+  deleted rather than kept alongside. Cancellation stays an explicit request with
+  defined acknowledgement and race semantics.
 - `plugin-contract` is owned by `metis-foundations`: it designs the manifest,
   the versioned C ABI, and the generated bindings. This effort consumes it and
   owns the host side.
-- Plugin-owned executors hidden behind the Rust SDK are the initial preferred
-  approach.
+- **Superseded by `docs/plugin-contract.md`:** there is no plugin-owned executor.
+  The daemon is the only executor, the SDK owns a waker bridge and a boxed-future
+  helper, and nothing on the plugin side spawns a worker. Bundle extraction,
+  validation, loading, dispatch and the registry stay here.
 
 ## Fog
 
@@ -76,9 +79,12 @@ end to end.
   semantics are owned by `metis-foundations` in `plugin-contract`. This effort
   owns how the host enforces them while loading and dispatching.
 - Compatibility policy between bundle, ABI, and plugin versions.
-- The async executor model and how the SDK hides it.
-- Completion-before-start handling and cancellation acknowledgement and
-  completion races.
+- Answered by `docs/plugin-contract.md`: there is no executor model to hide,
+  because the daemon polls and the plugin holds no runtime.
+- Answered by `docs/plugin-contract.md`: there is no completion callback to race
+  with start, so the question becomes a wake arriving before or during the poll
+  that armed it, which the waker liveness rule covers. Cancellation
+  acknowledgement and its races remain here.
 - Panic containment inside exported adapters, callback thread-safety, and
   shutdown ordering.
 - How a sample plugin is built and loaded in CI.

@@ -95,8 +95,10 @@ streaming assumptions before anything is built on top.
   a versioned entry point returning a function table (instance lifecycle,
   capability listing, one generic `invoke`, `cancel`, `release_buffer`,
   `shutdown`) plus host callbacks (`complete`, `progress`, `emit_event`, `log`).
-  Everything else is payload. Within a major version the table is append-only,
-  so a newer host reads an older plugin's shorter table. Capability descriptors
+  Everything else is payload. **Superseded by `docs/plugin-contract.md` and the
+  `plugin-contract-v1` ticket:** the futures-only v2 table deletes `invoke` and
+  `complete`, so the delivered v1 table is replaced rather than extended, while
+  additive change inside ABI major 2 stays append-only by `size`. Capability descriptors
   name a kind, and V1 kinds are `tool` and `provider`.
 - Two throwaway prototypes validate that ABI strategy: an ABI mechanics spike
   and an authoring trait spike. Either may be abandoned with an inconclusive
@@ -259,18 +261,14 @@ streaming assumptions before anything is built on top.
   daemon effort would restate the literal `METIS_ENDPOINT` unless the constant is
   exported. Related: `serve_uds` has no shutdown path that unlinks its socket, so
   a stopped listener leaves the socket file behind.
-- The authoring trait's capability vocabulary is fixed at four role-named arms
-  (`answer`, `deferred`, `cancellable`, `fault`) with plugin-chosen capability
-  names, so a plugin can express at most four capabilities, one per arm, and a
-  fifth needs a trait change rather than a plugin choice. `metis-plugin-sdk`
-  re-exports this surface, so the shape should be confirmed before that effort
-  pins author-facing API; the alternatives are a macro over a per-capability
-  trait, which the authoring spike measured as unjustified at this size, or a
-  runtime dispatch method on the trait.
-- The ABI's inline `invoke` result has no in-tree exerciser once the fixture goes
-  through the trait, and the authoring module publishes harness-shaped helpers
-  (`HostAdapter`'s observation and plumbing methods) that a dependent effort must
-  decide whether to re-export or hide.
+- Answered by `docs/plugin-contract.md` and the `plugin-contract-v1` ticket: the
+  runtime dispatch method on the trait was chosen, so the four-arm vocabulary and
+  the four-capability ceiling are removed and `metis-plugin-sdk` can pin the
+  routed surface. The macro alternative stays rejected at this size.
+- Answered in part by `docs/plugin-contract.md`: the inline `invoke` result
+  question is moot because `invoke` is deleted, and the host adapter's
+  pending-slot machinery goes with it. Still open: which of the v2 adapter's
+  helpers a dependent effort re-exports and which it hides.
 - The feature-off path is not compiled by the workspace build: `cargo test`
   enables `authoring` because the fixture turns it on, so only
   `cargo test -p plugin-contract` alone (or a

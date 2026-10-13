@@ -120,6 +120,14 @@ that item is picked up.
   **O10** resolved for today's table by a real C implementer, and re-opened for
   the v2 table if D1 and D2 are approved; **O16** answered by D2, awaiting
   approval. Still untouched: O6, O8, O9, O11, O12, O13, O14, O15, O17, O18.
+- The approved contract is now a ticket:
+  `docs/tasks/metis-foundations/tickets/plugin-contract-v1` (size xl, ready, no
+  blockers, and it now blocks `plugin-compatibility`, whose prefix-tolerance
+  criterion was removed from it). It lands the whole contract, including the
+  parts that would otherwise have waited on `metis-plugins`,
+  `metis-plugin-sdk` and `metis-daemon`, because those efforts have maps but no
+  tickets yet. The three maps that carried the superseded decisions are amended
+  in the same change.
 
 ### How to run the prototype
 

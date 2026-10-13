@@ -40,12 +40,14 @@ not a requirement.
   underlying contract.
 - From "Native plugin design": Rust authors use the SDK's trait and export
   adapters, while other languages implement the C ABI directly.
-- From "Async boundary": plugin-owned executors hidden behind the Rust SDK are
-  the initial preferred approach, so the SDK owns the executor model that the
-  runtime does not see.
+- From "Async boundary", **superseded by `docs/plugin-contract.md`:** the daemon
+  is the only executor. The SDK owns the waker bridge from the host waker to
+  `std::task` and the boxed-future helper that wraps an author's future, but no
+  executor, and the plugin holds no runtime.
 - The authoring trait and the export adapters live in `plugin-contract` behind a
-  feature gate. This effort re-exports them and owns the async executor,
-  serialisation helpers, core plugins, and the CLI.
+  feature gate. This effort re-exports them and owns the waker bridge, the
+  boxed-future helper, the typed facades and schema derivation, serialisation
+  helpers, core plugins, and the CLI.
 - The bootstrap deliberately left `plugin-sdk` uncreated; this effort creates
   it when the boundary proves useful.
 
@@ -54,7 +56,9 @@ not a requirement.
 - Which core plugins ship first, and what they demonstrate.
 - CLI responsibilities: scaffold, build, package, install, publish, and how
   much cross-compilation the build step covers.
-- The async executor model the SDK exposes and how it hides from the runtime.
+- Answered by `docs/plugin-contract.md`: no executor is exposed. The SDK bridges
+  the host waker and boxes the author's future, and authors see the erased `call`
+  surface plus schema-derived typed facades.
 - Serialisation helpers and their dependency footprint.
 - The plugin version, ABI version, and bundle version policy as seen by
   authors.
