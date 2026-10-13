@@ -138,6 +138,62 @@ async fn a_token_row_stores_the_hash_and_verifies_it() {
     );
 }
 
+/// Revoking one surface leaves the other surfaces verifying: a token belongs to
+/// one surface, and revoking one does not disturb the rest.
+#[tokio::test]
+async fn revoking_one_surface_leaves_the_other_verifying() {
+    let store = Store::open_in_memory()
+        .await
+        .expect("the store opens in memory");
+    let (_, desktop_hash) = mint();
+    let (_, phone_hash) = mint();
+    store
+        .insert_token("desktop", &desktop_hash)
+        .await
+        .expect("one surface pairs");
+    store
+        .insert_token("phone", &phone_hash)
+        .await
+        .expect("another surface pairs");
+    assert_eq!(
+        store.surfaces().await.expect("the surfaces are listed"),
+        vec!["desktop".to_owned(), "phone".to_owned()]
+    );
+
+    store
+        .revoke_token("desktop")
+        .await
+        .expect("the row is removed");
+
+    assert_eq!(
+        store
+            .verify_token("desktop", &desktop_hash)
+            .await
+            .expect("the database answers"),
+        Verify::UnknownSurface,
+        "the revoked surface no longer verifies"
+    );
+    assert_eq!(
+        store
+            .verify_token("phone", &phone_hash)
+            .await
+            .expect("the database answers"),
+        Verify::Verified,
+        "the other surface still verifies"
+    );
+    assert_eq!(
+        store.surfaces().await.expect("the surfaces are listed"),
+        vec!["phone".to_owned()]
+    );
+
+    // Revoking a surface that has no row is not a failure: the caller asked for
+    // the state it gets.
+    store
+        .revoke_token("desktop")
+        .await
+        .expect("revoking twice is not an error");
+}
+
 /// The mode a path carries, read the way an operator reads it.
 #[cfg(unix)]
 fn mode_of(path: &std::path::Path) -> u32 {

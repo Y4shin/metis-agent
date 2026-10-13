@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use api_contracts::transport;
 use sqlx::SqlitePool;
-use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use subtle::ConstantTimeEq;
 
 use crate::token::TokenHash;
@@ -144,7 +144,32 @@ impl Store {
         let pool = SqlitePool::connect_with(options)
             .await
             .map_err(StateError::Database)?;
+        Self::migrated(pool).await
+    }
 
+    /// Open a store that keeps nothing: the database lives in memory and is
+    /// gone when the store is dropped.
+    ///
+    /// The store's operations are the same ones the file-backed store serves, so
+    /// a test that is not about the file uses this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Database`] when the database refuses to open.
+    pub async fn open_in_memory() -> Result<Self, StateError> {
+        // An in-memory database belongs to the connection that opened it, so the
+        // pool is held to one connection: a second one would see a second, empty
+        // database rather than the migrated one.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().in_memory(true))
+            .await
+            .map_err(StateError::Database)?;
+        Self::migrated(pool).await
+    }
+
+    /// Apply the embedded schema and wrap the pool.
+    async fn migrated(pool: SqlitePool) -> Result<Self, StateError> {
         // The schema is embedded in the binary and applied here, so a fresh
         // database is usable without a separate migration step and no tool has
         // to run beside the daemon.
@@ -205,6 +230,36 @@ impl Store {
         } else {
             Verify::Mismatch
         })
+    }
+
+    /// Revoke `surface`: its row is removed, so its token no longer verifies and
+    /// the other surfaces are not touched.
+    ///
+    /// Revoking a surface that has no row is not a failure: the caller asked for
+    /// the state it gets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Database`] when the row cannot be removed.
+    pub async fn revoke_token(&self, surface: &str) -> Result<(), StateError> {
+        sqlx::query("DELETE FROM tokens WHERE surface = ?")
+            .bind(surface)
+            .execute(&self.pool)
+            .await
+            .map_err(StateError::Database)?;
+        Ok(())
+    }
+
+    /// The surfaces that currently have a token row, in name order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Database`] when the rows cannot be read.
+    pub async fn surfaces(&self) -> Result<Vec<String>, StateError> {
+        sqlx::query_scalar("SELECT surface FROM tokens ORDER BY surface")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StateError::Database)
     }
 }
 
