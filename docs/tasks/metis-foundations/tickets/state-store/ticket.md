@@ -3,7 +3,7 @@ type: ticket
 subtype: feature
 title: Daemon state store on SQLite
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 size: m
 ---
@@ -123,3 +123,10 @@ Residual risks carried into `pairing-and-tokens` and the daemon effort:
   `docs/testing.md` (the run commands and the no-server, no-`DATABASE_URL`
   property) were updated with the ticket, so finalize needs no further docs
   change for the store itself.
+
+Knowledge harvested at finalize: the effort map gained the decision bullet for
+the landed store, and the arch spec carries the cross-ticket hash rule that
+`pairing-and-tokens` must match (SHA-256 over the token's canonical lowercase hex
+text, with the known-answer digest). The deviation report's checkpoint count was
+corrected from twelve to eleven, ten `wip:` commits plus one docs commit, to
+match the landed history.

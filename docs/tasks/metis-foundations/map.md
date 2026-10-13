@@ -274,6 +274,15 @@ streaming assumptions before anything is built on top.
   `$XDG_RUNTIME_DIR/metis/daemon.sock`, then `$TMPDIR/metis/daemon.sock`, then a
   typed `NoPrivateBase` error, with `METIS_ENDPOINT` still winning, which closes
   the `/tmp` conflict.
+- The daemon's state store is real: `crates/daemon` has a library target beside
+  its binary, `daemon::state::Store` opens and migrates one SQLite database
+  through sqlx runtime queries, and `daemon::token` mints a 32-byte hex token and
+  hashes its canonical lowercase hex text with SHA-256, pinned by a known-answer
+  digest. The `tokens` table holds the surface name, the 32-byte hash and the
+  pairing time, so per-surface revocation is a row delete and the token is never
+  stored. `api-contracts::transport` gained `ensure_private_dir` and
+  `restrict_file`, the general form of the socket ACL rule, and CI needs no
+  database server, no `DATABASE_URL` and no `.sqlx` offline data.
 
 ## Fog
 
