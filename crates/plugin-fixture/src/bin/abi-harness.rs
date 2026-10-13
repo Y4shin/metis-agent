@@ -38,7 +38,9 @@ use std::time::{Duration, Instant};
 use libloading::Library;
 use plugin_contract::abi::*;
 use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
-use plugin_fixture::payload::{CapabilityKind, CapabilityList, EchoRequest, EchoResponse};
+use plugin_fixture::payload::{
+    CapabilityDescriptor, CapabilityKind, CapabilityList, EchoRequest, EchoResponse,
+};
 
 /// How long the harness waits for a call that should finish promptly.
 const POLL_DEADLINE: Duration = Duration::from_secs(2);
@@ -52,7 +54,7 @@ const WATCHDOG: Duration = Duration::from_millis(80);
 const CANCEL_WINDOW: Duration = Duration::from_millis(150);
 
 /// The capabilities the fixture advertises, in declaration order.
-const EXPECTED_CAPABILITIES: [&str; 7] = [
+const EXPECTED_CAPABILITIES: [&str; 8] = [
     "tool.echo",
     "tool.pending",
     "tool.cancellable",
@@ -60,7 +62,19 @@ const EXPECTED_CAPABILITIES: [&str; 7] = [
     "tool.panic",
     "tool.panic_drop",
     "tool.blocking",
+    REFUSED_CAPABILITY,
 ];
+
+/// The capability the fixture advertises with a descriptor version this host
+/// does not support. It is one capability, so refusing it must leave the rest
+/// of the plugin listed and serving.
+const REFUSED_CAPABILITY: &str = "tool.newer";
+
+/// The descriptor version [`REFUSED_CAPABILITY`] declares.
+const REFUSED_CAPABILITY_VERSION: u32 = 2;
+
+/// The highest capability descriptor version this host serves.
+const HOST_CAPABILITY_VERSION: u32 = 1;
 
 /// The capabilities the routing check drives to completion by name alone.
 /// `tool.cancellable` needs a cancel, and the hazard capabilities need their own
@@ -243,6 +257,7 @@ fn main() -> ExitCode {
     );
 
     let list = list_capabilities(&mut checks, &state, instance);
+    drive_capability_gate(&mut checks, &state, instance, list.as_ref());
     drive_capabilities(&mut checks, &state, instance, list.as_ref());
     run_hazard_checks(&mut checks, &state, instance);
 
@@ -511,7 +526,6 @@ fn list_capabilities(
     );
     let inline = list.capabilities.iter().all(|descriptor| {
         descriptor.kind == CapabilityKind::Tool.as_str()
-            && descriptor.version == 1
             && descriptor.request_schema.as_object().is_some()
             && descriptor.response_schema.as_object().is_some()
     });
@@ -521,6 +535,115 @@ fn list_capabilities(
         "every descriptor carries both schemas inline",
     );
     Some(list)
+}
+
+/// The per-capability version gate, with the plugin kept whole.
+///
+/// A capability whose descriptor version this host does not support is refused
+/// with `Unsupported` for that name alone: the plugin is loaded, its other
+/// capabilities stay listed, and they still serve. Nothing here fails the
+/// plugin, and the check that the refused capability itself serves when it is
+/// called directly is what proves the refusal is the host's gate rather than a
+/// broken plugin.
+fn drive_capability_gate(
+    checks: &mut Checks,
+    state: &HostState,
+    instance: *mut c_void,
+    list: Option<&CapabilityList>,
+) {
+    let Some(list) = list else {
+        checks.check(
+            false,
+            "gate.version_refused",
+            "the declaration was not listed, so no capability could be gated",
+        );
+        return;
+    };
+    let Some(descriptor) = list
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.name == REFUSED_CAPABILITY)
+    else {
+        checks.check(
+            false,
+            "gate.version_refused",
+            format!("no capability named {REFUSED_CAPABILITY} was declared"),
+        );
+        return;
+    };
+
+    // The declared versions: one capability above the version this host serves,
+    // every other one at or below it.
+    let versions: Vec<(&str, u32)> = list
+        .capabilities
+        .iter()
+        .map(|descriptor| (descriptor.name.as_str(), descriptor.version))
+        .collect();
+    checks.check(
+        descriptor.version == REFUSED_CAPABILITY_VERSION
+            && list.capabilities.iter().all(|descriptor| {
+                descriptor.name == REFUSED_CAPABILITY
+                    || descriptor.version <= HOST_CAPABILITY_VERSION
+            }),
+        "gate.declared_versions",
+        format!("host serves up to {HOST_CAPABILITY_VERSION}: {versions:?}"),
+    );
+
+    // The gate, applied to every capability by name.
+    let verdicts: Vec<(&str, Result<(), MetisStatus>)> = list
+        .capabilities
+        .iter()
+        .map(|descriptor| capability_gate(descriptor))
+        .zip(list.capabilities.iter())
+        .map(|(verdict, descriptor)| (descriptor.name.as_str(), verdict))
+        .collect();
+    let refused: Vec<&str> = verdicts
+        .iter()
+        .filter(|(_, verdict)| verdict.is_err())
+        .map(|(name, _)| *name)
+        .collect();
+    checks.check(
+        refused == vec![REFUSED_CAPABILITY]
+            && verdicts
+                .iter()
+                .any(|(_, verdict)| *verdict == Err(MetisStatus::Unsupported)),
+        "gate.version_refused_for_one_capability",
+        format!("{verdicts:?}"),
+    );
+
+    // The refused capability itself is not broken: the plugin serves it when a
+    // caller skips the gate, so the `Unsupported` above is the host's policy and
+    // not the plugin's status.
+    let ungated = state.drive(instance, REFUSED_CAPABILITY, "gate", 140);
+    checks.check(
+        ungated.status == MetisStatus::Ok,
+        "gate.refusal_is_the_hosts",
+        format!(
+            "the plugin itself serves {REFUSED_CAPABILITY} with status={} when the gate is not applied",
+            ungated.status.as_str()
+        ),
+    );
+
+    // And the rest of the plugin is untouched by the refusal.
+    let after = state.drive(instance, "tool.echo", "after the refusal", 141);
+    checks.check(
+        after.status == MetisStatus::Ok && after.body == "after the refusal",
+        "gate.rest_of_plugin_still_serves",
+        format!("status={} body={:?}", after.status.as_str(), after.body),
+    );
+}
+
+/// This host's per-capability version policy.
+///
+/// A capability whose descriptor version is above the one this host serves is
+/// refused for that name alone with `Unsupported`; everything else passes.
+/// `plugin-runtime`'s registry carries the same rule for the loader, which is
+/// what this demonstration is measured against.
+fn capability_gate(descriptor: &CapabilityDescriptor) -> Result<(), MetisStatus> {
+    if descriptor.version > HOST_CAPABILITY_VERSION {
+        return Err(MetisStatus::Unsupported);
+    }
+    Ok(())
 }
 
 /// Drives every routed capability by name.

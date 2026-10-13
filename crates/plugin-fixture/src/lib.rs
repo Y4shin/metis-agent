@@ -21,8 +21,11 @@
 //! - `tool.panic_drop`, whose future owns a guard whose destructor panics.
 //! - `tool.blocking`, which blocks inside its poll, which the host's watchdog
 //!   has to detect.
+//! - `tool.newer`, whose descriptor version is one a host of this revision does
+//!   not support, so the host refuses that one capability and keeps the rest of
+//!   the plugin.
 //!
-//! Seven capabilities, not four: the routed `call` has no ceiling, and the
+//! Eight capabilities, not four: the routed `call` has no ceiling, and the
 //! harness drives every one by name.
 //!
 //! The wiring at the bottom is the whole ABI footprint: one `const fn` table and
@@ -50,18 +53,36 @@ const BLOCKING: Duration = Duration::from_millis(250);
 #[derive(Default)]
 pub struct Fixture;
 
+/// The descriptor version every capability but the gated one advertises.
+pub const CAPABILITY_VERSION: u32 = 1;
+
+/// The capability a newer plugin build advertises: its descriptor version is
+/// one a host of this revision does not support.
+///
+/// It is one capability and not a plugin-wide fact, so refusing it must leave
+/// the plugin's other capabilities listed and serving.
+pub const NEWER_CAPABILITY: &str = "tool.newer";
+
+/// The descriptor version of [`NEWER_CAPABILITY`].
+pub const NEWER_CAPABILITY_VERSION: u32 = 2;
+
 /// One capability descriptor, with the inline schemas its bodies imply.
 fn descriptor(name: &str) -> CapabilityDescriptor {
+    let version = if name == NEWER_CAPABILITY {
+        NEWER_CAPABILITY_VERSION
+    } else {
+        CAPABILITY_VERSION
+    };
     CapabilityDescriptor::tool(
         name,
-        1,
+        version,
         schema_of::<EchoRequest>(),
         schema_of::<EchoResponse>(),
     )
 }
 
 /// The capability names, in the order the plugin declares them.
-pub const CAPABILITIES: [&str; 7] = [
+pub const CAPABILITIES: [&str; 8] = [
     "tool.echo",
     "tool.pending",
     "tool.cancellable",
@@ -69,6 +90,7 @@ pub const CAPABILITIES: [&str; 7] = [
     "tool.panic",
     "tool.panic_drop",
     "tool.blocking",
+    NEWER_CAPABILITY,
 ];
 
 /// The guard whose destructor panics, so the panic lands in the host's `drop`
@@ -105,6 +127,13 @@ impl Plugin for Fixture {
                     bytes: 0,
                 })
             }
+            // The gated capability still serves when it is called: the refusal
+            // belongs to the host's version gate, and this arm is what lets the
+            // harness prove the plugin was never the refusing party.
+            NEWER_CAPABILITY => Response::json(&EchoResponse {
+                echo: NEWER_CAPABILITY.to_string(),
+                bytes: NEWER_CAPABILITY.len(),
+            }),
             other => Err(PluginError::NotFound(other.to_string())),
         }
     }
