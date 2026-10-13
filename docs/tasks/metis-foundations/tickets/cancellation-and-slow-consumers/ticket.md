@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Cancellation and slow-consumer handling
 status: stable
-workflow_state: ready
-blocked_by: [event-stream]
+workflow_state: done
+blocked_by:
+- event-stream
 size: m
 ---
 
@@ -113,3 +114,34 @@ compiling.
 uncommitted and outside this landing commit, as in the earlier landings, so the
 commit holds only the ticket doc and the deviation report. The ticket's
 `workflow_state` and the archive stay with `finalize-task`.
+
+Knowledge harvested at finalize. The effort map gained two things: its
+cancellation decision bullet now records what landed (the two `Cancel` outcomes,
+the `metis-request-id` channel with its echo, and the `metis-stream-error` refusal
+in trailing metadata), and its fog entry about telling a deliberate slow-consumer
+drop from a transport failure is closed for the drops the daemon causes, leaving
+the question of what a caller does about a transport failure open. The arch spec
+the reconciler wrote records the four public shapes this ticket left to the
+implementer, and one of them is the one dependents must not miss: `Live` replaced
+`Subscription::recv`'s landed `Option<Event>` return type rather than being added
+beside it, so the daemon effort and every later reader of `recv` match the enum.
+The other three are the public `events::cancellable(inner, guard)` assembly both
+serving paths wrap their streams in, the hand-written `CancelOutcome` mirror with
+its `to_proto` and `from_proto` at the wire edge, and a non-exhaustive
+`RequestIdError`.
+
+Two corrections the reconciler made to earlier sections are worth knowing, because
+both were assumptions that had been written down as facts. This ticket added **no**
+`EventKind` members, so two `event-stream` sentences that predicted it would are
+now corrected: a stream refusal travels as trailing metadata, not as an event. And
+the outline's claim that the `Result` item type exists for a policy where nothing
+ever fails is false as of this landing, which is exactly what the type was reserved
+for.
+
+The chain history is the other side of the previous two tickets: this one ran all
+five steps inside its `m` budget of 1800 seconds on the first attempt, with eleven
+`wip:` commits and no retry, so the size table's tight budget is the `s` row rather
+than this one. The generated buffa tree churns about 1900 lines because
+`CancelRequest` and `CancelResponse` are declared ahead of `message Event` and
+generation follows declaration order; both drift checks are clean, so the tree is
+reproducible rather than hand-edited.
