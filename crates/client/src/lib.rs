@@ -168,7 +168,9 @@ impl Surface {
 /// A connection to the daemon over the local transport.
 ///
 /// The wrapper owns the generated client and the injected transport, both
-/// private, so the transport stays swappable without moving a caller.
+/// private, so the transport stays swappable without moving a caller. It also
+/// owns the declared [`Surface`] and the credential that surface keeps, so a
+/// caller names neither.
 pub struct Client {
     inner: DaemonServiceClient<SharedHttp2Connection>,
     /// The surface this client declares. The credential it carries belongs to
@@ -275,8 +277,8 @@ impl Client {
     ///
     /// The token is stored for the declared surface and attached to this client
     /// as well, so the calls that follow need no credential named at the call
-    /// site. The pairing call itself carries no credential: it is the call that
-    /// mints one.
+    /// site. Pairing is the one call exempt from the credential check, so this
+    /// works before the surface has a credential.
     ///
     /// # Errors
     ///
@@ -309,10 +311,12 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError::ProtocolVersion`] when the daemon refuses this
-    /// client's declared protocol version, and any other [`ClientError`] when
-    /// the call fails on the transport or the daemon answers with a protocol
-    /// error.
+    /// Returns [`ClientError::CredentialMissing`] when the daemon needs a
+    /// credential this client does not have,
+    /// [`ClientError::CredentialRejected`] when it refuses the one this client
+    /// presented, [`ClientError::ProtocolVersion`] when it refuses this client's
+    /// declared protocol version, and [`ClientError::Call`] when the call fails
+    /// on the transport or the daemon answers with another protocol error.
     pub async fn echo(&self, message: &str) -> Result<String, ClientError> {
         let request = EchoRequest {
             message: message.to_owned(),

@@ -10,6 +10,12 @@
 //! The check is an interceptor rather than something a handler remembers to
 //! call, so it runs before the handler for unary and streaming calls alike and
 //! a new RPC is covered the moment it is declared.
+//!
+//! The unary half is proven over a real socket in `crates/daemon/tests/auth.rs`,
+//! where a recording service shows a refused call never reached its handler. The
+//! streaming half has no wire test yet because the contract declares no
+//! streaming RPC: `intercept_streaming` calls the same `admit` the unary half
+//! does, and `event-stream` exercises it when it appends `StreamEvents`.
 
 use std::fmt;
 
