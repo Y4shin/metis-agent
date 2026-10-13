@@ -60,6 +60,10 @@ pub enum StateError {
     Io(io::Error),
     /// The database refused to open or to run an operation.
     Database(sqlx::Error),
+    /// A surface that already has a token row was paired again. The row that is
+    /// there is left alone: the first token is the surface's token until it is
+    /// revoked.
+    SurfaceAlreadyPaired,
 }
 
 impl fmt::Display for StateError {
@@ -75,6 +79,10 @@ impl fmt::Display for StateError {
             Self::Database(source) => {
                 write!(f, "the state database refused an operation: {source}")
             }
+            Self::SurfaceAlreadyPaired => write!(
+                f,
+                "the surface already has a token; revoke it before pairing again"
+            ),
         }
     }
 }
@@ -82,7 +90,7 @@ impl fmt::Display for StateError {
 impl std::error::Error for StateError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NoStateDir => None,
+            Self::NoStateDir | Self::SurfaceAlreadyPaired => None,
             Self::Io(source) => Some(source),
             Self::Database(source) => Some(source),
         }
@@ -187,7 +195,10 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns [`StateError::Database`] when the row cannot be written.
+    /// Returns [`StateError::SurfaceAlreadyPaired`] when the surface already has
+    /// a row, which is refused rather than replaced, and
+    /// [`StateError::Database`] when the row cannot be written for another
+    /// reason.
     pub async fn insert_token(&self, surface: &str, hash: &TokenHash) -> Result<(), StateError> {
         sqlx::query(
             "INSERT INTO tokens (surface, hash, paired_at) \
@@ -197,7 +208,12 @@ impl Store {
         .bind(hash.as_bytes().as_slice())
         .execute(&self.pool)
         .await
-        .map_err(StateError::Database)?;
+        .map_err(|source| match &source {
+            sqlx::Error::Database(error) if error.is_unique_violation() => {
+                StateError::SurfaceAlreadyPaired
+            }
+            _ => StateError::Database(source),
+        })?;
         Ok(())
     }
 

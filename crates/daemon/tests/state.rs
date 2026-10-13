@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use daemon::state::{Store, Verify};
+use daemon::state::{StateError, Store, Verify};
 use daemon::token::mint;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -192,6 +192,52 @@ async fn revoking_one_surface_leaves_the_other_verifying() {
         .revoke_token("desktop")
         .await
         .expect("revoking twice is not an error");
+}
+
+/// Pairing a surface that already has a row is refused with a typed error, and
+/// the row that is already there stays exactly as it was: a second pairing never
+/// replaces the first surface's token.
+#[tokio::test]
+async fn an_insert_for_a_paired_surface_is_refused() {
+    let store = Store::open_in_memory()
+        .await
+        .expect("the store opens in memory");
+    let (_, first) = mint();
+    let (_, second) = mint();
+    store
+        .insert_token("desktop", &first)
+        .await
+        .expect("the surface pairs once");
+
+    let error = store
+        .insert_token("desktop", &second)
+        .await
+        .expect_err("the second pairing is refused");
+    assert!(
+        matches!(error, StateError::SurfaceAlreadyPaired),
+        "the refusal is typed rather than a database error: {error:?}"
+    );
+
+    assert_eq!(
+        store
+            .verify_token("desktop", &first)
+            .await
+            .expect("the database answers"),
+        Verify::Verified,
+        "the first token still verifies"
+    );
+    assert_eq!(
+        store
+            .verify_token("desktop", &second)
+            .await
+            .expect("the database answers"),
+        Verify::Mismatch,
+        "the refused token was not stored"
+    );
+    assert_eq!(
+        store.surfaces().await.expect("the surfaces are listed"),
+        vec!["desktop".to_owned()]
+    );
 }
 
 /// The mode a path carries, read the way an operator reads it.
