@@ -5,10 +5,11 @@ understanding that real use will surface what is wrong with it. This is the
 contract text, not a proposal against an earlier shape.
 
 Evidence base: the throwaway prototype at `spikes/plugin-registry`, with
-`FINDINGS4.md` and `round-3/` for the measurements, and
-`docs/plugin-registry-handoff.md` for the working history. Section 14 records
-what changed relative to the shape the prototype carried, compressed. Section 15
-lists what is open for implementation.
+`FINDINGS4.md` and `round-3/` for the measurements. The decision this contract
+settles is recorded in `docs/adr/0002-plugin-contract-futures-only.md`, and the
+landed shape is described in the `metis-foundations` architecture spec. Section 14
+records what changed relative to the shape the prototype carried, compressed.
+Section 15 records the decisions the implementation ticket took.
 
 ## 1. The idea
 

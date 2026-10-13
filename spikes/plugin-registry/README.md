@@ -56,10 +56,13 @@ path, so it drives the landed ABI types rather than a copy.
   prototyping round works against.
 - `context/async-ffi-summary.md`: the source summary of the async approaches that
   started this work.
-- Still open, recorded in `FINDINGS3.md`: reclaiming an abandoned blocking poll;
-  unloading while a blocked poll is still inside plugin code; payload ownership
-  for the two host-service entries; and the fact that only one implementation
-  exercised `async-ffi`.
+- The items `FINDINGS3.md` left open were settled by the `plugin-contract-v1`
+  ticket: reclaim plus a quarantine unload rule, the two service entries' payload
+  ownership written as contract text, and `async-ffi` dropped in favour of the
+  library's own boxed-future helper.
 
-The surrounding design discussion, the decided points, and the full list of open
-questions live in `docs/plugin-registry-handoff.md`.
+The design discussion is settled in `docs/plugin-contract.md` and
+`docs/adr/0002-plugin-contract-futures-only.md`, and the landed shape is
+described in `docs/tasks/metis-foundations/arch-spec.md`. What the round left
+unproven is `FINDINGS4.md` and `round-3/`; what is still owed is in that arch
+spec rather than here.
