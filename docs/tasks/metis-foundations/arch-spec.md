@@ -806,10 +806,17 @@ the existing all-targets gates.
 
 ## Landed ticket: `plugin-authoring-trait` (superseded in part)
 
-Superseded in part by `plugin-contract-v1`: the four-arm vocabulary, the four
-associated `Shape` types and the executor described below no longer describe the
-code, and one capability-name-routed `call` replaces them. The section is kept as
-the record of how the surface was first built.
+Superseded in part by `plugin-contract-v1`, and completely in the places this
+section names as the surface: the four-arm vocabulary, the four associated
+`Shape` types, the `PluginError`-to-completion rule, and the crate's own
+executor (`authoring/executor.rs`, with its bounded pool and its thread-per-call
+fallback) are deleted, along with the host-side pending-slot machinery in
+`authoring/host_adapter.rs`. One capability-name-routed `call`, a boxed-future
+helper, and a host that polls are what replaced them, and
+`crates/plugin-contract/tests/authoring.rs` was rewritten with them. The section
+is kept as the record of how the surface was first built, so a later reader can
+see what the revision removed and why. Everything below the trait that is still
+true is named in the landed `plugin-contract-v1` section.
 
 It builds the Rust author surface
 on top of the landed primitives: the trait, both adapters, the
