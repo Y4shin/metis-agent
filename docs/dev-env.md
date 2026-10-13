@@ -33,5 +33,9 @@ that directory with `npm run check` and `npm run build`.
 The first runnable path is the local transport skeleton:
 `cargo run -p client --example echo` serves the skeleton on the resolved local
 endpoint, calls the echo RPC through the client wrapper, and prints
-`[result] PASS`. Set `METIS_ENDPOINT` to use a non-default socket. There is no
+`[result] PASS`. The default endpoint is `$XDG_RUNTIME_DIR/metis/daemon.sock`
+when that variable is set, otherwise `$TMPDIR/metis/daemon.sock`, and there is
+no fallback to a shared `/tmp` path: a host with neither variable needs
+`METIS_ENDPOINT` to name one. The daemon creates the socket's directory and
+restricts it to its own user, so the example needs no credential. There is no
 product daemon yet.
