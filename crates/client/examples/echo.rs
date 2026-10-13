@@ -6,9 +6,10 @@
 //! cargo run -p client --example echo
 //! ```
 //!
-//! It starts the minimal daemon on the platform default (or the
-//! `METIS_ENDPOINT` override), calls the echo RPC through the wrapper, prints
-//! the response, and exits non-zero when anything fails.
+//! It starts the minimal daemon on the resolved endpoint (the `METIS_ENDPOINT`
+//! override, else the private base), calls the echo RPC through the wrapper,
+//! prints the response, and exits non-zero when anything fails. A host with no
+//! private base and no override is a failure, not a fallback to a shared path.
 
 /// The message that travels to the skeleton and back.
 const MESSAGE: &str = "hello over the local transport";
@@ -16,7 +17,7 @@ const MESSAGE: &str = "hello over the local transport";
 #[cfg(unix)]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = client::resolve_endpoint();
+    let endpoint = client::resolve_endpoint().map_err(client::ClientError::from)?;
     let server_endpoint = endpoint.clone();
     tokio::spawn(async move {
         if let Err(err) = client::skeleton::serve_uds(&server_endpoint).await {

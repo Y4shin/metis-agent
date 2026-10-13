@@ -163,13 +163,6 @@ async fn wrapper_echoes_over_a_temporary_socket() {
     );
 }
 
-/// The platform default is the literal the effort fixes, not whatever the
-/// environment happens to hold.
-#[test]
-fn default_endpoint_is_the_platform_default() {
-    assert_eq!(default_endpoint(), PathBuf::from("/tmp/metis-daemon.sock"));
-}
-
 /// The environment override redirects the local constructor to its socket, and
 /// an empty override means "unset" rather than "the empty path".
 #[tokio::test]
@@ -178,7 +171,10 @@ async fn environment_override_redirects_the_local_constructor() {
     serve_skeleton(socket.path()).await;
 
     let override_guard = EndpointOverride::set(socket.path());
-    assert_eq!(resolve_endpoint(), socket.path().to_path_buf());
+    assert_eq!(
+        resolve_endpoint().expect("an explicit endpoint needs no private base"),
+        socket.path().to_path_buf()
+    );
 
     // The local constructor resolves the override and reaches the skeleton. No
     // transport, `Http2Connection`, or generated stub type is named here.
@@ -190,7 +186,11 @@ async fn environment_override_redirects_the_local_constructor() {
     assert_eq!(echoed, "hello through the override");
 
     unsafe { std::env::set_var(ENDPOINT_ENV, "") };
-    assert_eq!(resolve_endpoint(), default_endpoint());
+    assert_eq!(
+        resolve_endpoint().ok(),
+        default_endpoint().ok(),
+        "an empty override is unset, so the rule falls to the default"
+    );
 
     drop(override_guard);
 }
