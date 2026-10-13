@@ -30,7 +30,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use api_contracts::auth::{self, CredentialRefusal};
+use api_contracts::auth::{self, CredentialRefusal, PairRefusal};
 use api_contracts::connect::metis::v1::DaemonServiceClient;
 use api_contracts::identity;
 use api_contracts::proto::metis::v1::{EchoRequest, PairRequest};
@@ -284,9 +284,11 @@ impl Client {
     ///
     /// Returns [`ClientError::Credential`] when the token cannot be kept,
     /// [`ClientError::ProtocolVersion`] when the daemon refuses this client's
-    /// declared version, and [`ClientError::Call`] with the daemon's own
-    /// refusal (a wrong preshared key, or a surface that is already paired)
-    /// otherwise.
+    /// declared version, [`ClientError::Pairing`] when the daemon refuses the
+    /// pairing call itself (a wrong preshared key, a surface that is already
+    /// paired, or a daemon with no key configured), and [`ClientError::Call`]
+    /// when the call fails on the transport or the daemon answers with another
+    /// protocol error.
     pub async fn pair(&mut self, preshared_key: &str) -> Result<Backend, ClientError> {
         let request = PairRequest {
             preshared_key: preshared_key.to_owned(),
@@ -379,6 +381,9 @@ fn refusal(err: ConnectError) -> ClientError {
     if let Some(refusal) = credential_refusal(&err) {
         return refusal;
     }
+    if let Some(refusal) = pair_refusal(&err) {
+        return refusal;
+    }
     ClientError::Call(err)
 }
 
@@ -414,6 +419,42 @@ pub enum CredentialCause {
     Invalid,
     /// The surface has no token: it was never paired, or its token was revoked.
     Revoked,
+}
+
+/// The typed error for a pairing refusal.
+///
+/// The refusal is read from the response header, never from the message text, so
+/// a wrong key and a repeated pairing are told apart by the daemon's own
+/// vocabulary rather than by prose. `None` means the failure is not a pairing
+/// refusal, and the caller keeps the transport error.
+fn pair_refusal(err: &ConnectError) -> Option<ClientError> {
+    let header = err.response_headers().get(auth::PAIR_ERROR_HEADER)?;
+    let refusal = PairRefusal::parse(header.to_str().ok()?)?;
+    Some(match refusal {
+        PairRefusal::WrongKey => ClientError::Pairing {
+            cause: PairingCause::WrongKey,
+        },
+        PairRefusal::AlreadyPaired => ClientError::Pairing {
+            cause: PairingCause::AlreadyPaired,
+        },
+        // The vocabulary is non-exhaustive: a refusal this build does not know
+        // is left as the transport error rather than guessed at.
+        _ => return None,
+    })
+}
+
+/// Why the daemon refused a pairing call.
+///
+/// The distinction is the one a caller acts on: the wrong key is the operator's
+/// to correct, and a surface that already paired has to be revoked before it can
+/// pair again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingCause {
+    /// The preshared key presented is not the one the daemon was configured
+    /// with.
+    WrongKey,
+    /// The surface already has a token.
+    AlreadyPaired,
 }
 
 /// The typed error for a refusal that lists supported protocol versions.
@@ -457,6 +498,11 @@ pub enum ClientError {
     },
     /// The credential store could not be read or written.
     Credential(credential::CredentialError),
+    /// The daemon refused the pairing call this client made.
+    Pairing {
+        /// Why it was refused.
+        cause: PairingCause,
+    },
     /// The daemon refused the protocol version this client declared, and said
     /// which versions it supports.
     ProtocolVersion {
@@ -486,6 +532,16 @@ impl fmt::Display for ClientError {
                 ),
             },
             Self::Credential(err) => write!(f, "the credential could not be kept: {err}"),
+            Self::Pairing { cause } => match cause {
+                PairingCause::WrongKey => write!(
+                    f,
+                    "the daemon refused to pair this surface: that is not its preshared key"
+                ),
+                PairingCause::AlreadyPaired => write!(
+                    f,
+                    "the daemon refused to pair this surface: it already has a token, so revoke it before pairing again"
+                ),
+            },
             Self::ProtocolVersion { found, supported } => {
                 let supported = supported
                     .iter()
@@ -509,6 +565,7 @@ impl std::error::Error for ClientError {
             Self::Credential(err) => Some(err),
             Self::ProtocolVersion { .. } | Self::CredentialMissing => None,
             Self::CredentialRejected { .. } => None,
+            Self::Pairing { .. } => None,
         }
     }
 }

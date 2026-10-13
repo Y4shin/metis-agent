@@ -4,7 +4,9 @@
 //! One module owns both ends, the way `identity` owns the version-refusal
 //! channel. The daemon refuses a call through [`AUTH_ERROR_HEADER`] and the
 //! client reads the same header, so neither piece of the spelling can drift
-//! from the other.
+//! from the other. The pairing call, which is the one call a surface makes
+//! before it has a credential, spells its own refusals through
+//! [`PAIR_ERROR_HEADER`] in the same way.
 //!
 //! The credential travels as request metadata on every call and never in a URL:
 //! the header's value is the only place the token appears on the wire, and the
@@ -24,6 +26,14 @@ pub const BEARER_SCHEME: &str = "Bearer";
 /// A refusal's meaning crosses the wire as this header rather than as message
 /// text, so a client maps it to a typed error instead of parsing prose.
 pub const AUTH_ERROR_HEADER: &str = "metis-auth-error";
+
+/// The response header a pairing refusal carries.
+///
+/// A refusal's meaning crosses the wire as this header rather than as message
+/// text, so a client maps it to a typed error instead of parsing prose. The
+/// pairing call is the one call a surface makes with no credential, so its
+/// refusals cannot travel through [`AUTH_ERROR_HEADER`].
+pub const PAIR_ERROR_HEADER: &str = "metis-pair-error";
 
 /// How a credential was refused, as it crosses the wire.
 ///
@@ -65,6 +75,47 @@ impl CredentialRefusal {
 }
 
 impl fmt::Display for CredentialRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How a pairing call was refused, as it crosses the wire.
+///
+/// The enum is non-exhaustive: a later pairing refusal is added without
+/// breaking a caller that matches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PairRefusal {
+    /// The preshared key in the request body is not the configured one.
+    WrongKey,
+    /// The surface already has a token. The token it was answered with stays
+    /// the surface's until it is revoked.
+    AlreadyPaired,
+}
+
+impl PairRefusal {
+    /// The header value this refusal crosses the wire as.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WrongKey => "wrong-key",
+            Self::AlreadyPaired => "already-paired",
+        }
+    }
+
+    /// Read a refusal from the header value it crossed the wire as.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "wrong-key" => Some(Self::WrongKey),
+            "already-paired" => Some(Self::AlreadyPaired),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for PairRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }

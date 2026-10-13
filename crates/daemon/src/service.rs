@@ -100,11 +100,21 @@ fn refuse_identity(error: IdentityError) -> ConnectError {
 }
 
 /// Map a pairing refusal onto the wire.
+///
+/// The refusal's meaning travels as [`auth::PAIR_ERROR_HEADER`], so the client
+/// maps it to a typed error instead of reading the message text. A refusal
+/// without a wire value is an internal failure, and keeps the status code it
+/// was given.
 fn refuse_pair(error: PairError) -> ConnectError {
+    let headers = auth::pair_refusal_headers(&error);
     let code = match &error {
         PairError::WrongPresharedKey => ErrorCode::PermissionDenied,
         PairError::AlreadyPaired => ErrorCode::AlreadyExists,
         PairError::Store(_) => ErrorCode::Internal,
     };
-    ConnectError::new(code, error.to_string())
+    let refusal = ConnectError::new(code, error.to_string());
+    match headers {
+        Some(headers) => refusal.with_headers(headers),
+        None => refusal,
+    }
 }
