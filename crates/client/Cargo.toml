@@ -20,9 +20,14 @@ tokio.workspace = true
 # private field of `EventStream`, so no caller names it.
 hyper.workspace = true
 
-# The refusal vocabulary is read from response headers, on the stream's own
+# The refusal vocabulary is read from response metadata, on the stream's own
 # response as well as on a failed call, so the header map type is named here.
 http = "1"
+
+# Every stream declares a request identifier of its own, which is what the
+# daemon registers the stream's work under; it comes from the operating
+# system's random source.
+getrandom.workspace = true
 
 
 [dev-dependencies]

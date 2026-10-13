@@ -17,16 +17,19 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use api_contracts::cancel::{CancelOutcome, InFlight, Registry};
 use api_contracts::connect::metis::v1::{DaemonService, DaemonServiceExt};
 use api_contracts::events::{self, CursorError, Ring};
 use api_contracts::identity::{self, ClientIdentity, IdentityError};
 use api_contracts::proto::metis::v1::{
-    EchoRequest, EchoResponse, Event, PairRequest, PairResponse, StreamEventsRequest,
+    CancelRequest, CancelResponse, EchoRequest, EchoResponse, Event, PairRequest, PairResponse,
+    StreamEventsRequest,
 };
+use api_contracts::request::{self, EchoRequestId, RequestId};
 use api_contracts::transport::{self, ConfigError};
 use connectrpc::{
-    ConnectError, ErrorCode, RequestContext, Response, Router, ServiceRequest, ServiceResult,
-    ServiceStream,
+    ConnectError, ConnectRpcService, ErrorCode, RequestContext, Response, Router, ServiceRequest,
+    ServiceResult, ServiceStream,
 };
 
 /// How long the skeleton's streams may carry nothing before they carry a
@@ -45,6 +48,11 @@ const EVENT_CAPACITY: usize = 64;
 pub struct SkeletonDaemon {
     ring: Ring,
     heartbeat: Duration,
+    /// The work its streams have in flight, keyed by the surface that declared
+    /// it and the identifier it declared. One registry per service, exactly as
+    /// the daemon's own service has one, so a stream served in process is
+    /// cancellable the same way.
+    cancellations: Registry,
 }
 
 impl SkeletonDaemon {
@@ -61,7 +69,11 @@ impl SkeletonDaemon {
     /// example publishes the events a stream carries.
     #[must_use]
     pub fn with_ring(ring: Ring, heartbeat: Duration) -> Self {
-        Self { ring, heartbeat }
+        Self {
+            ring,
+            heartbeat,
+            cancellations: Registry::new(),
+        }
     }
 }
 
@@ -96,16 +108,72 @@ impl DaemonService for SkeletonDaemon {
 
     /// Stream the skeleton's ring: the snapshot for the selected channels, then
     /// the events that follow.
+    ///
+    /// A request that declared an identifier registers the stream as work in
+    /// flight for as long as it runs, so a `Cancel` naming it stops the stream.
+    /// The skeleton is declaration-free test support, so a caller that declared
+    /// nothing, or declared an identifier this build cannot read, is served
+    /// without cancellable work rather than refused: the daemon's own service is
+    /// where a malformed declaration is an error.
     async fn stream_events(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, StreamEventsRequest>,
     ) -> ServiceResult<ServiceStream<Event>> {
         // The channels are borrowed views of the request body, so they are
         // copied onto the iterator's own stack slot rather than converted.
         let channels = request.channels.iter().copied().collect::<Vec<_>>();
-        events(&self.ring, self.heartbeat, &channels, request.last_event_id)
+        let guard = declared_work(&ctx, &self.cancellations);
+        events(
+            &self.ring,
+            self.heartbeat,
+            &channels,
+            request.last_event_id,
+            guard,
+        )
     }
+
+    /// Stop the work the declaring surface registered under the identifier.
+    ///
+    /// A declaration this build cannot read names no surface, and the surface is
+    /// part of what work is keyed by, so it finds nothing rather than being
+    /// refused: the skeleton serves a caller that declares nothing.
+    async fn cancel(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, CancelRequest>,
+    ) -> ServiceResult<CancelResponse> {
+        let outcome = match declared_surface(&ctx) {
+            Some(surface) => match RequestId::parse(request.request_id) {
+                Ok(id) => self.cancellations.cancel(&surface, &id),
+                Err(_) => CancelOutcome::AlreadyFinished,
+            },
+            None => CancelOutcome::AlreadyFinished,
+        };
+        Response::ok(CancelResponse {
+            outcome: outcome.to_proto().into(),
+            ..Default::default()
+        })
+    }
+}
+
+/// The surface a call declared, or `None` when the declaration is missing or one
+/// this build cannot read. The skeleton's non-recording services stay
+/// declaration-free, so a call that declares nothing is served.
+fn declared_surface(ctx: &RequestContext) -> Option<String> {
+    identity::from_headers(ctx.headers())
+        .ok()
+        .map(|declared| declared.surface().to_owned())
+}
+
+/// The work in flight one stream registers, when the request declared both a
+/// readable surface and a readable identifier.
+fn declared_work(ctx: &RequestContext, registry: &Registry) -> Option<InFlight> {
+    let surface = declared_surface(ctx)?;
+    let id = request::RequestId::from_headers(ctx.headers())
+        .ok()
+        .flatten()?;
+    Some(registry.register(&surface, id))
 }
 
 /// The body of a stream over `ring`: the snapshot of `channels` first when the
@@ -115,17 +183,20 @@ impl DaemonService for SkeletonDaemon {
 /// Both skeleton services serve their stream this way, so the skeleton and the
 /// daemon agree on the stream's shape by sharing the ring's own assembly rather
 /// than by repeating it, and both refuse a cursor the ring can no longer serve
-/// through [`refuse_cursor`], exactly as the daemon's own handler does.
+/// through [`refuse_cursor`], exactly as the daemon's own handler does. `guard`
+/// is the work the stream registered, and it travels inside the stream so a
+/// cancellation of that request ends it.
 fn events(
     ring: &Ring,
     heartbeat: Duration,
     channels: &[&str],
     cursor: u64,
+    guard: Option<InFlight>,
 ) -> ServiceResult<ServiceStream<Event>> {
     let stream = ring
         .stream(channels, cursor, heartbeat)
         .map_err(refuse_cursor)?;
-    Ok(Response::stream(stream))
+    Ok(Response::stream(events::cancellable(stream, guard)))
 }
 
 /// The router the skeleton registers on. The transport loop serves this.
@@ -182,6 +253,7 @@ struct RecordingDaemon {
     recorder: IdentityRecorder,
     ring: Ring,
     heartbeat: Duration,
+    cancellations: Registry,
 }
 
 // The generated trait uses an explicit RPITIT signature; an `async fn` impl
@@ -217,11 +289,44 @@ impl DaemonService for RecordingDaemon {
         request: ServiceRequest<'_, StreamEventsRequest>,
     ) -> ServiceResult<ServiceStream<Event>> {
         let declared = identity::from_headers(ctx.headers()).map_err(refuse)?;
+        let surface = declared.surface().to_owned();
         self.recorder.record(declared);
         // The channels are borrowed views of the request body, so they are
         // copied onto the iterator's own stack slot rather than converted.
         let channels = request.channels.iter().copied().collect::<Vec<_>>();
-        events(&self.ring, self.heartbeat, &channels, request.last_event_id)
+        // The declaration was checked above, so the surface is known here; an
+        // identifier this build cannot read registers nothing, which is the
+        // leniency the recording skeleton keeps for everything but the
+        // declaration itself.
+        let guard = request::RequestId::from_headers(ctx.headers())
+            .ok()
+            .flatten()
+            .map(|id| self.cancellations.register(&surface, id));
+        events(
+            &self.ring,
+            self.heartbeat,
+            &channels,
+            request.last_event_id,
+            guard,
+        )
+    }
+
+    /// Stop the work the declaring surface registered under the identifier, the
+    /// way the daemon's own service does.
+    async fn cancel(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, CancelRequest>,
+    ) -> ServiceResult<CancelResponse> {
+        let declared = identity::from_headers(ctx.headers()).map_err(refuse)?;
+        let outcome = match RequestId::parse(request.request_id) {
+            Ok(id) => self.cancellations.cancel(declared.surface(), &id),
+            Err(_) => CancelOutcome::AlreadyFinished,
+        };
+        Response::ok(CancelResponse {
+            outcome: outcome.to_proto().into(),
+            ..Default::default()
+        })
     }
 }
 
@@ -243,6 +348,7 @@ pub fn router_recording(recorder: &IdentityRecorder) -> Router {
         recorder: recorder.clone(),
         ring: Ring::new(EVENT_CAPACITY),
         heartbeat: HEARTBEAT_DEFAULT,
+        cancellations: Registry::new(),
     })
     .register(Router::new())
 }
@@ -281,7 +387,7 @@ fn echo_body(message: &str) -> EchoResponse {
 /// Returns the bind or accept error from the transport front-end.
 #[cfg(unix)]
 pub async fn serve_uds(path: &std::path::Path) -> std::io::Result<()> {
-    api_contracts::transport::serve_uds(path, router()).await
+    api_contracts::transport::serve_uds_service(path, service(Ring::new(EVENT_CAPACITY))).await
 }
 
 /// Serve the skeleton on a Unix domain socket, streaming `ring`.
@@ -299,7 +405,20 @@ pub async fn serve_uds_with(
     ring: Ring,
     heartbeat: Duration,
 ) -> std::io::Result<()> {
-    api_contracts::transport::serve_uds(path, router_with(ring, heartbeat)).await
+    api_contracts::transport::serve_uds_service(path, service_with(ring, heartbeat)).await
+}
+
+/// The service the skeleton's socket serves: the router with the request
+/// identifier echo mounted, so the in-process service and the daemon's own
+/// service answer a declared identifier identically.
+#[cfg(unix)]
+fn service(ring: Ring) -> ConnectRpcService<Router> {
+    service_with(ring, HEARTBEAT_DEFAULT)
+}
+
+#[cfg(unix)]
+fn service_with(ring: Ring, heartbeat: Duration) -> ConnectRpcService<Router> {
+    ConnectRpcService::new(router_with(ring, heartbeat)).with_interceptor(EchoRequestId)
 }
 
 /// Wait, bounded, for a listener to create its socket file.

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use api_contracts::cancel::CancelOutcome;
 use api_contracts::events::Ring;
 use api_contracts::proto::metis::v1::EventKind;
 use client::skeleton;
@@ -207,4 +208,143 @@ async fn a_channel_with_no_events_carries_the_skeleton_heartbeat() {
         "the heartbeat carries the latest identifier"
     );
     assert!(heartbeat.channel.is_empty());
+}
+
+/// Publish into `ring` until it holds far less than it has been given, so a
+/// subscriber that read nothing has necessarily fallen past the bound between
+/// the ring and a reader. Stated in the ring's own observable bounds rather than
+/// in a capacity a test does not own, and bounded so a much larger window fails
+/// loudly instead of hanging.
+fn stall_past_the_bound(ring: &Ring) {
+    ring.publish("daemon", EventKind::Event, "{}");
+    while ring.since(0, &["daemon"]).len() * 2 > ring.latest_id() as usize {
+        ring.publish("daemon", EventKind::Event, "{}");
+        assert!(
+            ring.latest_id() < 10_000,
+            "the ring's window must fill so a stalled reader falls behind"
+        );
+    }
+}
+
+/// A reader that stops reading is dropped, the wrapper reports the drop as the
+/// typed error rather than as a clean end or a transport failure, and the stream
+/// carries nothing after it. The answer is the resync, which is the cursorless
+/// form of the same call: a fresh stream whose first message is the snapshot of
+/// the channels' current heads, replacing the state the caller held rather than
+/// appending to it.
+#[tokio::test]
+async fn a_dropped_stream_is_resync_required_and_the_resync_opens_with_the_snapshot() {
+    let directory = TempDir::new("dropped");
+    let endpoint = directory.join("daemon.sock");
+    // A small window, so the bound is reachable from a test rather than from a
+    // production amount of traffic.
+    let ring = Ring::new(4);
+    serve(&endpoint, ring.clone(), skeleton::HEARTBEAT_DEFAULT).await;
+
+    let caller = Client::with_endpoint(&endpoint)
+        .await
+        .expect("the local transport builds");
+    let mut stream = caller
+        .stream_events(&["daemon"], 0)
+        .await
+        .expect("the stream is established");
+
+    let opening = stream
+        .message()
+        .await
+        .expect("the stream carries a message")
+        .expect("the stream has not ended");
+    assert_eq!(opening.kind, EventKind::Snapshot);
+
+    // The reader stops reading while the ring fills past its window.
+    stall_past_the_bound(&ring);
+
+    let dropped = stream
+        .message()
+        .await
+        .expect_err("a stalled reader is dropped rather than carried across a gap");
+    assert!(
+        matches!(dropped, ClientError::StreamDropped),
+        "expected the typed drop, got {dropped}"
+    );
+
+    // Nothing follows it, and the stream does not read as a clean end either:
+    // the gap is never presented as current state.
+    let again = stream.message().await;
+    assert!(
+        matches!(again, Err(ClientError::StreamDropped)),
+        "the drop is terminal and sticky, got {again:?}"
+    );
+
+    // The resync: a fresh cursorless stream, which opens with the snapshot. Its
+    // head is the current state, not the events that were missed.
+    let head = ring.publish("daemon", EventKind::Event, "{\"head\":true}");
+    let mut resync = caller
+        .stream_events(&["daemon"], 0)
+        .await
+        .expect("a cursorless stream is served");
+    let snapshot = resync
+        .message()
+        .await
+        .expect("the stream carries a message")
+        .expect("the stream has not ended");
+    assert_eq!(snapshot.kind, EventKind::Snapshot);
+    assert_eq!(snapshot.id, head, "the head is the current state");
+    assert_eq!(snapshot.channel, "daemon");
+    assert_eq!(snapshot.payload, "{\"head\":true}");
+}
+
+/// A cancelled stream stops, and the wrapper reports it as the typed cancelled
+/// refusal rather than as an event or a clean end. The identifier the handle
+/// carries is the one the daemon registered the work under, so a caller never
+/// invents one to cancel by.
+#[tokio::test]
+async fn a_cancelled_stream_stops_as_the_typed_refusal() {
+    let directory = TempDir::new("cancelled");
+    let endpoint = directory.join("daemon.sock");
+    let ring = Ring::new(8);
+    serve(&endpoint, ring.clone(), skeleton::HEARTBEAT_DEFAULT).await;
+
+    let caller = Client::with_endpoint(&endpoint)
+        .await
+        .expect("the local transport builds");
+    let mut stream = caller
+        .stream_events(&["daemon"], 0)
+        .await
+        .expect("the stream is established");
+    let opening = stream
+        .message()
+        .await
+        .expect("the stream carries a message")
+        .expect("the stream has not ended");
+    assert_eq!(opening.kind, EventKind::Snapshot);
+    let id = stream.request_id().clone();
+
+    assert_eq!(
+        caller
+            .cancel(&id)
+            .await
+            .expect("the cancel reaches the daemon"),
+        CancelOutcome::Cancelled
+    );
+
+    let stopped = stream
+        .message()
+        .await
+        .expect_err("a cancelled stream is stopped");
+    assert!(
+        matches!(stopped, ClientError::StreamCancelled),
+        "expected the typed cancelled refusal, got {stopped}"
+    );
+    assert!(
+        stream.message().await.is_err(),
+        "a stopped stream carries nothing after it"
+    );
+    assert_eq!(
+        caller
+            .cancel(&id)
+            .await
+            .expect("a repeated cancel is answered"),
+        CancelOutcome::AlreadyFinished
+    );
 }

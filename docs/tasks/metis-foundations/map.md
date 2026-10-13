@@ -89,7 +89,13 @@ streaming assumptions before anything is built on top.
   dropping a stream cancels nothing by itself. A slow consumer sees bounded
   backpressure and then a plain stream drop, which the client answers with a
   resync, rather than events being dropped silently. The protocol major version
-  is the proto package (`metis.v1`).
+  is the proto package (`metis.v1`). Landed as `cancellation-and-slow-consumers`:
+  `Cancel` answers `CANCELLED` or `ALREADY_FINISHED`, the identifier travels as
+  `metis-request-id` and is echoed in the response metadata, and both a drop and a
+  cancellation end the stream with a `metis-stream-error` refusal in its trailing
+  metadata, which the client reads as `ClientError::StreamDropped` or
+  `ClientError::StreamCancelled`. The bound is the ring's window, so it is still
+  not configurable.
 - The stream's cursor travels in the request (`last_event_id`), the snapshot is
   the first message of a stream opened without one, and heartbeats are ordinary
   stream messages.
@@ -364,8 +370,12 @@ streaming assumptions before anything is built on top.
   than in the repository; the CI side still needs the `BUF_TOKEN` repository
   secret, which remains a human action, and until it is set a pull request can go
   red on rate limiting and need a re-run.
-- How the client distinguishes a deliberate slow-consumer stream drop from a
-  transport failure, so the resync decision is not guesswork.
+- Closed by `cancellation-and-slow-consumers`: a deliberate slow-consumer drop is
+  the typed `ClientError::StreamDropped` and a cancellation is
+  `ClientError::StreamCancelled`, both read from the stream's trailing
+  `metis-stream-error` metadata, so the resync decision is not guesswork. A
+  transport failure stays `ClientError::Call`, and what a caller should do about
+  one is still open.
 - The endpoint override's variable name is a private constant in `client`, so the
   daemon effort would restate the literal `METIS_ENDPOINT` unless the constant is
   exported. Related: `serve_uds` has no shutdown path that unlinks its socket, so

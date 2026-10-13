@@ -83,17 +83,41 @@ Event stream, documented in `crates/api-contracts/src/events.rs`,
   snapshot. It also asserts the stream's authorization: with
   `AuthPolicy::TokenRequired` mounted, a stream without a credential is refused
   and the same call with a paired token is served.
+- `cargo test -p daemon --test cancel` -- over a temporary socket, the
+  daemon's own service is served and the cancel and slow-consumer properties are
+  asserted. A declared request identifier comes back in the response metadata of
+  a unary call and of the stream alike, and a call that declares none is served
+  exactly as it was before identifiers existed. A `Cancel` naming the identifier
+  a stream declared stops it, the client reads the stop as the typed
+  `ClientError::StreamCancelled`, and a second call, a call for work that was
+  never in flight, and a call by another surface for the same identifier are all
+  answered as `AlreadyFinished`; a malformed identifier is refused as an
+  `InvalidArgument`. A client that disconnects cancels nothing: the stream that
+  is still open keeps carrying, the ring keeps what it holds, the registry's
+  count of cancellations is unchanged, and the disconnected stream's identifier
+  is answered as already finished. A reader that stops reading is dropped: the
+  stream ends with `ResourceExhausted` carrying `metis-stream-error:
+  slow-consumer`, the message names how many events were lost, and nothing
+  follows it.
 - `cargo test -p client --test stream` -- the wrapper's half over the
   skeleton's own socket: the stream is opened and drained through `Client`
   without naming a transport or a generated stub, and an expired cursor is the
   wrapper's typed `ClientError::CursorExpired` whose resync opens with the
-  snapshot.
+  snapshot. It also asserts the two terminal refusals the wrapper answers with
+  its own types: a stalled reader earns `ClientError::StreamDropped` and a
+  cancelled stream `ClientError::StreamCancelled`, neither of which is a clean
+  end or a transport failure, so the gap is never presented as current state and
+  the answer is the same cursorless resync. The typed errors are read from the
+  stream's trailing metadata, which is where a failure that happens after the
+  stream was established carries the daemon's vocabulary.
 - `cargo run -p client --example events` -- serves the skeleton over a ring
   holding one event, opens the stream through the wrapper, prints `[snapshot]`
   for the message the stream opens with, publishes a second event into the ring,
   prints `[event]` for the event that arrives, opens a second stream with that
   event's identifier as its cursor, publishes a third event, prints `[resume]`
-  for the event the resumed stream carries, and exits non-zero on failure.
+  for the event the resumed stream carries, cancels that stream by the
+  identifier its handle reports and prints `[cancel]` for the outcome, and exits
+  non-zero on failure.
 
 Remote transport, off unless `METIS_TCP_ADDR` names an `IP:port` literal. There
 is no default bind address, so remote access cannot be enabled by accident:

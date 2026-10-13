@@ -7,6 +7,7 @@
 
 use api_contracts::events::Event;
 use api_contracts::proto::metis::v1::{Event as EventMessage, EventView};
+use api_contracts::request::RequestId;
 use connectrpc::client::ServerStream;
 
 use crate::ClientError;
@@ -33,20 +34,38 @@ type Body = hyper::body::Incoming;
 /// answer is a cursorless stream, which begins with the snapshot.
 pub struct EventStream {
     inner: ServerStream<Body, EventView<'static>>,
+    /// The identifier this stream declared as request metadata, which is what
+    /// the daemon registered the stream's work under.
+    request_id: RequestId,
 }
 
 impl std::fmt::Debug for EventStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EventStream")
             .field("stream", &self.inner)
+            .field("request_id", &self.request_id)
             .finish()
     }
 }
 
 impl EventStream {
-    /// Wrap the generated streaming call.
-    pub(crate) fn new(inner: ServerStream<Body, EventView<'static>>) -> Self {
-        Self { inner }
+    /// Wrap the generated streaming call and the identifier it declared.
+    pub(crate) fn new(
+        inner: ServerStream<Body, EventView<'static>>,
+        request_id: RequestId,
+    ) -> Self {
+        Self { inner, request_id }
+    }
+
+    /// The identifier this stream is cancellable by.
+    ///
+    /// The wrapper generates it and declares it on the call that opened the
+    /// stream, so a caller names it rather than inventing one:
+    /// [`Client::cancel`](crate::Client::cancel) stops the stream's work under
+    /// it.
+    #[must_use]
+    pub fn request_id(&self) -> &RequestId {
+        &self.request_id
     }
 
     /// Fetch the next event, or `None` when the stream ends cleanly.
@@ -54,10 +73,17 @@ impl EventStream {
     /// An error is terminal: the stream will not carry another event, and
     /// recovering means opening a new stream. The daemon's own refusals are
     /// reported as the typed errors a unary call reports, because they travel in
-    /// the same headers. The cursor to resume by is the highest `EVENT`
-    /// identifier seen, and a refusal this stream cannot earn (an expired cursor
-    /// is refused at [`Client::stream_events`](crate::Client::stream_events)) is
-    /// answered with a cursorless stream.
+    /// the same metadata: a cursor refusal arrives in the response headers, and a
+    /// stream the daemon ended in the middle carries [`ClientError::StreamDropped`]
+    /// or [`ClientError::StreamCancelled`] in the trailing metadata. A dropped
+    /// stream leaves no event behind it, so the gap it names is never presented
+    /// as current state, and the answer to both is a cursorless stream, which
+    /// begins with the snapshot.
+    ///
+    /// The cursor to resume by is the highest `EVENT` identifier seen, and a
+    /// refusal this stream cannot earn (an expired cursor is refused at
+    /// [`Client::stream_events`](crate::Client::stream_events)) is answered with a
+    /// cursorless stream.
     ///
     /// # Errors
     ///

@@ -13,11 +13,13 @@
 //! publishes a second event into the ring and prints the event that arrives.
 //! Both steps are the cursorless stream. The third step is the resume: it opens
 //! a second stream carrying that event's identifier as its cursor, publishes a
-//! third event, and prints the event the resumed stream carries. Anything that
-//! fails exits non-zero.
+//! third event, and prints the event the resumed stream carries. The fourth step
+//! is the cancel: it stops that second stream by the identifier the handle
+//! reports and prints the outcome. Anything that fails exits non-zero.
 
 use std::time::Duration;
 
+use api_contracts::cancel::CancelOutcome;
 use api_contracts::events::Ring;
 use api_contracts::proto::metis::v1::EventKind;
 
@@ -128,6 +130,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || resumed_event.payload != RESUME_PAYLOAD
     {
         eprintln!("[result] FAIL: unexpected resumed event {resumed_event:?}");
+        std::process::exit(1);
+    }
+
+    // The cancel: the resumed stream is still open, and the identifier the
+    // handle reports is what the daemon registered its work under.
+    let cancelled = caller.cancel(resumed.request_id()).await?;
+    println!(
+        "[cancel] request_id={} outcome={cancelled:?}",
+        resumed.request_id()
+    );
+    if cancelled != CancelOutcome::Cancelled {
+        eprintln!("[result] FAIL: unexpected cancel outcome {cancelled:?}");
+        std::process::exit(1);
+    }
+    // The stream stops: the next read reports the typed cancellation rather
+    // than an event, so the gap a cancellation leaves is never presented as
+    // current state.
+    if !matches!(
+        resumed.message().await,
+        Err(client::ClientError::StreamCancelled)
+    ) {
+        eprintln!("[result] FAIL: the cancelled stream did not stop");
         std::process::exit(1);
     }
 
