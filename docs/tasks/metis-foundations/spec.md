@@ -1,7 +1,7 @@
 ---
 type: spec
 title: Metis foundations
-status: draft
+status: stable
 ---
 
 # Metis foundations
