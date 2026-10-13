@@ -16,7 +16,7 @@ use std::time::Duration;
 use api_contracts::events::Ring;
 use api_contracts::proto::metis::v1::EventKind;
 use client::skeleton;
-use client::{Client, Surface};
+use client::{Client, ClientError, Surface};
 
 /// A temporary socket directory that removes itself on drop, so the socket
 /// directory is cleaned up on the success path and on a panic alike.
@@ -112,6 +112,57 @@ async fn the_wrapper_drains_the_stream_the_skeleton_serves() {
         "the event that follows the snapshot has a greater identifier"
     );
     assert_eq!(event.payload, "{\"next\":true}");
+}
+
+/// An expired cursor is the wrapper's typed refusal, read from the header the
+/// skeleton wrote, and the answer is the resync: the cursorless form of the
+/// same call, whose first message is the snapshot.
+#[tokio::test]
+async fn an_expired_cursor_is_a_typed_refusal_and_the_resync_opens_with_the_snapshot() {
+    let directory = TempDir::new("expired");
+    let endpoint = directory.join("daemon.sock");
+    let ring = Ring::new(8);
+    ring.publish("daemon", EventKind::Event, "seen");
+    // Move the skeleton's window past identifier 1. A cursor of
+    // `earliest_resumable() - 1` is still servable, because the event that
+    // opened the window follows it, so the window has to begin at 3 or beyond
+    // before identifier 1 is older than the ring.
+    while ring.earliest_resumable() <= 2 {
+        ring.publish("daemon", EventKind::Event, "{}");
+        assert!(
+            ring.latest_id() < 10_000,
+            "the ring's window must advance past identifier 1"
+        );
+    }
+    serve(&endpoint, ring.clone(), skeleton::HEARTBEAT_DEFAULT).await;
+
+    let caller = Client::with_endpoint(&endpoint)
+        .await
+        .expect("the local transport builds")
+        .with_surface(Surface::Test)
+        .expect("the stored credential is readable");
+
+    let refused = caller
+        .stream_events(&["daemon"], 1)
+        .await
+        .expect_err("a cursor older than the window is refused");
+    assert!(
+        matches!(refused, ClientError::CursorExpired),
+        "expected the typed expired-cursor refusal, got {refused}"
+    );
+
+    let mut resync = caller
+        .stream_events(&["daemon"], 0)
+        .await
+        .expect("a cursorless stream is served");
+    let snapshot = resync
+        .message()
+        .await
+        .expect("the stream carries a message")
+        .expect("the stream has not ended");
+    assert_eq!(snapshot.kind, EventKind::Snapshot);
+    assert_eq!(snapshot.id, ring.latest_id());
+    assert_eq!(snapshot.channel, "daemon");
 }
 
 /// A stream over a channel nothing was published to still opens with the

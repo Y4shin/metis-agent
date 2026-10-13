@@ -218,12 +218,13 @@ pub trait DaemonService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<crate::proto::metis::v1::PairResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Stream the daemon's events for the selected channels. The stream's first
-    /// message is the snapshot of each selected channel's head, later messages
-    /// carry the events that follow, and an idle stream carries heartbeats as
-    /// ordinary messages. The response is the event itself rather than a named
-    /// response wrapper, which is why this RPC carries the one lint exception
-    /// in `buf.yaml`.
+    /// Stream the daemon's events for the selected channels. A stream opened
+    /// without a cursor begins with the snapshot of each selected channel's head;
+    /// a stream opened with a cursor begins with the events that follow it, in
+    /// identifier order. Later messages carry what is published while the stream
+    /// is open, and an idle stream carries heartbeats as ordinary messages. The
+    /// response is the event itself rather than a named response wrapper, which is
+    /// why this RPC carries the one lint exception in `buf.yaml`.
     ///
     /// `request` is borrowed from the request body and is valid for the
     /// duration of the call (until the response stream is returned);

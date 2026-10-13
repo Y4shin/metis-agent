@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use api_contracts::connect::metis::v1::{DaemonService, DaemonServiceExt};
-use api_contracts::events::Ring;
+use api_contracts::events::{self, CursorError, Ring};
 use api_contracts::identity::{self, ClientIdentity, IdentityError};
 use api_contracts::proto::metis::v1::{
     EchoRequest, EchoResponse, Event, PairRequest, PairResponse, StreamEventsRequest,
@@ -104,28 +104,28 @@ impl DaemonService for SkeletonDaemon {
         // The channels are borrowed views of the request body, so they are
         // copied onto the iterator's own stack slot rather than converted.
         let channels = request.channels.iter().copied().collect::<Vec<_>>();
-        Ok(events(
-            &self.ring,
-            self.heartbeat,
-            &channels,
-            request.last_event_id,
-        ))
+        events(&self.ring, self.heartbeat, &channels, request.last_event_id)
     }
 }
 
-/// The body of a stream over `ring`: the snapshot of `channels` first, then the
-/// events that follow, with heartbeats on an idle stretch.
+/// The body of a stream over `ring`: the snapshot of `channels` first when the
+/// stream carries no cursor, the events that follow a cursor when it does, and
+/// the live events after either, with heartbeats on an idle stretch.
 ///
 /// Both skeleton services serve their stream this way, so the skeleton and the
 /// daemon agree on the stream's shape by sharing the ring's own assembly rather
-/// than by repeating it.
+/// than by repeating it, and both refuse a cursor the ring can no longer serve
+/// through [`refuse_cursor`], exactly as the daemon's own handler does.
 fn events(
     ring: &Ring,
     heartbeat: Duration,
     channels: &[&str],
     cursor: u64,
-) -> Response<ServiceStream<Event>> {
-    Response::stream(ring.stream(channels, cursor, heartbeat))
+) -> ServiceResult<ServiceStream<Event>> {
+    let stream = ring
+        .stream(channels, cursor, heartbeat)
+        .map_err(refuse_cursor)?;
+    Ok(Response::stream(stream))
 }
 
 /// The router the skeleton registers on. The transport loop serves this.
@@ -221,12 +221,7 @@ impl DaemonService for RecordingDaemon {
         // The channels are borrowed views of the request body, so they are
         // copied onto the iterator's own stack slot rather than converted.
         let channels = request.channels.iter().copied().collect::<Vec<_>>();
-        Ok(events(
-            &self.ring,
-            self.heartbeat,
-            &channels,
-            request.last_event_id,
-        ))
+        events(&self.ring, self.heartbeat, &channels, request.last_event_id)
     }
 }
 
@@ -250,6 +245,13 @@ pub fn router_recording(recorder: &IdentityRecorder) -> Router {
         heartbeat: HEARTBEAT_DEFAULT,
     })
     .register(Router::new())
+}
+
+/// Refuse a cursor the ring can no longer serve, in the shape the daemon's own
+/// handler uses, so the skeleton and the daemon refuse a cursor identically.
+fn refuse_cursor(error: CursorError) -> ConnectError {
+    let headers = events::cursor_refusal_headers(&error);
+    ConnectError::new(ErrorCode::FailedPrecondition, error.to_string()).with_headers(headers)
 }
 
 /// Refuse a declaration this daemon cannot act on.

@@ -59,22 +59,41 @@ Event stream, documented in `crates/api-contracts/src/events.rs`,
   capacity, `earliest_resumable` follows the oldest event still held, the
   snapshot is the head of each selected channel, `since` returns what follows a
   cursor, a subscription delivers what is published after it, and the serving
-  stream opens with the snapshot and then follows the ring.
+  stream opens with the snapshot and then follows the ring. The same file
+  asserts the cursor rule: a servable cursor replays only what follows it, typed
+  as ordinary events and with no snapshot, the edges of the window are servable
+  (a cursor one below the oldest held identifier, and the newest identifier), a
+  cursor below the window or beyond the newest identifier is expired carrying
+  both bounds, a cursor of zero is never expired, and the refusal crosses the
+  wire as the `metis-cursor-error` header, which an unknown value does not parse
+  into.
 - `cargo test -p daemon --test stream` -- over a temporary socket, the daemon's
   own service is served with its ring: the stream's first message is the
   snapshot, an event published while the stream is open arrives with a greater
   identifier, an unselected channel contributes nothing, an idle stream carries
   heartbeats as ordinary messages, and the identifiers never decrease. The same
-  test file asserts the stream's authorization: with `AuthPolicy::TokenRequired`
-  mounted, a stream without a credential is refused and the same call with a
-  paired token is served.
+  test file asserts resume and expiry: a stream opened with a cursor replays
+  only the events that follow it and carries no snapshot, a cursor older than
+  the ring is refused at the call that opened the stream as
+  `ClientError::CursorExpired` and the cursorless resync then opens with the
+  snapshot, a disconnect and a reconnect with the last seen identifier deliver
+  exactly the missed events with no gap and no duplicate, and a restarted
+  service (a second `Service` over the same store on a second socket) expires
+  every cursor while a cursorless stream still opens with its new, empty ring's
+  snapshot. It also asserts the stream's authorization: with
+  `AuthPolicy::TokenRequired` mounted, a stream without a credential is refused
+  and the same call with a paired token is served.
 - `cargo test -p client --test stream` -- the wrapper's half over the
   skeleton's own socket: the stream is opened and drained through `Client`
-  without naming a transport or a generated stub.
+  without naming a transport or a generated stub, and an expired cursor is the
+  wrapper's typed `ClientError::CursorExpired` whose resync opens with the
+  snapshot.
 - `cargo run -p client --example events` -- serves the skeleton over a ring
   holding one event, opens the stream through the wrapper, prints `[snapshot]`
   for the message the stream opens with, publishes a second event into the ring,
-  prints `[event]` for the event that arrives, and exits non-zero on failure.
+  prints `[event]` for the event that arrives, opens a second stream with that
+  event's identifier as its cursor, publishes a third event, prints `[resume]`
+  for the event the resumed stream carries, and exits non-zero on failure.
 
 Remote transport, off unless `METIS_TCP_ADDR` names an `IP:port` literal. There
 is no default bind address, so remote access cannot be enabled by accident:
