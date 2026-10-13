@@ -11,8 +11,8 @@
 //! `bash scripts/regenerate-contracts.sh`; see `contracts/README.md`.
 //!
 //! `transport` is the one handwritten transport in the repository: the serve
-//! loop, the Unix listener front-end, and the connector shape the skeleton, the
-//! `client` crate, and the daemon effort share.
+//! loop, the Unix and TCP listener front-ends, and the connector shapes the
+//! skeleton, the `client` crate, and the daemon effort share.
 
 pub mod connect;
 pub mod proto;

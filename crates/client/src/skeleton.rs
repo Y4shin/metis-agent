@@ -1,16 +1,20 @@
-//! The skeleton daemon: test support for the local wire path.
+//! The skeleton daemon: test support for the wire path.
 //!
 //! This is deliberately not product API. It is the minimal `DaemonService`
-//! implementation the transport test and the `echo` example drive, so the
+//! implementation the transport tests and the `echo` example drive, so the
 //! served path is proven end to end before the daemon effort replaces it with
 //! the real service. It echoes the request and stamps `received_at` with an
-//! RFC 3339 UTC time, matching the contract.
+//! RFC 3339 UTC time, matching the contract. `serve_uds` and `serve_remote` are
+//! the start paths its tests use: the first binds a Unix socket, the second
+//! binds the TCP address `METIS_TCP_ADDR` names, if any.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api_contracts::connect::metis::v1::{DaemonService, DaemonServiceExt};
 use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse};
+use api_contracts::transport::{self, ConfigError};
 use connectrpc::{RequestContext, Response, Router, ServiceRequest, ServiceResult};
 
 /// The skeleton service: it echoes whatever it receives.
@@ -62,6 +66,40 @@ pub async fn wait_for_socket(path: &std::path::Path) -> bool {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     false
+}
+
+/// Start the remote listener when `METIS_TCP_ADDR` names a bind address.
+///
+/// Resolution is `transport::resolve_remote_addr`: an absent or empty variable
+/// returns `Ok(None)` having bound nothing, which is the whole of off by
+/// default. A named address is bound before this function returns and accepted
+/// on its own task, and the address the operating system assigned is returned,
+/// so a caller connects to the real port instead of guessing one.
+///
+/// This is test support, like [`serve_uds`]: until the daemon effort wires the
+/// listener into `main`, this is the start path the remote test drives.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::InvalidRemoteAddr`] when the variable names something
+/// that is not an `IP:port` literal, and [`ConfigError::RemoteBind`] when the
+/// named address cannot be bound.
+pub async fn serve_remote() -> Result<Option<SocketAddr>, ConfigError> {
+    let Some(addr) = transport::resolve_remote_addr()? else {
+        return Ok(None);
+    };
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|source| ConfigError::RemoteBind { addr, source })?;
+    let bound = listener
+        .local_addr()
+        .map_err(|source| ConfigError::RemoteBind { addr, source })?;
+    tokio::spawn(async move {
+        if let Err(err) = transport::serve_tcp_listener(listener, router()).await {
+            eprintln!("remote listener error: {err}");
+        }
+    });
+    Ok(Some(bound))
 }
 
 /// The receive time as an RFC 3339 UTC stamp, without a date dependency.
