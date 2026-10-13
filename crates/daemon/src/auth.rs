@@ -19,7 +19,7 @@
 
 use std::fmt;
 
-use api_contracts::auth::{self, CredentialRefusal};
+use api_contracts::auth::{self, CredentialRefusal, PairRefusal};
 use api_contracts::connect::metis::v1::DAEMON_SERVICE_PAIR_SPEC;
 use api_contracts::identity::{self, ClientIdentity};
 use connectrpc::interceptor::{
@@ -29,7 +29,7 @@ use connectrpc::{ConnectError, ErrorCode, Interceptor, PayloadStream, RequestCon
 use http::{HeaderMap, HeaderValue};
 use subtle::ConstantTimeEq as _;
 
-use crate::secret::Secret;
+use crate::secret::{PRESHARED_KEY_ENV, Secret};
 use crate::state::{StateError, Store, Verify};
 use crate::token::{Token, mint};
 
@@ -41,6 +41,11 @@ pub use api_contracts::auth::AUTH_ERROR_HEADER;
 
 /// The request header the credential travels in, as `Bearer <token>`.
 pub use api_contracts::auth::AUTHORIZATION_HEADER;
+
+/// The response header a pairing refusal carries. The spelling lives in
+/// `api_contracts::auth` for the same reason [`AUTH_ERROR_HEADER`] does: the
+/// client reads the header the daemon writes.
+pub use api_contracts::auth::PAIR_ERROR_HEADER;
 
 /// How a call must be authenticated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +132,29 @@ pub fn refusal_headers(error: &AuthError) -> HeaderMap {
         HeaderValue::from_static(refusal.as_str()),
     );
     headers
+}
+
+/// The refusal a client reads as its own typed pairing error.
+///
+/// The meaning crosses the wire as [`PAIR_ERROR_HEADER`] rather than as message
+/// text, exactly as [`refusal_headers`] does for the credential. `None` means
+/// the refusal has no wire value: a store fault is an internal failure, and a
+/// client keeps the transport error rather than being told to act on a pairing
+/// state that did not change.
+#[must_use]
+pub fn pair_refusal_headers(error: &PairError) -> Option<HeaderMap> {
+    let refusal = match error {
+        PairError::PairingDisabled => PairRefusal::Disabled,
+        PairError::WrongPresharedKey => PairRefusal::WrongKey,
+        PairError::AlreadyPaired => PairRefusal::AlreadyPaired,
+        PairError::Store(_) => return None,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        PAIR_ERROR_HEADER,
+        HeaderValue::from_static(refusal.as_str()),
+    );
+    Some(headers)
 }
 
 /// What an authorized call is granted.
@@ -288,6 +316,10 @@ impl Interceptor for AuthInterceptor {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum PairError {
+    /// The daemon has no preshared key configured, so pairing is closed. It is
+    /// not a misconfiguration: pairing is optional, and a daemon without a key
+    /// still serves every paired surface.
+    PairingDisabled,
     /// The preshared key in the request body is not the configured one.
     WrongPresharedKey,
     /// The surface already has a token. Its first token stays the surface's
@@ -300,6 +332,10 @@ pub enum PairError {
 impl fmt::Display for PairError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::PairingDisabled => write!(
+                f,
+                "pairing is closed: {PRESHARED_KEY_ENV} names no key to pair with"
+            ),
             Self::WrongPresharedKey => write!(f, "the preshared key does not match"),
             Self::AlreadyPaired => write!(
                 f,
@@ -314,7 +350,7 @@ impl std::error::Error for PairError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(source) => Some(source),
-            Self::WrongPresharedKey | Self::AlreadyPaired => None,
+            Self::PairingDisabled | Self::WrongPresharedKey | Self::AlreadyPaired => None,
         }
     }
 }

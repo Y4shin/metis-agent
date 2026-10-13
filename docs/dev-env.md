@@ -58,10 +58,24 @@ reference:
 - `file:<path>` reads a file. The file must be readable by its owner alone: a
   mode that grants anything to group or others is refused rather than read.
 
-An unset or empty `METIS_PRESHARED_KEY` closes pairing: there is no key to pair
-with, and the refusal names the variable. Pairing is reachable on both
-transports, and the key travels in the pairing request body, so it never appears
-in a URL or a log line.
+Pairing is optional. An unset or empty `METIS_PRESHARED_KEY` closes pairing: the
+daemon starts, every surface that already holds a token keeps being served, and
+the pairing call itself is refused as disabled. A reference that is set but
+cannot be resolved (a file that is not there, an environment variable that is
+unset, a keychain that refuses) is a typed error instead, so a typo is loud
+rather than a daemon that quietly stops pairing. Closing pairing revokes
+nothing: a token minted earlier keeps serving until its row is deleted.
+
+Pairing is reachable on both transports. The local socket and the remote
+listener mount the same service and the same key, and the key travels in the
+pairing request body, so it never appears in a URL or a log line. A pairing
+refusal travels as the `metis-pair-error` response header, with the value
+`disabled`, `wrong-key`, or `already-paired`: a client reports a typed error
+(`ClientError::Pairing`) instead of parsing message text. To pair a device
+that cannot reach the local socket, the remote listener mounts the same service
+with `AuthPolicy::TokenRequired`, and a client reaches it through
+`Client::with_remote_addr(addr)` with the surface named: the token the daemon
+answers with is kept for that surface and attached to the calls that follow.
 
 The local socket needs no credential, because the operating system's access
 control on the socket's directory and file is what authenticates a local caller.

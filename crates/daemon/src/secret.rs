@@ -118,20 +118,25 @@ impl fmt::Display for SecretRef {
 
 /// The daemon's configured preshared key, resolved.
 ///
-/// [`PRESHARED_KEY_ENV`] carries the reference; an absent or empty variable
-/// means pairing is not configured, which is a refusal rather than an empty
-/// key.
+/// [`PRESHARED_KEY_ENV`] carries the reference; an absent or empty variable means
+/// pairing is not configured, which is `Ok(None)`: pairing is optional, and its
+/// absence closes pairing rather than refusing to start the daemon. A reference
+/// that is configured but cannot be resolved stays a typed error, so a typo is
+/// loud instead of quietly closing pairing.
 ///
 /// # Errors
 ///
-/// Returns the same refusals [`SecretRef::resolve`] returns, with
-/// [`SecretError::Unresolved`] for an unset variable.
-pub fn resolve_preshared_key() -> Result<Secret, SecretError> {
-    let reference = env_value(PRESHARED_KEY_ENV)
-        .ok_or(SecretError::Unresolved)?
+/// Returns the refusals [`SecretRef::resolve`] returns when the variable names a
+/// source that cannot be read. An absent or empty variable is `Ok(None)`, not an
+/// error.
+pub fn resolve_preshared_key() -> Result<Option<Secret>, SecretError> {
+    let Some(reference) = env_value(PRESHARED_KEY_ENV) else {
+        return Ok(None);
+    };
+    let reference = reference
         .into_string()
         .map_err(|_| SecretError::Unreadable(UnreadableSource::Env))?;
-    SecretRef::parse(&reference).resolve()
+    SecretRef::parse(&reference).resolve().map(Some)
 }
 
 /// Which source could not be read.
