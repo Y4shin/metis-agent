@@ -138,8 +138,9 @@ impl DaemonService for Service {
         })
     }
 
-    /// Stream the daemon's events: the snapshot for the selected channels first,
-    /// then the events that follow, with heartbeats as ordinary messages.
+    /// Stream the daemon's events: the snapshot for the selected channels first
+    /// (one empty snapshot message when they hold nothing), then the events that
+    /// follow, with heartbeats as ordinary messages.
     ///
     /// The declaration is checked here because the recording is per handler: a
     /// streaming handler that skipped the call would leave a stream unrecorded
@@ -150,11 +151,9 @@ impl DaemonService for Service {
         request: ServiceRequest<'_, StreamEventsRequest>,
     ) -> ServiceResult<ServiceStream<Event>> {
         identity::from_headers(ctx.headers()).map_err(refuse_identity)?;
-        // The selection is copied out of the request before the stream is built:
-        // the request borrows the connection's buffer, and the stream outlives
-        // that borrow.
-        // The channels are borrowed views of the request body, so they are
-        // copied onto the iterator's own stack slot rather than converted.
+        // The channels are borrowed views of the request body, which the stream
+        // outlives, so they are collected into owned borrows on this frame
+        // before the stream is built.
         let channels = request.channels.iter().copied().collect::<Vec<_>>();
         Ok(Response::stream(self.ring.stream(
             &channels,
@@ -182,9 +181,10 @@ pub fn service(
 
 /// Refuse a declaration this daemon cannot act on.
 ///
-/// Pairing is exempt from the interceptor, so its handler makes the check
-/// itself, with the same typed refusal and the same header the handlers behind
-/// the interceptor produce.
+/// Pairing is exempt from the interceptor, and the stream's handler makes the
+/// check itself because the recording is per handler, so both handlers produce
+/// the same typed refusal and the same header the handlers behind the
+/// interceptor produce.
 fn refuse_identity(error: IdentityError) -> ConnectError {
     let headers = identity::refusal_headers(&error);
     ConnectError::new(ErrorCode::InvalidArgument, error.to_string()).with_headers(headers)
