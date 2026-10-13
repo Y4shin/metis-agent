@@ -26,8 +26,10 @@ use std::time::Duration;
 
 use api_contracts::cancel::CancelOutcome;
 use api_contracts::connect::metis::v1::DaemonServiceClient;
-use api_contracts::events::{Event, Ring};
-use api_contracts::proto::metis::v1::{CancelRequest, EchoRequest, EventKind, StreamEventsRequest};
+use api_contracts::events::{Event, Ring, STREAM_ERROR_HEADER};
+use api_contracts::proto::metis::v1::{
+    CancelRequest, EchoRequest, Event as EventMessage, EventKind, StreamEventsRequest,
+};
 use api_contracts::request::{REQUEST_ID_HEADER, RequestId};
 use api_contracts::transport::{serve_uds_service, uds_transport};
 use client::{Client, ClientError, EventStream, Surface};
@@ -245,6 +247,26 @@ async fn wait_for(what: &str, condition: impl Fn() -> bool) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("waited for {what}")
+}
+
+/// Publish into `ring` until it holds far less than it has been given, so a
+/// subscriber that read nothing has necessarily fallen past the bound between
+/// the ring and a reader.
+///
+/// The loop is stated in the ring's own observable bounds rather than in the
+/// private capacity: it stops once the window holds at most half of what has
+/// been published, which no buffer between the ring and a reader can retain. It
+/// is bounded, so a capacity far beyond the bound fails loudly instead of
+/// hanging.
+fn stall_past_the_bound(ring: &Ring) {
+    ring.publish("daemon", EventKind::Event, "{}");
+    while ring.since(0, &["daemon"]).len() * 2 > ring.latest_id() as usize {
+        ring.publish("daemon", EventKind::Event, "{}");
+        assert!(
+            ring.latest_id() < 10_000,
+            "the ring's window must fill so a stalled reader falls behind"
+        );
+    }
 }
 
 /// The next message on `stream`, or a panic naming what was expected when the
@@ -593,5 +615,73 @@ async fn a_disconnected_client_cancels_nothing() {
             .await
             .expect("the cancel reaches the daemon"),
         CancelOutcome::AlreadyFinished
+    );
+}
+
+/// A reader that stops reading is dropped rather than carried across a gap: the
+/// stream ends with `ResourceExhausted` carrying
+/// `metis-stream-error: slow-consumer`, the message names how much was lost, and
+/// no event follows it. A gap is never silent.
+#[tokio::test]
+async fn a_stalled_reader_is_dropped_and_the_loss_is_named() {
+    let fixture = Fixture::new("stalled").await;
+    let socket = fixture.socket("stalled");
+    let service = fixture.service();
+    let ring: Ring = service.ring();
+    let _served = serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
+
+    let daemon = raw_client(&socket);
+    let mut stream = daemon
+        .stream_events(StreamEventsRequest {
+            channels: vec!["daemon".to_owned()],
+            ..Default::default()
+        })
+        .await
+        .expect("the stream is established");
+
+    // The stream opens with the empty snapshot, and the reader then stops
+    // reading: nothing is polled from the socket while the ring fills.
+    let opening = stream
+        .message::<EventMessage>()
+        .await
+        .expect("the stream carries its opening message")
+        .expect("the stream has not ended");
+    assert_eq!(
+        opening.to_owned_message().kind.as_known(),
+        Some(EventKind::Snapshot)
+    );
+
+    stall_past_the_bound(&ring);
+
+    let dropped = match stream.message::<EventMessage>().await {
+        Ok(Some(_)) => panic!("a stalled reader is not carried across a gap"),
+        Ok(None) => panic!("the stream ended cleanly instead of being dropped"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        dropped.code,
+        connectrpc::ErrorCode::ResourceExhausted,
+        "the caller ran out of the room the daemon has for it: {dropped}"
+    );
+    assert_eq!(
+        dropped.trailers().get(STREAM_ERROR_HEADER),
+        Some(&HeaderValue::from_static("slow-consumer")),
+        "the meaning crosses the wire in the trailing metadata"
+    );
+    let message = dropped.message.clone().unwrap_or_default();
+    let skipped = message
+        .split_whitespace()
+        .find_map(|word| word.parse::<u64>().ok())
+        .expect("the message names how many events were lost");
+    assert!(
+        skipped > 0 && skipped <= ring.latest_id(),
+        "the count names a real loss: {skipped} of {message}"
+    );
+
+    // Nothing follows the refusal: the stream does not carry the events it
+    // could not deliver, and it does not read as a clean end either.
+    assert!(
+        stream.message::<EventMessage>().await.is_err(),
+        "the drop is terminal"
     );
 }
