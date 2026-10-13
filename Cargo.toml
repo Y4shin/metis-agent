@@ -48,6 +48,13 @@ libloading = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The authoring surface derives inline capability schemas with `schemars`, and
+# `plugin-runtime` validates payloads against them with `jsonschema`. The
+# `jsonschema` defaults pull in `reqwest` and `rustls`, which a boundary that
+# validates local bytes does not need.
+schemars = "1"
+jsonschema = { version = "0.58", default-features = false }
+
 # The pre-1.0 protocol pair moves together and is pinned exactly; the committed
 # generated code is produced against these versions. Both the generated tree and
 # the handwritten transport name it, so the pin lives here once.

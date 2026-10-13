@@ -13,10 +13,14 @@
 //! must be zero. The ABI length field is unchanged: the header is the first
 //! byte of the buffer, not a field of a struct.
 //!
-//! This module is deliberately outside the C ABI surface (`crate::abi`), so the
-//! generated header stays primitive and contains no payload rules. Host and
-//! plugin share this one implementation of the rules, which is what keeps the
-//! two sides from drifting.
+//! The constants below are part of the generated header, because an envelope a
+//! non-Rust implementer has to reproduce belongs next to the tables and not in
+//! a plugin author's head. The rules themselves (the header accessors, the
+//! validator, encode and strip) are Rust-only: `cbindgen` emits constants, and
+//! a function without `#[no_mangle]` is not rendered.
+//!
+//! Host and plugin share this one implementation of the rules, which is what
+//! keeps the two sides from drifting.
 
 use crate::abi::MetisStatus;
 

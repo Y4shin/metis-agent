@@ -12,13 +12,15 @@ workspace = true
 cc.workspace = true
 
 # The authoring surface is off by default, so `plugin-runtime` depends on the
-# primitives and the payload envelope alone (D3). Turning it on adds the serde
-# pair the trait's request and response types are serialised with; with the
-# feature off this crate's dependency list is empty, which is what keeps an
-# async runtime out of the boundary.
+# primitives and the payload envelope alone. Turning it on adds the serde pair
+# the routed `call`'s bodies are serialised with, plus `schemars` for the inline
+# capability schemas an author's types imply; with the feature off this crate's
+# dependency list is empty, which is what keeps an async runtime out of the
+# boundary.
 [features]
-authoring = ["dep:serde", "dep:serde_json"]
+authoring = ["dep:serde", "dep:serde_json", "dep:schemars"]
 
 [dependencies]
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }

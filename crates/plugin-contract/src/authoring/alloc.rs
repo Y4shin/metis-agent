@@ -19,8 +19,8 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::abi::{METIS_BUFFER_OWNER_PLUGIN, MetisBuffer, MetisStatus};
 
-/// The plugin-side ledger: what the adapter allocated, released, still holds,
-/// and how many completions it suppressed after a successful cancel (D6, D12).
+/// The plugin-side ledger: what the adapter allocated, released, and still
+/// holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Accounting {
     /// Buffers the adapter allocated.
@@ -31,16 +31,14 @@ pub struct Accounting {
     pub live: usize,
     /// Ownership violations, which are always zero in a correct run.
     pub violations: usize,
-    /// Completions suppressed because the plugin gave up on a cancelled call.
-    pub suppressed: usize,
 }
 
 impl Accounting {
     /// The one-line ledger a plugin can log, which the harness parses.
     pub fn line(self) -> String {
         format!(
-            "allocs={} frees={} live={} violations={} suppressed={}",
-            self.allocs, self.frees, self.live, self.violations, self.suppressed
+            "allocs={} frees={} live={} violations={}",
+            self.allocs, self.frees, self.live, self.violations
         )
     }
 }
@@ -54,7 +52,6 @@ fn live() -> &'static Mutex<HashMap<usize, usize>> {
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static FREES: AtomicUsize = AtomicUsize::new(0);
 static VIOLATIONS: AtomicUsize = AtomicUsize::new(0);
-static SUPPRESSED: AtomicUsize = AtomicUsize::new(0);
 
 /// The current ledger.
 pub fn accounting() -> Accounting {
@@ -63,7 +60,6 @@ pub fn accounting() -> Accounting {
         frees: FREES.load(Ordering::SeqCst),
         live: live().lock().unwrap().len(),
         violations: VIOLATIONS.load(Ordering::SeqCst),
-        suppressed: SUPPRESSED.load(Ordering::SeqCst),
     }
 }
 
@@ -71,11 +67,6 @@ pub fn accounting() -> Accounting {
 pub(crate) fn violation(what: &str) {
     VIOLATIONS.fetch_add(1, Ordering::SeqCst);
     eprintln!("plugin-contract: buffer violation: {what}");
-}
-
-/// Counts a completion the adapter suppressed after a successful cancel (D12).
-pub(crate) fn note_suppressed() {
-    SUPPRESSED.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Copies bytes into a buffer this plugin owns (D6).

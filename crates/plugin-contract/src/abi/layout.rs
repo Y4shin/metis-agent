@@ -1,4 +1,4 @@
-//! Compile-time layout assertions for every type that crosses the ABI (D13).
+//! Compile-time layout assertions for every type that crosses the ABI.
 //!
 //! These run on every build of this crate, not only under `cargo test`, and
 //! they are the Rust half of the agreement: `c/layout_static_asserts.c`
@@ -8,7 +8,7 @@
 //!
 //! Every number is written through a size-of expression rather than as a
 //! 64-bit literal, so the assertions hold per target instead of only on the
-//! machine that wrote them (D13 amendment).
+//! machine that wrote them.
 
 use core::mem::{align_of, offset_of, size_of};
 
@@ -24,8 +24,8 @@ const U32: usize = size_of::<u32>();
 
 // --- MetisStatus -----------------------------------------------------------
 
-// A `repr(C)` fieldless enum is a C `int`, and the members are frozen (D7), so
-// the numeric values are part of the ABI, not an implementation detail.
+// A `repr(C)` fieldless enum is a C `int`, and the members are frozen, so the
+// numeric values are part of the ABI, not an implementation detail.
 const _: () = assert!(size_of::<MetisStatus>() == U32);
 const _: () = assert!(align_of::<MetisStatus>() == align_of::<u32>());
 const _: () = assert!(MetisStatus::Ok as i32 == 0);
@@ -52,19 +52,56 @@ const _: () = assert!(offset_of!(MetisBuffer, reserved) == 3 * PTR + U32);
 // --- MetisTablePrefix ------------------------------------------------------
 
 // `size`, `abi_major`, `abi_minor`: the shortest thing any reader touches, and
-// the reason `size` is the first field (D8).
+// the reason `size` is the first field.
 const _: () = assert!(size_of::<MetisTablePrefix>() == SIZE_T + 2 * U32);
 const _: () = assert!(align_of::<MetisTablePrefix>() == align_of::<usize>());
 const _: () = assert!(offset_of!(MetisTablePrefix, size) == 0);
 const _: () = assert!(offset_of!(MetisTablePrefix, abi_major) == SIZE_T);
 const _: () = assert!(offset_of!(MetisTablePrefix, abi_minor) == SIZE_T + U32);
 
+// --- MetisFutureVtable and MetisFutureHandle ------------------------------
+
+// Two function pointer slots and no `size` field, which is the revision the
+// contract made: the vtable carries only the entries the host calls.
+const _: () = assert!(size_of::<MetisFutureVtable>() == 2 * PTR);
+const _: () = assert!(align_of::<MetisFutureVtable>() == align_of::<*const core::ffi::c_void>());
+const _: () = assert!(offset_of!(MetisFutureVtable, poll) == 0);
+const _: () = assert!(offset_of!(MetisFutureVtable, drop) == PTR);
+const _: () = assert!(offset_of!(MetisFutureVtable, drop) + PTR == size_of::<MetisFutureVtable>());
+
+// A context pointer and a vtable pointer, in that order.
+const _: () = assert!(size_of::<MetisFutureHandle>() == 2 * PTR);
+const _: () = assert!(align_of::<MetisFutureHandle>() == align_of::<*mut core::ffi::c_void>());
+const _: () = assert!(offset_of!(MetisFutureHandle, ctx) == 0);
+const _: () = assert!(offset_of!(MetisFutureHandle, vtable) == PTR);
+const _: () =
+    assert!(offset_of!(MetisFutureHandle, vtable) + PTR == size_of::<MetisFutureHandle>());
+
+// --- MetisWakerVtable and MetisWaker --------------------------------------
+
+// Four function pointer slots and no `size` field.
+const _: () = assert!(size_of::<MetisWakerVtable>() == 4 * PTR);
+const _: () = assert!(align_of::<MetisWakerVtable>() == align_of::<*const core::ffi::c_void>());
+const _: () = assert!(offset_of!(MetisWakerVtable, clone) == 0);
+const _: () = assert!(offset_of!(MetisWakerVtable, wake) == PTR);
+const _: () = assert!(offset_of!(MetisWakerVtable, wake_by_ref) == 2 * PTR);
+const _: () = assert!(offset_of!(MetisWakerVtable, drop) == 3 * PTR);
+const _: () = assert!(offset_of!(MetisWakerVtable, drop) + PTR == size_of::<MetisWakerVtable>());
+
+// The data pointer and the vtable pointer the four entries above are reached
+// through.
+const _: () = assert!(size_of::<MetisWaker>() == 2 * PTR);
+const _: () = assert!(align_of::<MetisWaker>() == align_of::<*mut core::ffi::c_void>());
+const _: () = assert!(offset_of!(MetisWaker, data) == 0);
+const _: () = assert!(offset_of!(MetisWaker, vtable) == PTR);
+const _: () = assert!(offset_of!(MetisWaker, vtable) + PTR == size_of::<MetisWaker>());
+
 // --- MetisPluginTableV1 ----------------------------------------------------
 
-// The prefix, then seven function pointer slots. Append-only works because the
+// The prefix, then eight function pointer slots. Append-only works because the
 // entry a host knows lands exactly on a pointer boundary, first at
 // `size_of::<MetisTablePrefix>()` and then one pointer at a time.
-const _: () = assert!(size_of::<MetisPluginTableV1>() == size_of::<MetisTablePrefix>() + 7 * PTR);
+const _: () = assert!(size_of::<MetisPluginTableV1>() == size_of::<MetisTablePrefix>() + 8 * PTR);
 const _: () = assert!(align_of::<MetisPluginTableV1>() == align_of::<*const core::ffi::c_void>());
 const _: () = assert!(offset_of!(MetisPluginTableV1, size) == 0);
 const _: () = assert!(offset_of!(MetisPluginTableV1, abi_major) == SIZE_T);
@@ -77,8 +114,9 @@ const _: () = assert!(
 const _: () = assert!(
     offset_of!(MetisPluginTableV1, list_capabilities) == size_of::<MetisTablePrefix>() + 2 * PTR
 );
-const _: () =
-    assert!(offset_of!(MetisPluginTableV1, invoke) == size_of::<MetisTablePrefix>() + 3 * PTR);
+const _: () = assert!(
+    offset_of!(MetisPluginTableV1, invoke_future) == size_of::<MetisTablePrefix>() + 3 * PTR
+);
 const _: () =
     assert!(offset_of!(MetisPluginTableV1, cancel) == size_of::<MetisTablePrefix>() + 4 * PTR);
 const _: () = assert!(
@@ -86,10 +124,35 @@ const _: () = assert!(
 );
 const _: () =
     assert!(offset_of!(MetisPluginTableV1, shutdown) == size_of::<MetisTablePrefix>() + 6 * PTR);
+const _: () = assert!(
+    offset_of!(MetisPluginTableV1, service_complete) == size_of::<MetisTablePrefix>() + 7 * PTR
+);
 // An appended entry must land exactly after the current tail, otherwise
 // "append-only" is not a layout guarantee.
+const _: () = assert!(
+    offset_of!(MetisPluginTableV1, service_complete) + PTR == size_of::<MetisPluginTableV1>()
+);
+
+// The slot constants and the presence thresholds are the same numbers, written
+// for a reader that has only a `size` to compare against.
+const _: () = assert!(
+    METIS_PLUGIN_TABLE_V1_INVOKE_FUTURE_SLOT * PTR + size_of::<MetisTablePrefix>()
+        == offset_of!(MetisPluginTableV1, invoke_future)
+);
+const _: () = assert!(
+    METIS_PLUGIN_TABLE_V1_SERVICE_COMPLETE_SLOT * PTR + size_of::<MetisTablePrefix>()
+        == offset_of!(MetisPluginTableV1, service_complete)
+);
 const _: () =
-    assert!(offset_of!(MetisPluginTableV1, shutdown) + PTR == size_of::<MetisPluginTableV1>());
+    assert!(METIS_PLUGIN_TABLE_V1_SERVICE_COMPLETE_SLOT + 1 == METIS_PLUGIN_TABLE_V1_SLOTS);
+const _: () = assert!(
+    METIS_PLUGIN_TABLE_V1_INVOKE_FUTURE_THRESHOLD
+        == offset_of!(MetisPluginTableV1, invoke_future) + PTR
+);
+const _: () = assert!(
+    METIS_PLUGIN_TABLE_V1_SERVICE_COMPLETE_THRESHOLD
+        == offset_of!(MetisPluginTableV1, service_complete) + PTR
+);
 
 // --- MetisHostApiV1 --------------------------------------------------------
 
@@ -98,8 +161,19 @@ const _: () = assert!(size_of::<MetisHostApiV1>() == SIZE_T + 5 * PTR);
 const _: () = assert!(align_of::<MetisHostApiV1>() == align_of::<*const core::ffi::c_void>());
 const _: () = assert!(offset_of!(MetisHostApiV1, size) == 0);
 const _: () = assert!(offset_of!(MetisHostApiV1, user_data) == SIZE_T);
-const _: () = assert!(offset_of!(MetisHostApiV1, complete) == SIZE_T + PTR);
-const _: () = assert!(offset_of!(MetisHostApiV1, progress) == SIZE_T + 2 * PTR);
-const _: () = assert!(offset_of!(MetisHostApiV1, emit_event) == SIZE_T + 3 * PTR);
-const _: () = assert!(offset_of!(MetisHostApiV1, log) == SIZE_T + 4 * PTR);
-const _: () = assert!(offset_of!(MetisHostApiV1, log) + PTR == size_of::<MetisHostApiV1>());
+const _: () = assert!(offset_of!(MetisHostApiV1, progress) == SIZE_T + PTR);
+const _: () = assert!(offset_of!(MetisHostApiV1, emit_event) == SIZE_T + 2 * PTR);
+const _: () = assert!(offset_of!(MetisHostApiV1, log) == SIZE_T + 3 * PTR);
+const _: () = assert!(offset_of!(MetisHostApiV1, service_request) == SIZE_T + 4 * PTR);
+const _: () =
+    assert!(offset_of!(MetisHostApiV1, service_request) + PTR == size_of::<MetisHostApiV1>());
+
+const _: () = assert!(
+    METIS_HOST_API_V1_SERVICE_REQUEST_SLOT * PTR + SIZE_T
+        == offset_of!(MetisHostApiV1, service_request)
+);
+const _: () = assert!(METIS_HOST_API_V1_SERVICE_REQUEST_SLOT + 1 == METIS_HOST_API_V1_SLOTS);
+const _: () = assert!(
+    METIS_HOST_API_V1_SERVICE_REQUEST_THRESHOLD
+        == offset_of!(MetisHostApiV1, service_request) + PTR
+);
