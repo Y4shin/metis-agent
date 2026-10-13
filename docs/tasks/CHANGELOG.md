@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Plugin contract v1: futures-only ABI (plugin-contract-v1)
+
+Futures are now the only way the daemon calls a plugin: `invoke` and the `complete` callback are deleted, `invoke_future`, `service_complete` and `service_request` are the table, and the authoring surface is one capability-name-routed `call` instead of four role-named arms, which removes the four-capability ceiling. The plugin owns no executor and no thread, `async-ffi` is dropped because a destructor panic inside a plugin future aborts the process even for a plugin that returned `Ok`, and unload is quarantine plus one reclaim on a late poll return. `plugin-runtime` gained the loader, the registry, both-direction schema validation and the unload ledger, and a hand-written 482-line C plugin compiles under gcc and clang and is driven end to end by the harness.
+
 ## 2026-10-13, Plugin authoring trait and adapters (plugin-authoring-trait)
 
 Plugin authors now write ordinary async Rust: `plugin-contract` gained the feature-gated `authoring` module with the `Plugin` trait, an awaitable cancellation token on the per-request context, the capability declaration, a `const fn` function table, a host adapter, and a minimal executor, while the runtime still depends on the primitives and payload envelope alone. The adapter always completes through the host callback (the ABI keeps its inline path for direct implementers), the trait module names no ABI type, lifecycle hooks and plugin-originated events have routes, and the fixture was rewritten through the trait with the same capability names and single exported symbol.

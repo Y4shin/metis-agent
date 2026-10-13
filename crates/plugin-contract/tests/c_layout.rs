@@ -44,19 +44,42 @@ unsafe extern "C" {
     static metis_c_offset_MetisPluginTableV1_create_instance: usize;
     static metis_c_offset_MetisPluginTableV1_destroy_instance: usize;
     static metis_c_offset_MetisPluginTableV1_list_capabilities: usize;
-    static metis_c_offset_MetisPluginTableV1_invoke: usize;
+    static metis_c_offset_MetisPluginTableV1_invoke_future: usize;
     static metis_c_offset_MetisPluginTableV1_cancel: usize;
     static metis_c_offset_MetisPluginTableV1_release_buffer: usize;
     static metis_c_offset_MetisPluginTableV1_shutdown: usize;
+    static metis_c_offset_MetisPluginTableV1_service_complete: usize;
+
+    static metis_c_size_MetisFutureVtable: usize;
+    static metis_c_align_MetisFutureVtable: usize;
+    static metis_c_offset_MetisFutureVtable_poll: usize;
+    static metis_c_offset_MetisFutureVtable_drop: usize;
+
+    static metis_c_size_MetisFutureHandle: usize;
+    static metis_c_align_MetisFutureHandle: usize;
+    static metis_c_offset_MetisFutureHandle_ctx: usize;
+    static metis_c_offset_MetisFutureHandle_vtable: usize;
+
+    static metis_c_size_MetisWakerVtable: usize;
+    static metis_c_align_MetisWakerVtable: usize;
+    static metis_c_offset_MetisWakerVtable_clone: usize;
+    static metis_c_offset_MetisWakerVtable_wake: usize;
+    static metis_c_offset_MetisWakerVtable_wake_by_ref: usize;
+    static metis_c_offset_MetisWakerVtable_drop: usize;
+
+    static metis_c_size_MetisWaker: usize;
+    static metis_c_align_MetisWaker: usize;
+    static metis_c_offset_MetisWaker_data: usize;
+    static metis_c_offset_MetisWaker_vtable: usize;
 
     static metis_c_size_MetisHostApiV1: usize;
     static metis_c_align_MetisHostApiV1: usize;
     static metis_c_offset_MetisHostApiV1_size: usize;
     static metis_c_offset_MetisHostApiV1_user_data: usize;
-    static metis_c_offset_MetisHostApiV1_complete: usize;
     static metis_c_offset_MetisHostApiV1_progress: usize;
     static metis_c_offset_MetisHostApiV1_emit_event: usize;
     static metis_c_offset_MetisHostApiV1_log: usize;
+    static metis_c_offset_MetisHostApiV1_service_request: usize;
 }
 
 /// Asserts that the C compiler measured `$c_symbol` as `$rust_expr`.
@@ -96,6 +119,30 @@ fn c_and_rust_agree_on_sizes_and_alignments() {
 
     c_agrees_with_rust!(metis_c_size_MetisHostApiV1, size_of::<MetisHostApiV1>());
     c_agrees_with_rust!(metis_c_align_MetisHostApiV1, align_of::<MetisHostApiV1>());
+
+    c_agrees_with_rust!(
+        metis_c_size_MetisFutureVtable,
+        size_of::<MetisFutureVtable>()
+    );
+    c_agrees_with_rust!(
+        metis_c_align_MetisFutureVtable,
+        align_of::<MetisFutureVtable>()
+    );
+    c_agrees_with_rust!(
+        metis_c_size_MetisFutureHandle,
+        size_of::<MetisFutureHandle>()
+    );
+    c_agrees_with_rust!(
+        metis_c_align_MetisFutureHandle,
+        align_of::<MetisFutureHandle>()
+    );
+    c_agrees_with_rust!(metis_c_size_MetisWakerVtable, size_of::<MetisWakerVtable>());
+    c_agrees_with_rust!(
+        metis_c_align_MetisWakerVtable,
+        align_of::<MetisWakerVtable>()
+    );
+    c_agrees_with_rust!(metis_c_size_MetisWaker, size_of::<MetisWaker>());
+    c_agrees_with_rust!(metis_c_align_MetisWaker, align_of::<MetisWaker>());
 }
 
 #[test]
@@ -150,8 +197,8 @@ fn c_and_rust_agree_on_every_field_offset() {
         offset_of!(MetisPluginTableV1, list_capabilities)
     );
     c_agrees_with_rust!(
-        metis_c_offset_MetisPluginTableV1_invoke,
-        offset_of!(MetisPluginTableV1, invoke)
+        metis_c_offset_MetisPluginTableV1_invoke_future,
+        offset_of!(MetisPluginTableV1, invoke_future)
     );
     c_agrees_with_rust!(
         metis_c_offset_MetisPluginTableV1_cancel,
@@ -165,6 +212,48 @@ fn c_and_rust_agree_on_every_field_offset() {
         metis_c_offset_MetisPluginTableV1_shutdown,
         offset_of!(MetisPluginTableV1, shutdown)
     );
+    c_agrees_with_rust!(
+        metis_c_offset_MetisPluginTableV1_service_complete,
+        offset_of!(MetisPluginTableV1, service_complete)
+    );
+
+    c_agrees_with_rust!(
+        metis_c_offset_MetisFutureVtable_poll,
+        offset_of!(MetisFutureVtable, poll)
+    );
+    c_agrees_with_rust!(
+        metis_c_offset_MetisFutureVtable_drop,
+        offset_of!(MetisFutureVtable, drop)
+    );
+    c_agrees_with_rust!(
+        metis_c_offset_MetisFutureHandle_ctx,
+        offset_of!(MetisFutureHandle, ctx)
+    );
+    c_agrees_with_rust!(
+        metis_c_offset_MetisFutureHandle_vtable,
+        offset_of!(MetisFutureHandle, vtable)
+    );
+    c_agrees_with_rust!(
+        metis_c_offset_MetisWakerVtable_clone,
+        offset_of!(MetisWakerVtable, clone)
+    );
+    c_agrees_with_rust!(
+        metis_c_offset_MetisWakerVtable_wake,
+        offset_of!(MetisWakerVtable, wake)
+    );
+    c_agrees_with_rust!(
+        metis_c_offset_MetisWakerVtable_wake_by_ref,
+        offset_of!(MetisWakerVtable, wake_by_ref)
+    );
+    c_agrees_with_rust!(
+        metis_c_offset_MetisWakerVtable_drop,
+        offset_of!(MetisWakerVtable, drop)
+    );
+    c_agrees_with_rust!(metis_c_offset_MetisWaker_data, offset_of!(MetisWaker, data));
+    c_agrees_with_rust!(
+        metis_c_offset_MetisWaker_vtable,
+        offset_of!(MetisWaker, vtable)
+    );
 
     c_agrees_with_rust!(
         metis_c_offset_MetisHostApiV1_size,
@@ -173,10 +262,6 @@ fn c_and_rust_agree_on_every_field_offset() {
     c_agrees_with_rust!(
         metis_c_offset_MetisHostApiV1_user_data,
         offset_of!(MetisHostApiV1, user_data)
-    );
-    c_agrees_with_rust!(
-        metis_c_offset_MetisHostApiV1_complete,
-        offset_of!(MetisHostApiV1, complete)
     );
     c_agrees_with_rust!(
         metis_c_offset_MetisHostApiV1_progress,
@@ -189,5 +274,9 @@ fn c_and_rust_agree_on_every_field_offset() {
     c_agrees_with_rust!(
         metis_c_offset_MetisHostApiV1_log,
         offset_of!(MetisHostApiV1, log)
+    );
+    c_agrees_with_rust!(
+        metis_c_offset_MetisHostApiV1_service_request,
+        offset_of!(MetisHostApiV1, service_request)
     );
 }

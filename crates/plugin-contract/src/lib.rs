@@ -1,20 +1,47 @@
 //! The plugin boundary: the `repr(C)` primitives, the payload envelope, and the
 //! generated C header.
 //!
-//! `repr(C)` Rust in this crate is the source of truth for the ABI (D2). The
+//! `repr(C)` Rust in this crate is the source of truth for the ABI. The
 //! committed header at `include/metis_plugin_abi.h` is generated from it by
 //! `scripts/regenerate-abi-header.sh`, and CI fails when regeneration produces
 //! a diff. `crate::abi` is the whole C ABI surface and the only module
 //! `cbindgen` sees; `crate::payload` holds the one-byte envelope that rides
-//! inside `MetisBuffer`, deliberately outside the generated header.
+//! inside `MetisBuffer`, whose constants are part of the header.
 //!
 //! This crate carries no async runtime and no serde in its C ABI surface: a
 //! plugin boundary is a byte boundary, and everything above it (serialisation
-//! shapes, the authoring trait) lives elsewhere.
+//! shapes, the authoring trait) lives behind the `authoring` feature.
 //!
-//! The Rust authoring surface (the trait, both adapters, and the minimal
-//! executor) is behind the `authoring` feature, off by default, so the plugin
-//! runtime depends on the primitives and the payload envelope alone.
+//! The revision this crate carries is the approved plugin contract: a future is
+//! the only call path (`invoke` and the host `complete` callback are gone), the
+//! entry order changed under the unchanged symbol and major so `abi_minor` is 1
+//! and a reader refuses a minor it does not know, and neither vtable carries a
+//! `size` field. A wrong-size plugin vtable is that plugin's own bug and is not
+//! detectable at load; the residual is recorded rather than paid for on every
+//! poll.
+//!
+//! # Ownership
+//!
+//! Per entry, one allocator and one freer, and the rules are the contract's
+//! section 11 rather than an implementation detail:
+//!
+//! - a ready buffer is **plugin-allocated** and is freed by the host through
+//!   the plugin's `release_buffer`;
+//! - a request payload is **host-owned** and is valid for the call only, so the
+//!   plugin copies what it needs and never frees it;
+//! - a `service_request` payload is **plugin-owned** and is freed by the host
+//!   through `release_buffer`, including from inside that callback, where the
+//!   entry is reentrant;
+//! - a `service_complete` payload is **host-owned** and borrowed for the call,
+//!   so the plugin copies it and the host frees it when the call returns;
+//! - nothing else crosses: no host ever calls `free` into plugin memory, and no
+//!   plugin ever frees a buffer it did not allocate.
+//!
+//! # The authoring surface
+//!
+//! The Rust authoring surface (the routed trait and the future adapter) is
+//! behind the `authoring` feature, off by default, so the plugin runtime
+//! depends on the primitives and the payload envelope alone.
 
 pub mod abi;
 

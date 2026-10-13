@@ -226,6 +226,11 @@ streaming assumptions before anything is built on top.
   both sides of the comparison resolve different roots and the command exits 100
   with spurious deleted-file reports. The gate configuration is covered by the
   on-demand probe at `scripts/probe-contract-gates.sh`.
+- The plugin contract revision landed as `plugin-contract-v1`: futures are the
+  only call path, the authoring surface is one capability-name-routed `call`,
+  `async-ffi` is not a dependency anywhere outside `spikes/`, and unload is
+  quarantine plus a reclaim on the late poll return. `plugin-compatibility` is
+  the only remaining plugin-chain ticket.
 
 ## Fog
 

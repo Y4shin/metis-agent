@@ -1,0 +1,410 @@
+//! The registry: what a daemon routes through, and what it validates with.
+//!
+//! A registry entry is one loaded instance and the capability declaration it
+//! published. Names are instance-qualified as `<instance-name>.<tool-name>`, so
+//! the same plugin loaded twice keeps two namespaces, and the plugin itself
+//! only ever names the tool half.
+//!
+//! Two gates live here and they are different in kind. The *version* gate is
+//! per capability and reads a descriptor, so one outdated capability does not
+//! fail a whole plugin. The *presence* gate is the table's: a capability can
+//! only be routed to an instance whose declaration carries it.
+//!
+//! Validation runs in both directions and the two directions differ in what a
+//! failure means. A request that does not match the capability's published
+//! schema is the caller's mistake and comes back as `invalid_argument`. A
+//! response that does not match the plugin's own published schema is that
+//! plugin's bug: it is an internal error attributed to the plugin, and it does
+//! not quarantine it, because a wrong payload is not a stuck poll.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use plugin_contract::abi::MetisStatus;
+use serde_json::Value;
+
+use crate::Instance;
+
+/// One capability as the plugin published it.
+#[derive(Debug, Clone)]
+pub struct Capability {
+    /// The tool-level name the plugin declared.
+    pub name: String,
+    /// `tool` or `provider`.
+    pub kind: String,
+    /// The capability's own version, which the gate reads.
+    pub version: u32,
+    /// The JSON Schema of this capability's request body.
+    pub request_schema: Value,
+    /// The JSON Schema of this capability's response body.
+    pub response_schema: Value,
+}
+
+/// The shape of the JSON the plugin sends as its capability list.
+///
+/// It is deliberately this crate's own type rather than the authoring module's:
+/// the wire is the JSON, the host depends on the primitives and the envelope
+/// alone, and the two declarations are checked against each other by the tests
+/// that drive a real fixture.
+#[derive(Debug, serde::Deserialize)]
+struct CapabilityList {
+    capabilities: Vec<DeclaredCapability>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeclaredCapability {
+    name: String,
+    kind: String,
+    version: u32,
+    request_schema: Value,
+    response_schema: Value,
+}
+
+/// Parses the capability list payload body.
+///
+/// A declaration that is not JSON, or that carries no schemas, is refused here
+/// rather than at the first call: an instance whose declaration cannot be
+/// understood cannot be routed.
+pub fn parse_capabilities(body: &[u8]) -> Result<Vec<Capability>, crate::CallError> {
+    let list: CapabilityList = serde_json::from_slice(body).map_err(|err| {
+        crate::CallError::Payload(format!(
+            "the capability list is not the declared JSON: {err}"
+        ))
+    })?;
+    if list.capabilities.is_empty() {
+        return Err(crate::CallError::Payload(
+            "the plugin declares no capabilities".to_string(),
+        ));
+    }
+    Ok(list
+        .capabilities
+        .into_iter()
+        .map(|declared| Capability {
+            name: declared.name,
+            kind: declared.kind,
+            version: declared.version,
+            request_schema: declared.request_schema,
+            response_schema: declared.response_schema,
+        })
+        .collect())
+}
+
+/// Whether a real JSON body satisfies a published schema.
+pub fn validate_request(schema: &Value, body: &[u8]) -> Result<(), RouteError> {
+    validate(schema, body, Direction::Request)
+}
+
+/// Whether a plugin's response satisfies the schema the plugin published for it.
+pub fn validate_response(schema: &Value, body: &[u8]) -> Result<(), RouteError> {
+    validate(schema, body, Direction::Response)
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Request,
+    Response,
+}
+
+fn validate(schema: &Value, body: &[u8], direction: Direction) -> Result<(), RouteError> {
+    // A body that is not JSON, or one that does not match, is the same failure
+    // from the schema's point of view.
+    let instance: Value = match serde_json::from_slice(body) {
+        Ok(instance) => instance,
+        Err(err) => {
+            let detail = format!("the payload is not JSON: {err}");
+            return Err(match direction {
+                Direction::Request => RouteError::InvalidArgument(detail),
+                Direction::Response => RouteError::InvalidResponse(detail),
+            });
+        }
+    };
+    if jsonschema::is_valid(schema, &instance) {
+        return Ok(());
+    }
+    let detail = format!("the payload does not match the published schema: {instance}");
+    Err(match direction {
+        Direction::Request => RouteError::InvalidArgument(detail),
+        Direction::Response => RouteError::InvalidResponse(detail),
+    })
+}
+
+/// One registered instance.
+pub struct Entry {
+    /// The instance name the caller registered it under.
+    pub instance_name: String,
+    /// The instance itself.
+    pub instance: Arc<Instance>,
+    /// Whether the entry is enabled. A disabled entry still resolves, so a
+    /// caller can tell "turned off" from "never loaded".
+    pub enabled: bool,
+}
+
+/// What a route lookup can fail with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteError {
+    /// Nothing is registered under that name.
+    Unknown(String),
+    /// The entry exists and is disabled.
+    Disabled(String),
+    /// The declaration does not carry a version the caller can accept.
+    Version {
+        name: String,
+        required: u32,
+        declared: u32,
+    },
+    /// The request body did not match the capability's published schema.
+    InvalidArgument(String),
+    /// The response body did not match the plugin's published schema.
+    InvalidResponse(String),
+    /// The call itself failed.
+    Call(crate::CallError),
+}
+
+impl std::fmt::Display for RouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RouteError::Unknown(name) => write!(f, "no capability named {name}"),
+            RouteError::Disabled(name) => write!(f, "the entry for {name} is disabled"),
+            RouteError::Version {
+                name,
+                required,
+                declared,
+            } => write!(
+                f,
+                "{name} declares version {declared} and version {required} was required"
+            ),
+            RouteError::InvalidArgument(detail) => write!(f, "invalid argument: {detail}"),
+            RouteError::InvalidResponse(detail) => {
+                write!(
+                    f,
+                    "the plugin published a schema its own response violates: {detail}"
+                )
+            }
+            RouteError::Call(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for RouteError {}
+
+impl From<crate::CallError> for RouteError {
+    fn from(error: crate::CallError) -> Self {
+        RouteError::Call(error)
+    }
+}
+
+impl RouteError {
+    /// The status this failure carries across the boundary.
+    pub fn status(&self) -> MetisStatus {
+        match self {
+            RouteError::Unknown(_) => MetisStatus::NotFound,
+            RouteError::Disabled(_) => MetisStatus::PermissionDenied,
+            RouteError::Version { .. } => MetisStatus::Unsupported,
+            RouteError::InvalidArgument(_) => MetisStatus::InvalidArgument,
+            RouteError::InvalidResponse(_) => MetisStatus::Internal,
+            RouteError::Call(crate::CallError::Status(status)) => *status,
+            RouteError::Call(_) => MetisStatus::Internal,
+        }
+    }
+}
+
+/// What registration can refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryError {
+    /// The instance declares no capabilities.
+    NoCapabilities(String),
+    /// A capability name is already taken by another entry.
+    DuplicateCapability {
+        /// The qualified name that collided.
+        name: String,
+        /// The instance that already owns it.
+        owner: String,
+    },
+    /// Two capabilities inside one declaration share a name.
+    DuplicateInDeclaration(String),
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegistryError::NoCapabilities(name) => {
+                write!(f, "{name} declares no capabilities")
+            }
+            RegistryError::DuplicateCapability { name, owner } => {
+                write!(f, "{name} is already registered by {owner}")
+            }
+            RegistryError::DuplicateInDeclaration(name) => {
+                write!(f, "{name} declares the same capability name twice")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
+/// The routing table.
+#[derive(Default)]
+pub struct Registry {
+    entries: BTreeMap<String, Entry>,
+    /// Qualified capability name to the instance name that owns it, which is
+    /// what makes duplicate refusal possible without scanning every entry.
+    routes: BTreeMap<String, String>,
+}
+
+impl Registry {
+    /// An empty registry.
+    pub fn new() -> Registry {
+        Registry::default()
+    }
+
+    /// Registers one instance under a name.
+    ///
+    /// A capability name is instance-qualified as `<instance>.<tool>`, and two
+    /// entries may not claim the same qualified name: a duplicate is refused
+    /// here rather than resolved by load order.
+    pub fn register(
+        &mut self,
+        instance_name: &str,
+        instance: Arc<Instance>,
+    ) -> Result<(), RegistryError> {
+        if instance.capabilities().is_empty() {
+            return Err(RegistryError::NoCapabilities(instance_name.to_string()));
+        }
+        if self.entries.contains_key(instance_name) {
+            return Err(RegistryError::DuplicateCapability {
+                name: instance_name.to_string(),
+                owner: instance_name.to_string(),
+            });
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for capability in instance.capabilities() {
+            if !seen.insert(capability.name.clone()) {
+                return Err(RegistryError::DuplicateInDeclaration(format!(
+                    "{instance_name}.{}",
+                    capability.name
+                )));
+            }
+            let qualified = format!("{instance_name}.{}", capability.name);
+            if let Some(owner) = self.routes.get(&qualified) {
+                return Err(RegistryError::DuplicateCapability {
+                    name: qualified,
+                    owner: owner.clone(),
+                });
+            }
+        }
+        for capability in instance.capabilities() {
+            self.routes.insert(
+                format!("{instance_name}.{}", capability.name),
+                instance_name.to_string(),
+            );
+        }
+        self.entries.insert(
+            instance_name.to_string(),
+            Entry {
+                instance_name: instance_name.to_string(),
+                instance,
+                enabled: true,
+            },
+        );
+        Ok(())
+    }
+
+    /// Removes an entry and its routes, returning it so the caller can unload
+    /// it after every future is gone.
+    pub fn unregister(&mut self, instance_name: &str) -> Option<Entry> {
+        let entry = self.entries.remove(instance_name)?;
+        self.routes
+            .retain(|_, owner| owner.as_str() != instance_name);
+        Some(entry)
+    }
+
+    /// Turns an entry on or off, reporting whether it was there.
+    pub fn enable(&mut self, instance_name: &str, enabled: bool) -> bool {
+        match self.entries.get_mut(instance_name) {
+            Some(entry) => {
+                entry.enabled = enabled;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Every instance name, in order.
+    pub fn instance_names(&self) -> Vec<String> {
+        self.entries.keys().cloned().collect()
+    }
+
+    /// Resolves a qualified capability name to its entry and declaration.
+    pub fn route(&self, qualified: &str) -> Result<(&Entry, &Capability), RouteError> {
+        let owner = self
+            .routes
+            .get(qualified)
+            .ok_or_else(|| RouteError::Unknown(qualified.to_string()))?;
+        let entry = self
+            .entries
+            .get(owner)
+            .ok_or_else(|| RouteError::Unknown(qualified.to_string()))?;
+        if !entry.enabled {
+            return Err(RouteError::Disabled(qualified.to_string()));
+        }
+        let tool = qualified
+            .split_once('.')
+            .map(|(_, tool)| tool)
+            .unwrap_or(qualified);
+        let capability = entry
+            .instance
+            .capabilities()
+            .iter()
+            .find(|capability| capability.name == tool)
+            .ok_or_else(|| RouteError::Unknown(qualified.to_string()))?;
+        Ok((entry, capability))
+    }
+
+    /// The per-capability version gate.
+    ///
+    /// It reads the descriptor the plugin published, not the table, so a
+    /// capability that is too old is refused on its own while the rest of the
+    /// plugin keeps working.
+    pub fn gate(&self, qualified: &str, required: u32) -> Result<(), RouteError> {
+        let (_, capability) = self.route(qualified)?;
+        if capability.version < required {
+            return Err(RouteError::Version {
+                name: qualified.to_string(),
+                required,
+                declared: capability.version,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates a request against a capability's published schema.
+    pub fn validate_request(&self, qualified: &str, body: &[u8]) -> Result<(), RouteError> {
+        let (_, capability) = self.route(qualified)?;
+        validate_request(&capability.request_schema, body)
+    }
+
+    /// Validates a plugin's response against the schema the plugin published.
+    pub fn validate_response(&self, qualified: &str, body: &[u8]) -> Result<(), RouteError> {
+        let (_, capability) = self.route(qualified)?;
+        validate_response(&capability.response_schema, body)
+    }
+
+    /// The launch-and-await API: route, validate the request, start the future,
+    /// poll it, validate the response.
+    ///
+    /// The future this returns is the plugin's own, polled by whatever runtime
+    /// the caller has. This crate starts none.
+    pub async fn call(
+        &self,
+        qualified: &str,
+        body: &[u8],
+        request_id: u64,
+    ) -> Result<Vec<u8>, RouteError> {
+        let (entry, capability) = self.route(qualified)?;
+        validate_request(&capability.request_schema, body)?;
+        let call = entry.instance.invoke(&capability.name, request_id, body)?;
+        let response = call.await?;
+        validate_response(&capability.response_schema, &response)?;
+        Ok(response)
+    }
+}
