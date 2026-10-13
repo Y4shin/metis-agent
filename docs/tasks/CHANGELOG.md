@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Event stream with snapshot and identifier (event-stream)
+
+`metis.v1` gained its first server-streaming RPC: `StreamEvents` selects channels and carries a `last_event_id` cursor, and every `Event` carries a daemon-wide monotonic identifier, an `EventKind` (the contract's first enum) and a JSON-text payload. `api-contracts::events` holds the bounded ring and one `stream(...)` assembly shared by the daemon and the in-process test service, so every stream opens with a snapshot, then live events, then heartbeats as ordinary messages, and the client drains it through `Client::stream_events`. Authorization now covers streaming as well as unary calls through the interceptor, and this ticket paid three deferred debts: the stream over TCP, the authenticated stream, and the streaming half of the auth interceptor. Resume and expiry, cancellation, and the slow-consumer policy remain with their own tickets, and the payload encoding is JSON text, which is expensive to change under FILE-mode breaking.
+
 ## 2026-10-13, Pairing over the remote listener (remote-pairing)
 
 Pairing is now reachable from a device with no local socket: a client pairs over the TCP listener with the preshared key, keeps the minted token, and serves authenticated calls on the same transport. Pairing became optional, since an absent or empty `METIS_PRESHARED_KEY` resolves to `None` and closes pairing while every other call keeps serving, and an unresolvable reference stays a loud error. All three refusal causes, disabled, wrong key and already paired, now travel in a `metis-pair-error` header and reach the client as typed errors instead of `PermissionDenied` or `AlreadyExists`. Closing pairing is a state rather than a revocation, so surfaces paired earlier keep serving until their token row is deleted; the missing rate limit on network-reachable pairing attempts is recorded as fog.
