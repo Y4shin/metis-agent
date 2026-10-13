@@ -41,6 +41,16 @@ the repository root, where the one `buf.yaml` lives:
   every file it touches, and it skips the network-only halves when the anonymous
   BSR rate limit is exhausted. It is not part of CI.
 
+Local transport skeleton, documented in `crates/client`:
+
+- `cargo test -p client` -- the socket test starts the skeleton on a temporary
+  socket directory, calls echo through the wrapper, and removes the directory;
+  it joins the full `cargo test` run rather than a second job.
+- `cargo run -p client --example echo` -- serves the skeleton on the resolved
+  endpoint (`METIS_ENDPOINT`, else the platform default), calls echo through
+  the wrapper, prints `[echo]` and `[result] PASS`, and exits non-zero on
+  failure.
+
 Plugin ABI, documented in `crates/plugin-contract/src/abi` and
 `crates/plugin-fixture`:
 

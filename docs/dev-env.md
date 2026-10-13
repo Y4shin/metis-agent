@@ -30,5 +30,8 @@ that directory with `npm run check` and `npm run build`.
 
 ## Reproduction
 
-There is no runnable product code yet, so there is nothing to reproduce.
-Once crates exist, record the reproduction command here.
+The first runnable path is the local transport skeleton:
+`cargo run -p client --example echo` serves the skeleton on the resolved local
+endpoint, calls the echo RPC through the client wrapper, and prints
+`[result] PASS`. Set `METIS_ENDPOINT` to use a non-default socket. There is no
+product daemon yet.
