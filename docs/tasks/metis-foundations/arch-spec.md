@@ -214,9 +214,10 @@ seams 1 and 2; the two scripts and the two buf commands for seams 3 and 4.
   the service namespace is `api_contracts::connect::metis::v1`. Later tickets add
   RPCs and messages under the same package and regenerate through the same
   script.
-- The generated client is what `client` wraps and what
-  `local-transport-rpc-skeleton` injects a transport into. This ticket does not
-  export the transport module.
+- The generated client is what `client` wraps; `local-transport-rpc-skeleton`
+  builds the local transport inside the wrapper's own constructors rather than
+  taking one from the caller, and its landed section records that. This ticket
+  does not export the transport module.
 - Any server implementation of `DaemonService` must carry
   `#[allow(refining_impl_trait)]` on the `impl` block, because the generated
   trait uses an explicit RPITIT signature and the workspace denies warnings.
@@ -548,12 +549,23 @@ only through the offline stub-backed twin and the clean-tree passes.
 
 ---
 
-## Pending ticket: `local-transport-rpc-skeleton`
+## Landed ticket: `local-transport-rpc-skeleton`
 
-Blocked by `contract-pipeline`; not landed yet. It builds the first complete path
-between two processes: the handwritten transport, the client wrapper, a minimal
-service, an integration test, and an example, so the contract and its generated
-stubs are proven over a real local socket instead of a dummy implementation.
+Landed on `task/local-transport-rpc-skeleton` as the merge commit `d886567`,
+parents `c4daca7` (the landing branch, which was level with `main`) and
+`3db4066` (the working branch `ticket/local-transport-rpc-skeleton`); the landing
+tree is byte-identical to `3db4066` and the working branch was deleted after the
+merge. Because the landed tree is the tree the verify worker tested, no gate was
+re-run at landing. Builds the first complete path between two processes: the
+handwritten transport, the client wrapper, a minimal service, an integration
+test, and an example, so the contract and its generated stubs are proven over a
+real local socket instead of a dummy implementation.
+
+The surfaces below are the measured ones. Four divergences from the plan are
+folded in: `serve_stream` takes the router through `Into<Arc<Router>>`, two
+additive public functions (`resolve_endpoint()` and `Client::with_endpoint()`),
+a `Client` with no public transport injection point, and the fixed endpoint
+literals with the `/tmp` conflict they open against `local-identity-and-acl`.
 
 ### Exports
 
@@ -561,18 +573,28 @@ stubs are proven over a real local socket instead of a dummy implementation.
   `src/lib.rs` (crate docs updated to name it): the one handwritten transport in
   the repository, the module the skeleton, `client`, and the daemon effort
   share.
-  - `pub async fn serve_stream<S>(stream: S, router: Router) -> io::Result<()>`:
-    the accept-loop body, generic over any asynchronous bidirectional stream. It
-    wraps the stream with `TokioIo`, builds `ConnectRpcService::new(router)`
-    once, and drives a `hyper_util` auto (HTTP/1.1 or HTTP/2) connection. This
-    is the function `windows-named-pipe`, `tcp-listener`, and
-    `reverse-proxy-mode` reuse, so a later transport adds a listener front-end
-    and no second serve loop. connectrpc 0.9.1 has no `Server::serve_connection`,
-    so this push path is the measured route.
+  - `pub async fn serve_stream<S>(stream: S, router: impl Into<Arc<Router>>) ->
+    io::Result<()>`: the accept-loop body, generic over any asynchronous
+    bidirectional stream. It wraps the stream with `TokioIo`, builds the service
+    with `ConnectRpcService::from_arc(router.into())`, and drives a `hyper_util`
+    auto (HTTP/1.1 or HTTP/2) connection. The router arrives through
+    `Into<Arc<Router>>` rather than as a bare `Router`, because
+    `connectrpc::Router` is not `Clone` in 0.9.1 and an accept loop cannot hand
+    the same router to each accepted stream; a one-shot caller passing a bare
+    `Router` still compiles, which is the shape the duplex test uses. This is the
+    function `windows-named-pipe`, `tcp-listener`, and `reverse-proxy-mode`
+    reuse, so a later transport adds a listener front-end and no second serve
+    loop, building the router once and cloning the `Arc` per accepted stream.
+    connectrpc 0.9.1 has no `Server::serve_connection`, so this push path is the
+    measured route.
   - `pub async fn serve_uds(path: &Path, router: Router) -> io::Result<()>`: the
     Unix front-end. It removes a stale socket file, binds
     `tokio::net::UnixListener`, accepts in a loop, and hands each stream to
-    `serve_stream`. The socket path is the seam the integration test drives.
+    `serve_stream`. It keeps the bare `Router` parameter and wraps it in an `Arc`
+    itself, so one router serves the whole accept loop. The socket path is the
+    seam the integration test drives. It has no shutdown path that unlinks its
+    socket, so a stopped listener leaves the socket file behind (see the
+    residual limitation in the interface contract below).
   - `pub fn uds_transport(path: impl Into<PathBuf>) -> connectrpc::client::Http2Connection`:
     the connector front-end, built with `Http2Connection::lazy_with_connector`
     over a `tower::service_fn` that opens a `UnixStream`, so a later transport
@@ -585,44 +607,86 @@ stubs are proven over a real local socket instead of a dummy implementation.
   `tower = { version = "0.5", features = ["util"] }`,
   `hyper = { version = "1", features = ["server", "http1", "http2"] }`, and
   `hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }`.
-  The `futures` crate is not needed yet: the echo path carries no stream.
-- `crates/client/src/lib.rs`, on the empty crate `api-contracts` is already
-  wired into: the wrapper that hides the transport.
-  - `pub struct Client`, holding the generated `DaemonServiceClient` over an
-    injected transport. Its API names no transport and no generated stub type:
-    a caller constructs it and calls a method.
-  - `pub async fn local() -> Result<Client, ClientError>`, resolving the
-    endpoint, building the local transport, and connecting, plus an explicit
-    endpoint constructor for a caller that already has one.
+  The `futures` crate is not needed yet: the echo path carries no stream. The
+  pinned `connectrpc` also moved into the root `[workspace.dependencies]` with
+  the same pin and features, so the pin is no longer duplicated now that a
+  second crate names it and the effective dependency graph is unchanged.
+  `tokio`'s features are narrowed to `io-util`, `macros`, `net`, `rt`, and
+  `time`, the features the listener, the connector, the skeleton wait, and the
+  tests actually name; `rt-multi-thread` is deliberately absent. `client` gained
+  `tokio` as a normal dependency plus `http`, `hyper-util`, and `tower` as
+  dev-dependencies. `crates/api-contracts/Cargo.toml` says
+  `connectrpc.workspace = true`; `docs/testing.md` and `docs/dev-env.md` carry
+  the local-transport run commands.
+- `crates/client/src/lib.rs`, on the crate `api-contracts` is already wired
+  into: the wrapper that hides the transport.
+  - `pub struct Client`, holding the generated `DaemonServiceClient` over the
+    transport it builds itself. The field is private and there is no public
+    transport injection point: the transport is constructed inside `local()` and
+    `with_endpoint()`, so a later transport extends `client` with its own
+    constructor rather than injecting from outside. Its API names no transport
+    and no generated stub type: a caller constructs it and calls a method.
+  - `pub async fn local() -> Result<Client, ClientError>` and
+    `pub async fn Client::with_endpoint(endpoint: impl Into<PathBuf>) ->
+    Result<Self, ClientError>`, both `#[cfg(unix)]`: `local()` resolves the
+    endpoint and delegates to `with_endpoint`, which builds the local transport
+    and connects. `with_endpoint` is the explicit endpoint constructor the plan
+    named but did not export; it is async and returns a `Result` so it can
+    become an eager connect without an API break. On non-Unix there is no local
+    constructor until `windows-named-pipe` lands.
   - `pub async fn echo(&self, message: &str) -> Result<String, ClientError>`,
     performing the echo RPC over the local transport and returning the
     response's `message`.
-  - `pub fn default_endpoint() -> PathBuf`, the platform default, with the
-    environment override honoured by the wrapper and the example alike. The two
-    literals (the default path and the variable name) are this ticket's to fix,
-    and the daemon effort binds the same default.
+  - `pub fn default_endpoint() -> PathBuf` and
+    `pub fn resolve_endpoint() -> PathBuf`: the platform default, which is
+    `/tmp/metis-daemon.sock` on Unix, and the single resolver, which returns the
+    environment override when it is set and non-empty and the default otherwise.
+    The override variable is `METIS_ENDPOINT`, an empty value is treated as
+    unset, and `const ENDPOINT_ENV` is private to the crate. `resolve_endpoint()`
+    is additive beyond the plan's export list; it is what makes the wrapper and
+    the example honour the override identically. Both literals are fixed here,
+    and the daemon effort binds the same default. Because the variable name is
+    private, the daemon effort restates the literal `METIS_ENDPOINT` unless the
+    constant is exported (the map carries that obligation as fog, together with
+    the `/tmp` conflict below).
   - `pub enum ClientError`, the wrapper's typed error over the transport and
-    protocol failures. The credential-specific variants arrive with
-    `local-identity-and-acl`.
-  - The skeleton service: the minimal `DaemonService` implementation the test
-    and the example drive. It is test support rather than product API, lives
-    beside them in `crates/client` as one shared implementation, carries
-    `#[allow(refining_impl_trait)]`, echoes the request, and stamps
-    `received_at`. This effort owns `client` and not `daemon`, so the daemon
+    protocol failures: `#[non_exhaustive]`, with the `Call(ConnectError)`
+    variant, `Display`, `Error::source`, and `From<ConnectError>`. The
+    credential-specific variants arrive with `local-identity-and-acl`.
+  - The skeleton service in `crates/client/src/skeleton.rs`: the minimal
+    `DaemonService` implementation the test and the example drive, carrying
+    `#[allow(refining_impl_trait)]`, echoing the request, and stamping
+    `received_at` as an RFC 3339 UTC string through a hand-written days-to-civil
+    routine (no date dependency). It is test support rather than product API and
+    lives beside them in `crates/client` as one shared implementation, but it
+    landed as an unconditional `pub mod skeleton`, so it is reachable through
+    `client`'s public API and is the only reason `tokio` is a normal dependency
+    of `client`; the spec's intent is not compiler-enforced, and feature-gating
+    it until the daemon effort removes it is an open, non-blocking item. The
+    module also carries the additive helpers `router()` (the router the
+    transport serves) and `wait_for_socket()` (a bounded poll before
+    connecting). This effort owns `client` and not `daemon`, so the daemon
     effort replaces this service and keeps the transport module.
-- An integration test under `crates/client/tests/` that starts the service on a
-  temporary socket path, calls the RPC through the wrapper, asserts the echoed
-  response, and removes the socket directory; and an example binary that serves
-  the same skeleton on the resolved endpoint, makes the same call, prints the
-  response, and exits non-zero on failure.
+- `crates/client/tests/echo.rs`, four tests: the duplex loop seam, the served
+  path through the wrapper on a temporary socket directory with a `Drop` cleanup
+  guard, the platform-default literal, and the environment override plus
+  `Client::local()`. `crates/client/examples/echo.rs` serves the same skeleton on
+  the resolved endpoint, makes the same call, prints `[echo]` and
+  `[result] PASS`, and exits non-zero on failure; it pins
+  `#[tokio::main(flavor = "current_thread")]` because `rt-multi-thread` is
+  deliberately absent from the narrowed workspace `tokio` features, and its
+  non-Unix `main` prints a FAIL line and exits 1, so the example is honest on a
+  platform whose front-end has not landed.
 - CI: no new step. The socket test joins the existing `cargo test` step on Linux,
   and the existing all-targets gates already compile the example.
 
 ### Existing abstractions to use
 
-- `spikes/connectrpc/crates/wire/src/lib.rs`: the measured accept loop
-  (`ConnectRpcService::new` plus a `hyper_util` auto builder),
-  `Http2Connection::lazy_with_connector`, `local_authority()`, and the
+- `spikes/connectrpc/crates/wire/src/lib.rs`: the measured accept loop (the
+  `ConnectRpcService` plus `hyper_util` auto builder shape, landed here with
+  `ConnectRpcService::from_arc` rather than the spike's `::new` because the
+  0.9.1 `Router` is not `Clone`; that is the one deliberate difference from the
+  spike), `Http2Connection::lazy_with_connector`, `local_authority()`, and the
   compile-only Windows named-pipe pair the later transport tickets extend. Port
   the shape, not the spike paths.
 - `spikes/connectrpc/crates/wire/src/bin/spike.rs`: the serve-then-call driver
@@ -666,22 +730,27 @@ stubs are proven over a real local socket instead of a dummy implementation.
 2. **Served path seam.** Against a real socket: the service serves on a
    temporary path, the wrapper calls echo through it, the response carries the
    echoed message and a `received_at` stamp, and the test removes the socket
-   directory on both the success and the failure path.
-3. **Endpoint seam.** `default_endpoint()` yields the platform default, and the
-   environment override redirects the connection: the test sets the variable to
-   its temporary socket, asserts the call lands there, and restores the
-   variable.
+   directory through a `Drop` guard, so cleanup happens on the success path and
+   on a panic alike.
+3. **Endpoint seam.** `default_endpoint()` yields the platform default and
+   `resolve_endpoint()` applies the override, which redirects the connection:
+   the test sets the variable to its temporary socket, asserts the call lands
+   there through `Client::local()`, and restores the previous value on drop. The
+   test mutates the process environment with `unsafe { std::env::set_var }`
+   (edition 2024), which is safe today only because it is the sole reader and
+   writer of `METIS_ENDPOINT` in that test binary.
 4. **Wrapper seam.** A caller that names no transport gets the echo result: the
    test constructs the client through the local constructor and calls `echo`,
    with no `uds_transport`, `Http2Connection`, or generated stub type anywhere in
    the test's path.
 5. **Example seam.** `cargo run -p client --example echo` serves the skeleton on
-   the resolved endpoint, performs the same call, prints the response, and exits
-   non-zero on failure, so the path is runnable by hand as well as asserted.
+   the resolved endpoint, performs the same call, prints `[echo]` and
+   `[result] PASS`, and exits non-zero on failure (a non-Unix build prints a
+   FAIL line and exits 1), so the path is runnable by hand as well as asserted.
 
-Test types: one integration test file under `crates/client/tests/` for seams 1,
-2, 3, and 4, run by the existing `cargo test` step on Linux; the example binary
-for seam 5, compiled by the existing all-targets gates.
+Test types: `crates/client/tests/echo.rs` for seams 1, 2, 3, and 4, run by the
+existing `cargo test` step on Linux; the example binary for seam 5, compiled by
+the existing all-targets gates.
 
 ### Interface contract
 
@@ -689,11 +758,17 @@ for seam 5, compiled by the existing all-targets gates.
   local stream. `client` calls it, and `windows-named-pipe`, `tcp-listener`,
   `tls-and-client-trust`, and `reverse-proxy-mode` extend it with new bind and
   connector front-ends over the same `serve_stream` and no second service
-  implementation.
+  implementation. `serve_stream` takes the router through `Into<Arc<Router>>`,
+  so each of those front-ends builds the router once and clones the `Arc` per
+  accepted stream; a one-shot caller still passes a bare `Router`.
 - The wrapper is the only UI-independent way to reach the daemon: its API names
   no transport, a later transport changes no caller's code, and the crate's
   manifest gains the runtime and transport crates only, never Tauri or a
-  terminal UI crate.
+  terminal UI crate. `Client` holds its transport privately with no public
+  injection point, so every new transport extends `client` with its own
+  constructor rather than being supplied from outside; on non-Unix there is no
+  local constructor until `windows-named-pipe` lands, because `local()` and
+  `with_endpoint()` are `#[cfg(unix)]`.
 - The skeleton service is test support. The daemon effort replaces it with the
   real service, keeps the transport module, and carries the same
   `#[allow(refining_impl_trait)]` on every `DaemonService` implementation that
@@ -705,10 +780,27 @@ for seam 5, compiled by the existing all-targets gates.
   free of async runtimes. The transport compiles on Unix, and the Windows and
   TCP front-ends arrive with their own tickets as the only per-platform code.
 - The endpoint contract is one platform-derived default plus one environment
-  override, resolved identically by the wrapper and the example. Whatever the
-  ticket fixes for the two literals is what the daemon effort binds, and a later
-  transport reuses the rule (a TCP/TLS endpoint is a different front-end, not a
-  different resolution rule).
+  override, resolved identically by the wrapper and the example through
+  `resolve_endpoint()`. The fixed literals are `default_endpoint()` =
+  `/tmp/metis-daemon.sock` on Unix and the override variable `METIS_ENDPOINT`,
+  with an empty value treated as unset. The daemon effort binds the same default
+  and restates the variable name, because `const ENDPOINT_ENV` is private and
+  exporting it would remove that drift risk. A later transport reuses the rule
+  (a TCP/TLS endpoint is a different front-end, not a different resolution
+  rule).
+- Open conflict for `local-identity-and-acl`, recorded rather than resolved
+  here: `/tmp` is world-writable and sticky, so the socket path cannot satisfy
+  that ticket's requirement that the daemon own the socket's directory with a
+  configured `uid:gid` and mode 700 or 770, and `serve_uds` unlinks whatever
+  sits at the path before binding, so another local user can pre-create the path
+  between daemon starts. That ticket must revisit the default (for example a
+  per-user runtime directory such as `$XDG_RUNTIME_DIR/metis/daemon.sock` with a
+  documented fallback) and decide whether its ACL tests set the
+  `METIS_ENDPOINT` override. The map carries the same item as fog.
+- Residual limitation recorded rather than hidden: `serve_uds` has no shutdown
+  path that unlinks its socket, so a stopped listener leaves the socket file
+  behind. The integration test removes its temporary directory through a `Drop`
+  guard; the example leaves the file on its endpoint.
 
 ---
 
@@ -1024,8 +1116,9 @@ the existing layout, C, and header checks for seam 5.
 
 ## Downstream interface contracts (outline)
 
-These tickets are not pending yet; the three sections above are. Their sections
-are added when they reach the frontier, and the commitments below are what the
+These tickets are not pending yet; the two pending sections above
+(`plugin-authoring-trait` and `plugin-compatibility`) are. Their sections are
+added when they reach the frontier, and the commitments below are what the
 landed and pending tickets must already support.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
@@ -1037,11 +1130,21 @@ landed and pending tickets must already support.
   contract's first enum, which is what makes the buffa mount's dormant
   `clippy::derivable_impls` allow load-bearing.
 - `windows-named-pipe`, `tcp-listener`, `tls-and-client-trust`,
-  `reverse-proxy-mode`: extend the same `transport` module; no second service
-  implementation.
+  `reverse-proxy-mode`: extend the same `transport` module with their own bind
+  and connector front-ends; no second service implementation. Each builds the
+  router once and clones the `Arc` per accepted stream, because `serve_stream`
+  takes `router: impl Into<Arc<Router>>` (`connectrpc::Router` is not `Clone` in
+  0.9.1). Because `Client` builds its own transport and exposes no injection
+  point, each of these tickets extends `client` with a constructor for its own
+  transport instead of injecting one from outside; on non-Unix there is no local
+  constructor until `windows-named-pipe` lands.
 - `local-identity-and-acl`, `pairing-and-tokens`, `remote-pairing`: add request
   metadata and RPCs under `metis.v1`; credentials travel as
   `Authorization` metadata on every call, including the stream.
+  `local-identity-and-acl` first settles the endpoint default against its
+  directory-ownership requirement, the open conflict recorded in the landed
+  `local-transport-rpc-skeleton` section, and decides whether its tests set
+  `METIS_ENDPOINT`; the `ClientError` credential variants land there.
 
 ## Architecture notes
 
@@ -1072,10 +1175,18 @@ landed and pending tickets must already support.
   seam describes. The harness is the owner of the host-callback panic probe and
   of the library rebuild, so no consumer of the fixture can load a stale or
   unwrapped library.
-- The three pending tickets are all level 1, each blocked only by a landed
-  ticket, and they edit files the others read:
-  `local-transport-rpc-skeleton` adds workspace dependencies and fills
-  `crates/client`, while `plugin-authoring-trait` and `plugin-compatibility`
-  both edit `crates/plugin-fixture/src/lib.rs`, its harness, and the fixture
-  manifest. They cannot run in parallel on the shared cwd, so the two plugin
-  chains land in one order and the later one rebases onto the earlier one.
+- `local-transport-rpc-skeleton` was the third level-1 chain and has landed
+  (merge `d886567`), so the tickets still pending are
+  `plugin-authoring-trait` and `plugin-compatibility`, each level 1 and blocked
+  only by the landed `plugin-abi-core`. Both edit
+  `crates/plugin-fixture/src/lib.rs`, its harness, and the fixture manifest, so
+  they cannot run in parallel on the shared cwd: they land in one order and the
+  later one rebases onto the earlier one. The local-transport chain added the
+  workspace `tokio`, `tower`, `hyper`, and `hyper-util` entries and filled
+  `crates/client`, which the two remaining chains do not read.
+- `local-transport-rpc-skeleton` deviates from the spike in exactly one place,
+  forced by the dependency: `Router` is not `Clone` in connectrpc 0.9.1, so the
+  accept loop shares one router through an `Arc` and the service is built with
+  `ConnectRpcService::from_arc`. The landed section above records that and the
+  three other measured divergences (two additive public functions, no transport
+  injection point, the fixed endpoint literals).
