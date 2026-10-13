@@ -593,7 +593,7 @@ fn drive_capability_gate(
     let verdicts: Vec<(&str, Result<(), MetisStatus>)> = list
         .capabilities
         .iter()
-        .map(|descriptor| capability_gate(descriptor))
+        .map(capability_gate)
         .zip(list.capabilities.iter())
         .map(|(verdict, descriptor)| (descriptor.name.as_str(), verdict))
         .collect();
