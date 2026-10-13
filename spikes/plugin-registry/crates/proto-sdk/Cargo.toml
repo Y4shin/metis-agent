@@ -1,0 +1,12 @@
+# PROTOTYPE (throwaway). Not product code.
+#
+# Candidate A's SDK-side executor: the concrete implementations of the
+# `proto-registry` primitives' `Executor` seam. `proto-registry` stays
+# runtime-free; the pool and the thread-per-call stand-in live here.
+[package]
+name = "proto-sdk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+proto-registry = { workspace = true }

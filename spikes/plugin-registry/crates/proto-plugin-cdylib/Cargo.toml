@@ -1,0 +1,33 @@
+# PROTOTYPE (throwaway). Not product code.
+#
+# The plugin side. It exports one `MetisPluginTableV1` with the round two
+# surface plus the appended host-polled future entries, and implements the
+# table directly. The legacy path still returns `Pending` and completes from a
+# plugin worker thread; the appended `invoke_future` path spawns nothing and is
+# polled by the host.
+#
+# The ABI types come from `proto-abi`, a copy of the landed prefix with the
+# appended entries, so the layout is byte for byte the landed one up to the
+# appended fields and the host's landed `HostAdapter` still drives the legacy
+# path.
+[package]
+name = "proto-plugin-cdylib"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+proto-abi = { workspace = true }
+# The primitives-side `Executor` seam the legacy callback path is driven
+# through, and the SDK crate that supplies the bounded pool and the
+# thread-per-call fallback. The host-polled future seam does not use either.
+proto-registry = { workspace = true }
+proto-sdk = { workspace = true }
+# `async-ffi` is used only inside this adapter, to build the future object the
+# opaque ctx points at. Nothing from it crosses the boundary.
+async-ffi = "0.5"
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }

@@ -1,0 +1,22 @@
+# PROTOTYPE (throwaway). Not product code.
+[package]
+name = "proto-host"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# The landed contract, with the authoring surface on: the ABI types, the payload
+# envelope, and the landed `HostAdapter` this host drives the legacy cdylib path
+# with.
+plugin-contract = { workspace = true, features = ["authoring"] }
+# The appended host-polled future entries, layout compatible with the landed
+# prefix above, for the future driver.
+proto-abi = { workspace = true }
+# The registry proper, behind its feature, so `proto-registry` alone can be
+# built with the primitives only.
+proto-registry = { workspace = true, features = ["registry"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+jsonschema = { workspace = true }
+libloading = { workspace = true }

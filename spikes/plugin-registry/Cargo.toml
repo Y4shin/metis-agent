@@ -1,0 +1,36 @@
+# PROTOTYPE (throwaway). Not product code. Answers one design question and goes
+# in the bin afterwards. Deliberately its own workspace, its own lockfile, its
+# own target directory, and (mostly) no dependency on the metis-agent
+# workspace. Round two adds one deliberate exception: a path dependency on the
+# landed `plugin-contract`, so the cdylib and the host share the landed ABI
+# types and the host reuses the landed `authoring::HostAdapter`.
+[workspace]
+resolver = "2"
+members = [
+    "crates/proto-abi",
+    "crates/proto-plugin-cdylib",
+    "crates/proto-registry",
+    "crates/proto-sdk",
+    "crates/proto-host",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+
+[workspace.dependencies]
+proto-abi = { path = "crates/proto-abi" }
+proto-registry = { path = "crates/proto-registry" }
+proto-sdk = { path = "crates/proto-sdk" }
+# The landed contract. The ABI types and the payload envelope are always
+# available; `authoring` turns on the landed plugin-side table adapter and the
+# landed host-side `HostAdapter` this prototype drives the cdylib with.
+plugin-contract = { path = "../../crates/plugin-contract" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# JSON Schema 2020-12 generated from Rust types, and a real validator for it.
+schemars = "1"
+# default-features = false: the defaults pull reqwest/rustls (resolve-http) and
+# an HTTP retriever, none of which this prototype uses.
+jsonschema = { version = "0.58", default-features = false }
+libloading = "0.9"

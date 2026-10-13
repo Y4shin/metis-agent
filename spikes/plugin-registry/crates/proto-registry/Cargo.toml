@@ -1,0 +1,21 @@
+# PROTOTYPE (throwaway). Not product code.
+#
+# One crate whose primitives are always present and whose registry lives behind
+# a feature. With `--no-default-features` only the primitives compile, with no
+# serde, no JSON Schema, and no validator, which is the shape `plugin-contract`
+# has with `authoring` off.
+[package]
+name = "proto-registry"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+# The plugin registry proper: serde and JSON shaped, and therefore gated the
+# same way `plugin-contract` gates `authoring`.
+registry = ["dep:serde", "dep:serde_json", "dep:jsonschema"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+jsonschema = { workspace = true, optional = true }

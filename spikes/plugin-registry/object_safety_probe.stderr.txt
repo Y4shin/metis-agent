@@ -1,0 +1,82 @@
+error[E0038]: the trait `HasAssocConst` is not dyn compatible
+  --> object_safety_probe.rs:24:30
+   |
+24 |     pub fn takes_dyn(_p: Box<dyn HasAssocConst>) {}
+   |                              ^^^^^^^^^^^^^^^^^ `HasAssocConst` is not dyn compatible
+   |
+note: for a trait to be dyn compatible it needs to allow building a vtable
+      for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
+  --> object_safety_probe.rs:21:15
+   |
+20 |     pub trait HasAssocConst {
+   |               ------------- this trait is not dyn compatible...
+21 |         const ANSWER: &'static str = "";
+   |               ^^^^^^ ...because it contains associated const `ANSWER`
+   = help: consider moving `ANSWER` to another trait
+
+error[E0191]: the value of the associated type `Answer` in `HasAssocType` must be specified
+  --> object_safety_probe.rs:33:34
+   |
+30 |         type Answer;
+   |         ----------- `Answer` defined here
+...
+33 |     pub fn takes_dyn(_p: Box<dyn HasAssocType>) {}
+   |                                  ^^^^^^^^^^^^
+   |
+help: specify the associated type
+   |
+33 |     pub fn takes_dyn(_p: Box<dyn HasAssocType<Answer = /* Type */>>) {}
+   |                                              +++++++++++++++++++++
+
+error[E0038]: the trait `ReturnsImplFuture` is not dyn compatible
+  --> object_safety_probe.rs:42:30
+   |
+42 |     pub fn takes_dyn(_p: Box<dyn ReturnsImplFuture>) {}
+   |                              ^^^^^^^^^^^^^^^^^^^^^ `ReturnsImplFuture` is not dyn compatible
+   |
+note: for a trait to be dyn compatible it needs to allow building a vtable
+      for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
+  --> object_safety_probe.rs:40:29
+   |
+39 |     pub trait ReturnsImplFuture {
+   |               ----------------- this trait is not dyn compatible...
+40 |         fn answer(&self) -> impl Future<Output = ()> + Send;
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ...because method `answer` references an `impl Trait` type in its return type
+   = help: consider moving `answer` to another trait
+
+error[E0038]: the trait `UsesAsyncFn` is not dyn compatible
+  --> object_safety_probe.rs:50:30
+   |
+50 |     pub fn takes_dyn(_p: Box<dyn UsesAsyncFn>) {}
+   |                              ^^^^^^^^^^^^^^^ `UsesAsyncFn` is not dyn compatible
+   |
+note: for a trait to be dyn compatible it needs to allow building a vtable
+      for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
+  --> object_safety_probe.rs:48:18
+   |
+47 |     pub trait UsesAsyncFn {
+   |               ----------- this trait is not dyn compatible...
+48 |         async fn answer(&self);
+   |                  ^^^^^^ ...because method `answer` is `async`
+   = help: consider moving `answer` to another trait
+
+error[E0038]: the trait `GenericMethod` is not dyn compatible
+  --> object_safety_probe.rs:58:30
+   |
+58 |     pub fn takes_dyn(_p: Box<dyn GenericMethod>) {}
+   |                              ^^^^^^^^^^^^^^^^^ `GenericMethod` is not dyn compatible
+   |
+note: for a trait to be dyn compatible it needs to allow building a vtable
+      for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
+  --> object_safety_probe.rs:56:12
+   |
+55 |     pub trait GenericMethod {
+   |               ------------- this trait is not dyn compatible...
+56 |         fn invoke<T: Clone>(&self, value: T);
+   |            ^^^^^^ ...because method `invoke` has generic type parameters
+   = help: consider moving `invoke` to another trait
+
+error: aborting due to 5 previous errors
+
+Some errors have detailed explanations: E0038, E0191.
+For more information about an error, try `rustc --explain E0038`.

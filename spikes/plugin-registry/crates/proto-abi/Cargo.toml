@@ -1,0 +1,13 @@
+# PROTOTYPE (throwaway).
+[package]
+name = "proto-abi"
+version.workspace = true
+edition.workspace = true
+
+# The C translation unit in `c/` is compiled into every build of this crate, so
+# the generated header's layout agreement is checked by a build and not only by
+# a test run.
+[build-dependencies]
+cc = "1"
+
+[dependencies]

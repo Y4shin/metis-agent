@@ -1,0 +1,14 @@
+$ cargo build -p proto-registry --no-default-features
+  --> Cargo.toml:21:1
+warning: workspace (manifest) generated 1 warning
+   Compiling proto-registry v0.0.0 (/tmp/metis-plugin-registry-prototype/crates/proto-registry)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s
+
+$ cargo build -p proto-registry --features registry
+  --> Cargo.toml:21:1
+warning: workspace (manifest) generated 1 warning
+   Compiling proto-registry v0.0.0 (/tmp/metis-plugin-registry-prototype/crates/proto-registry)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.36s
+
+$ cargo tree -p proto-registry --no-default-features   # dependency closure
+proto-registry v0.0.0 (/tmp/metis-plugin-registry-prototype/crates/proto-registry)

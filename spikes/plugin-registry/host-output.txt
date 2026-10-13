@@ -1,0 +1,62 @@
+== seam
+NOTE the registry holds Arc<dyn Plugin>; the landed authoring trait cannot be a trait object
+NOTE its four arms are an associated const and an associated type per capability, plus an RPITIT method, and all three shapes are dyn incompatible (object_safety_probe.rs)
+NOTE so the capability set moved out of the trait and into a published list, which is what the C ABI already does
+
+== cdylib through the C table
+NOTE cdylib: /tmp/metis-plugin-registry-prototype/target/debug/libproto_plugin_cdylib.so
+PASS the cdylib loaded with libloading and was read through metis_read_prefix
+PASS the cdylib advertises six capabilities, not four
+NOTE capabilities: tool.echo@1, tool.add@1, tool.uppercase@1, tool.bad_response@1, provider.complete@2, tool.future@99
+NOTE tool.echo request schema arrived over the ABI: {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"message":{"type":"string"}},"required":["message"],"title":"EchoRequest","type":"object"}
+NOTE the list_capabilities payload is 2955 bytes for 6 capabilities, 492 bytes each, because both schemas travel inside the descriptors
+
+== registry
+PASS the routing table was built from the plugin's published capability list
+PASS version gating refused exactly one capability and left the rest routable
+PASS a native in process plugin joined the same registry behind the same seam, no ABI involved
+PASS the routing table is keyed by capability name and holds every routable capability
+NOTE routing table: provider.complete, provider.summarize, tool.add, tool.bad_response, tool.echo, tool.uppercase, tool.word_count
+PASS a duplicate capability name fails the load
+PASS a failed load leaves the routing table unchanged
+
+== schema validation
+PASS the registry rejected a request violating the published schema before the plugin saw it
+PASS the plugin never saw the rejected request
+PASS a valid request is routed and its response validates
+PASS the plugin saw this one
+PASS a response violating the plugin's own published schema is an internal error attributed to the plugin
+NOTE attributed error: internal: plugin proto-plugin-cdylib returned a response for capability tool.bad_response that violates its published schema: 42 is not of type "string"
+NOTE tool.bad_response published response schema: {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"The response schema `tool.bad_response` publishes. The plugin does not honour\nit: see the `\"tool.bad_response\"` arm in `invoke`.","properties":{"value":{"description":"Published as a string. The plugin returns `42`.","type":"string"}},"required":["value"],"title":"BadResponse","type":"object"}
+NOTE the plugin returned {"value": 42} for it
+PASS a capability the version gate refused, or one that was never registered, is not routable
+PASS the refused capability is not routable
+PASS the plugin that advertised the refused capability still answers its routed ones
+
+== typed method families above the seam
+PASS a typed tool method reaches a cdylib capability over the erased seam
+PASS a second typed tool method reaches another cdylib capability
+PASS a third typed tool method, same family, same seam
+PASS the native in process plugin answers through the same typed tool family
+PASS a typed provider method family reaches a cdylib capability
+PASS the native plugin answers through the same typed provider family
+PASS a tool handle refuses a provider kind capability
+PASS a typed wrapper whose Rust fields do not match the published schema fails at runtime, not at compile time
+NOTE erasure cost: the mismatch above compiled; only the schema caught it (invalid argument: capability tool.echo: the request violates its published schema: "message" is a required property)
+PASS the typed family surfaces the same misbehaviour as the same attributed internal error
+
+== what validation costs
+BENCH schema compile: 27 us per schema (7 routed capabilities => 14 schemas compiled at load, about 0.4 ms)
+BENCH request validation: 1057 ns per call (small object, 1 string field)
+BENCH response validation: 1629 ns per call (small object, 2 fields)
+BENCH both directions: 2686 ns per call, the number the registry adds to every routed call
+BENCH baseline: serde JSON encode plus parse of the same payload, 1613 ns, which validation sits on top of
+BENCH registry.invoke end to end, native in process plugin, both directions validated: 4836 ns per call
+BENCH registry.invoke end to end, cdylib through the C table, both directions validated: 5165 ns per call
+BENCH validation share: 56% of the native call, 52% of the cdylib call
+
+== teardown
+PASS every registered plugin was shut down through the seam
+PASS the cdylib released every plugin buffer it was handed, through its own release_buffer
+
+27 checks, 0 failures

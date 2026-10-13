@@ -1,0 +1,209 @@
+• Validating lock
+✓ Validating lock in 12.2ms
+  evaluating file '«nix-internal»/derivation-internal.nix'
+• Configuring shell
+• Configuring cachix
+✓ Configuring cachix in 1.58ms
+• Evaluating shell
+✓ Evaluating shell in 7.34ms (cached)
+✓ Configuring shell in 11.8ms
+• Loading tasks
+• Evaluating devenv.config.task.config
+✓ Evaluating devenv.config.task.config in 426µs (cached)
+✓ Loading tasks in 1.42ms
+• Running tasks
+• Running devenv:files:cleanup
+✓ Running devenv:files:cleanup in 12.7ms
+• Running devenv:enterShell
+✓ Running devenv:enterShell in 10.9ms
+✓ Running tasks in 24.1ms
+NOTE cdylib: /tmp/metis-plugin-registry-prototype/target/release/libproto_plugin_cdylib.so
+
+== plugin registry
+PASS a plugin loaded from a library path reports a validated manifest
+PASS the registry returned an instance handle
+PASS capability discovery read the plugin's published list
+PASS version gating refused exactly one capability and left the rest routable
+PASS per-plugin configuration was delivered before discovery
+PASS the registry kept the configuration it delivered
+PASS schema discovery is one batched call, not one per capability
+NOTE routing keys: provider.complete, tool.add, tool.bad_response, tool.delay, tool.echo, tool.events, tool.future_ready, tool.future_ready_noshim, tool.future_reuse, tool.hand_future, tool.logs, tool.never, tool.poll_future, tool.races, tool.stats, tool.straggler, tool.uppercase
+NOTE descriptor listing 3299 bytes by id (18 capabilities), schema fetch 8961 bytes in 1 call, inline listing 9339 bytes
+PASS a native in-process plugin registered behind the same seam
+PASS routing spans every enabled plugin
+PASS a duplicate capability name fails the load under global uniqueness
+PASS a failed load leaves the routing table unchanged
+PASS fix 1: a failed capability listing fails the load with a typed discovery error
+PASS fix 1: nothing was registered for the plugin whose listing failed
+PASS a manifest that targets another ABI major fails the load
+PASS a disabled plugin stays loaded but none of its capabilities are routable
+PASS re-enabling makes the capability routable again
+PASS a freshly registered plugin routes by capability name
+PASS unregistering shuts the plugin down and removes its routes
+PASS an unregistered capability is no longer routable
+NOTE registered plugins: native-text-tools v0.1.0 abi1 instance=native-text-tools#1 caps=2 enabled=true; proto-plugin-cdylib vabi 1.0 abi1 instance=proto-plugin-cdylib#0 caps=17 enabled=true
+
+== fix 2: machine-checkable errors
+PASS a caller payload that violates the schema is its own variant
+PASS a capability refused by version gating is its own variant
+PASS a capability that was never registered is its own variant
+PASS a response that violates the plugin's own published schema is its own variant
+PASS a plugin-side failure carries the plugin's own status
+PASS the five failure paths are distinguishable in code, not by message string
+NOTE taxonomy: invalid argument: capability tool.add: the request violates its published schema: "not a number" is not of type "integer"; unsupported: capability tool.future advertises version 99, this host supports 2; not found: no enabled capability named tool.not_registered is registered; internal: plugin proto-plugin-cdylib returned a response for capability tool.bad_response that violates its published schema: 42 is not of type "string"; the plugin reported invalid_argument for capability tool.word_count: text must not be empty
+PASS an ABI status maps onto the taxonomy with its status preserved
+
+== fix 3: descriptor size
+PASS the by-id listing is smaller than the inline listing
+NOTE descriptor trade-off: inline 9339 bytes in 1 call; by id 3299 bytes + 8961 bytes of schema in 1 extra call(s), fetched once at load
+
+== fix 4: name squatting under namespacing
+PASS namespacing admits the plugin the global rule refused
+NOTE namespaced routing keys: duplicate-echo-tools/tool.echo, proto-plugin-cdylib/provider.complete, proto-plugin-cdylib/tool.add, proto-plugin-cdylib/tool.bad_response, proto-plugin-cdylib/tool.delay, proto-plugin-cdylib/tool.echo, proto-plugin-cdylib/tool.events, proto-plugin-cdylib/tool.future_ready, proto-plugin-cdylib/tool.future_ready_noshim, proto-plugin-cdylib/tool.future_reuse, proto-plugin-cdylib/tool.hand_future, proto-plugin-cdylib/tool.logs, proto-plugin-cdylib/tool.never, proto-plugin-cdylib/tool.poll_future, proto-plugin-cdylib/tool.races, proto-plugin-cdylib/tool.stats, proto-plugin-cdylib/tool.straggler, proto-plugin-cdylib/tool.uppercase
+NOTE global keys are bare capability names, so the caller needs no plugin id but a second claimant is refused; namespaced keys are plugin_id/capability, so the caller names the plugin and both claimants coexist
+
+== fix 5: feature gate placement
+NOTE the registry lives in proto-registry behind the `registry` feature; the primitives build is `cargo build -p proto-registry --no-default-features` (no serde, no jsonschema) and the registry builds are `cargo build -p proto-registry --features registry`. Both were run and both compile; see FINDINGS2.md
+
+== async: late completion, never inline
+PASS invoke returned Pending, never an inline result
+PASS the completion arrived later, through the host callback
+
+== async: progress before completion
+PASS two progress callbacks arrived before the completion, in order
+PASS the completion followed the progress
+PASS every progress payload was released by the plugin allocator
+
+== async: events
+PASS a capability emitted an event that reached the host with topic and payload
+PASS instance start emitted an event
+
+== async: logs at each level
+PASS logs arrived at every level
+
+== async: cancellation
+PASS a cancel for a live request is accepted
+PASS a second cancel is idempotent
+PASS the plugin observed the token promptly while parked
+PASS the plugin suppressed its completion and the host retired its pending record
+NOTE the plugin observed the cancel 2 ms after the host requested it
+PASS a completion that arrives after a successful cancel is dropped by the host
+PASS the dropped completion's buffer was still released
+PASS cancel of an unknown request id returns not found
+
+== async: a completion that never arrives
+PASS the bounded wait timed out instead of hanging
+NOTE the bounded wait returned after 300 ms with Err(Internal { detail: "no completion for tool.never within 300ms" })
+
+== async: concurrency
+PASS concurrent in-flight calls to one instance and one capability all answer their own caller
+PASS out-of-order completions are delivered to the right caller
+PASS two instances of the same plugin have independent state
+PASS two different plugins are in flight together without crossing
+
+== async: instance lifecycle
+PASS an instance can be created, used, and destroyed
+PASS a double destroy is reported as not found
+PASS an instance can be created again on a reused address
+NOTE instance addresses: first "0x5617771f3de0", second "0x5617771f3e40"
+
+== host-polled future seam
+PASS the plugin future is not ready on its first poll
+PASS the host waker wakes the host poll loop and the future delivers its payload
+PASS the host drops the future exactly once and the drop is legal
+PASS the host-polled path spawned no plugin thread and no plugin runtime
+PASS the hand-written vtable drives a capability with no async-ffi involved
+PASS a cancel resolves the future as Cancelled instead of a mid-flight drop
+PASS every waker clone the plugin made was released
+NOTE future seam counters: {"cancel_resolved":1,"futures_created":6,"futures_dropped":5,"poll_calls":9,"poll_threads":1,"service_roundtrip_count":2,"service_roundtrip_ns":5180,"service_roundtrip_total_ns":20088,"threads_spawned":38,"waker_clones":7,"waker_releases":7}
+PASS the legacy Pending/complete path still works alongside the future seam
+NOTE plugin live buffers before the hazard run: 0
+
+== host-polled future seam: hazards (lane 2)
+PASS the appended invoke_future/service_complete entries are present (presence decided by size)
+
+thread '<unnamed>' (496041) panicked at crates/proto-plugin-cdylib/src/future.rs:661:32:
+author future panicked inside poll (hazard test)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread '<unnamed>' (496041) panicked at crates/proto-plugin-cdylib/src/future.rs:661:32:
+author future panicked inside poll (hazard test)
+PASS 1 panic in the author's future becomes Internal, stays terminal, and drop still works
+
+thread '<unnamed>' (496041) panicked at crates/proto-plugin-cdylib/src/future.rs:809:17:
+author future panicked inside drop (hazard test)
+PASS 2 a panic in the future's drop shim does not abort and releases the buffer it still held
+
+thread 'main' (496041) panicked at crates/proto-host/src/future_driver.rs:260:13:
+host waker body panicked (hazard test)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+PASS 3 a panic in a host waker body is contained at the callback frame
+PASS 4 cancel wakes the future, which resolves as Cancelled, then the host drops it
+PASS 5 a plugin that ignores the cancel deadline is dropped after it, recorded, and the host stays usable
+PASS 6 double drop and drop after unload are refused, not undefined behaviour
+PASS 7 a waker clone that wakes after the future was dropped is reported, not crashed on
+PASS 8 a blocking poll is detected by a watchdog and reported, not allowed to hang the host
+PASS 9 the host never drops a future while a poll is in progress (ordering ledger)
+NOTE protocol violations recorded by the hazard run: 6
+NOTE violation (expected, recorded): future 268435460 missed the cancel deadline and was dropped by the host
+NOTE violation (expected, recorded): double drop of future 268435462 refused
+NOTE violation (expected, recorded): drop of future 268435463 after unload refused
+NOTE violation (expected, recorded): waker woken after future 268435464 was dropped
+NOTE violation (expected, recorded): poll for future 268435465 exceeded its 150ms deadline (blocking poll)
+NOTE violation (expected, recorded): a poll that blocked was detected by the watchdog and abandoned
+NOTE stale wakes detected (a waker clone woke after its future was dropped): 1
+NOTE plugin live buffers after the hazard run: 0
+
+== lane 3: prefix compatibility and append-only versioning
+PASS versioning: a landed-prefix reader reads size and major, and sees the table grew
+PASS versioning: a newer host sees invoke_future and service_complete, decided by size
+PASS versioning: an older host drives the newer plugin through invoke, Pending and complete
+PASS versioning: an older plugin with a shorter table is still driven
+PASS versioning: a table that does not cover the prefix is refused, and slots are decided by size
+PASS versioning: a landed host table reports service_request absent, so the plugin cannot call it
+PASS versioning: a newer host drives one appended future through poll, waker and drop
+
+== typed method families above the seam
+PASS a typed tool method reaches a cdylib capability over the erased seam
+PASS a second typed tool method reaches another cdylib capability
+PASS a third typed tool method, same family, same seam
+PASS the native in-process plugin answers through the same typed tool family
+PASS a typed provider method family reaches a cdylib capability
+PASS the native plugin answers through the same typed provider family
+PASS a tool handle refuses a provider kind capability
+PASS a typed wrapper whose Rust fields do not match the published schema fails at runtime, not compile time
+NOTE erasure cost: the mismatch compiled; only the schema caught it (invalid argument: capability tool.echo: the request violates its published schema: "message" is a required property)
+PASS the typed family surfaces a response violation as ResponseViolation
+
+== what the registry costs
+BENCH schema compile: 9 us per schema (19 routed capabilities => 38 schemas compiled at load, about 0.3 ms)
+BENCH request validation: 171 ns per call (small object, 1 string field)
+BENCH response validation: 234 ns per call (small object, 2 fields)
+BENCH both directions: 405 ns per call, the number the registry adds to every routed call
+BENCH baseline: serde JSON encode plus parse of the same payload, 183 ns, which validation sits on top of
+BENCH registry.invoke end to end, native in process plugin, both directions validated: 661 ns per call
+BENCH async completion latency, cdylib through the C table and the landed HostAdapter: 5541 ns per call (5.5 us), one worker thread round trip
+BENCH validation share: 61% of the native call, 7% of the cdylib call
+BENCH concurrency: 8 threads x 200 calls = 1600 in-flight completions, all matched to their caller, 2530 ns per call wall clock, 4.0ms total
+BENCH legacy callback path, thread-per-call executor: 21547 ns per call (21.5 us), one worker round trip, 1000 calls
+BENCH legacy callback path, pooled executor: 5825 ns per call (5.8 us), one worker round trip, 1000 calls
+
+== host-polled future seam cost
+BENCH host-polled path, full (invoke_future + host timer service_request + poll + drop): avg 5452 ns (5.45 us), p50 5119 ns, p95 6543 ns, p99 9799 ns, max 97243 ns, 2000 calls in 11.1ms
+BENCH catch_unwind shim, ready-on-first-poll future (invoke + 1 poll + drop): shim 918 ns/call, no shim 904 ns/call, shim share 15 ns/call (2% of the with-shim call)
+BENCH future creation versus reuse (same hand-written vtable): create+poll+drop 864 ns/call, reuse (poll only) 440 ns/call, lifecycle overhead 424 ns/call
+BENCH service_request timer round trip: last 2685 ns, avg 2266 ns over 2002 samples
+
+== shutdown and unload ordering
+PASS an in-flight call completed before shutdown returned (the worker was joined)
+PASS shutdown joined the plugin's workers
+PASS a callback arriving after shutdown is logged and ignored
+PASS destroy_instance after shutdown returns not found
+PASS the plugin released every buffer it allocated
+
+== teardown
+PASS the library was dropped only after shutdown had returned
+PASS every future and waker was dropped before the library unloaded
+NOTE teardown order: ["shutdown returned", "future host dropped", "library unloaded"]
+
+92 checks, 0 failures
