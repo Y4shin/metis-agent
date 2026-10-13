@@ -1768,12 +1768,118 @@ existing contract and ABI gates for seam 5.
 
 ---
 
+## Pending ticket: `state-store`
+
+Blocked by nothing, and the foundation `pairing-and-tokens` sits behind it. The
+daemon's persistent state: one SQLite database opened through sqlx, migrated on
+open, with the table token hashes live in. `crates/daemon` gains a library
+target beside its binary, because `docs/rough-plan.md` starts storage as an
+internal module of the daemon crate.
+
+### Exports
+
+- `crates/daemon/Cargo.toml`: a `[lib]` target beside the binary, and `sqlx`
+  with `default-features = false` and the `runtime-tokio`, `sqlite`, `macros`
+  and `migrate` features. `sha2` for hashing and `getrandom` for token bytes join
+  the workspace dependencies; `subtle` is added for the constant-time hash
+  comparison rather than a hand-rolled fold.
+- `crates/daemon/src/lib.rs`: `pub mod state;` and `pub mod token;`; `main.rs`
+  stays a thin binary.
+- `crates/daemon/src/state.rs`:
+  - `pub const STATE_DB_ENV: &str = "METIS_STATE_DB";` and
+    `resolve_db_path() -> Result<PathBuf, StateError>`: the variable wins, then
+    `$XDG_DATA_HOME/metis/metis.db`, then `$HOME/.local/share/metis/metis.db`,
+    then `StateError::NoStateDir`.
+  - `Store::open(path) -> Result<Store, StateError>`: creates the directory at
+    mode 700 and the file at mode 600, opens a pool, and applies the embedded
+    migrations; `Store::open_in_memory()` for tests.
+  - `insert_token(&self, surface, &TokenHash)`, `verify_token(&self, surface,
+    &TokenHash) -> Verify`, `revoke_token(&self, surface)`, `surfaces(&self)`.
+  - `pub enum StateError` (non-exhaustive): `NoStateDir`, `Io`, `Database`,
+    `SurfaceAlreadyPaired`.
+- `crates/daemon/src/token.rs`: `mint() -> (Token, TokenHash)` where `Token` is
+  32 random bytes hex-encoded and `TokenHash` is its SHA-256; `Token::parse(&str)`;
+  `TokenHash`'s comparison is constant time.
+- `crates/daemon/migrations/0001_tokens.sql`:
+  `tokens(surface TEXT PRIMARY KEY, hash BLOB NOT NULL, paired_at TEXT NOT NULL)`,
+  applied by `sqlx::migrate!` so the binary embeds its schema.
+- `crates/api-contracts/src/transport.rs`: the landed `ensure_socket_dir`
+  generalises into a private-directory helper that takes the mode, so the socket
+  directory at 700, the socket file at 700 or 770, and the state directory at 700
+  and file at 600 all use one rule. No signature the caller sees today changes.
+- `docs/dev-env.md` and `docs/testing.md`: the variable, the default path, and
+  the run commands.
+
+### Existing abstractions to use
+
+- The landed ACL rule and its refusals (symlink, owner, wider mode) as the
+  pattern the state directory inherits at 700 and 600.
+- The non-exhaustive error convention of `ConfigError`, `IdentityError` and
+  `ClientError`.
+- The RAII environment and self-cleaning temporary-directory helpers in
+  `crates/client/tests/{echo,acl}.rs`, carried into the daemon's tests.
+- `docs/testing.md`'s command-list convention for the new run commands.
+
+### Do NOT reimplement
+
+- Do not store the token, the preshared key, or any plaintext secret in the
+  database. Only the hash is written.
+- Do not use `sqlx`'s compile-time `query!` macros: no `DATABASE_URL`, no
+  committed `.sqlx` offline data, no database server in CI.
+- Do not put the store in `api-contracts` or a new crate, and do not add a
+  `sqlx-cli` step to CI: migrations are committed SQL applied by the embedded
+  migrator on open.
+- Do not build SQL by concatenation, and do not compare hashes with `==`.
+- Do not add connection-pool tuning, a config file, or a migration rollback
+  path.
+- Do not implement pairing, the `Pair` RPC, the authorization check, or client
+  credential storage: `pairing-and-tokens` owns all of that.
+
+### Seams
+
+1. **Path seam.** `METIS_STATE_DB` wins; then `$XDG_DATA_HOME`, then
+   `$HOME/.local/share`; with no home directory the result is `NoStateDir`.
+   Unit-tested with the RAII helper.
+2. **Creation seam.** Opening a fresh path creates the directory at 700 and the
+   file at 600, asserted by reading the modes on Unix, matching how the ACL tests
+   are gated.
+3. **Migration seam.** A fresh database has the `tokens` table, the migration is
+   recorded as applied, and opening the same file twice is idempotent.
+4. **Token seam.** `mint()` returns 64 hex characters from 32 random bytes and
+   two mints differ; `hash()` is stable and 32 bytes; verification accepts the
+   stored hash and refuses any other; the row holds the hash and never the token.
+5. **Revocation seam.** With two surfaces paired, revoking one leaves the other
+   verifying.
+6. **Duplicate seam.** Inserting a surface that already has a row is
+   `SurfaceAlreadyPaired` and leaves the first row intact.
+7. **Build seam.** The workspace builds and the daemon tests pass with no
+   database server, no `DATABASE_URL` and no new CI step.
+
+Test types: `sqlite::memory:` for the store operations, temporary files for the
+path, creation and migration seams, all inside `crates/daemon`; the existing
+workspace gates for the build seam.
+
+### Interface contract
+
+- `pairing-and-tokens` consumes `Store`, `mint` and `TokenHash`, adds the `Pair`
+  RPC and the authorization check, and adds no token table of its own.
+- The daemon effort later adds session, message and workflow tables through new
+  migrations in the same directory, and the `agent-harness` `SessionStore`
+  implementation is the daemon's, not this store's.
+- The store is the daemon's state boundary: nothing in `api-contracts` or
+  `client` reads the database.
+- Recorded residual: no rotation, no pruning, no stale-database unlink, and
+  `sqlx`'s SQLite driver brings a bundled C library into the build.
+
+---
+
 ## Downstream interface contracts (outline)
 
-These tickets are not pending yet. The tickets still pending in this effort are
-`event-stream` and `windows-named-pipe`; their sections are added when they
-reach the frontier, and the commitments below are what the landed tickets must
-already support, including the surfaces `local-identity-and-acl` landed.
+These tickets are not pending yet, apart from the one pending section above
+(`state-store`). The two other tickets still pending in this effort are
+`event-stream` and `windows-named-pipe`; their sections are added when they reach
+the frontier, and the commitments below are what the landed tickets must already
+support, including the surfaces `local-identity-and-acl` landed.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
