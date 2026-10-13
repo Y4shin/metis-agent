@@ -8,8 +8,10 @@ devenv shell
 ```
 
 The shell provides the current Rust nightly toolchain (rustc, cargo, clippy,
-rustfmt, rust-analyzer) plus Git, Node.js, and npm. The nightly version is
+rustfmt, rust-analyzer) plus Git, `buf`, Node.js, and npm. The nightly version is
 pinned by `devenv.lock`, and `channel = "nightly"` is set in `devenv.nix`.
+`buf` generates the wire contract; both codegen plugins are BSR remote plugins,
+so no `protoc`, local plugin binary, or JVM is installed.
 
 Run a one-off command inside the shell with:
 
