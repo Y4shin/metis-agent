@@ -1,0 +1,60 @@
+• Validating lock
+✓ Validating lock in 12.7ms
+  evaluating file '«nix-internal»/derivation-internal.nix'
+• Configuring shell
+• Configuring cachix
+✓ Configuring cachix in 1.59ms
+• Evaluating shell
+✓ Evaluating shell in 5.43ms (cached)
+✓ Configuring shell in 9.58ms
+• Loading tasks
+• Evaluating devenv.config.task.config
+✓ Evaluating devenv.config.task.config in 306µs (cached)
+✓ Loading tasks in 1.31ms
+• Running tasks
+• Running devenv:files:cleanup
+✓ Running devenv:files:cleanup in 12.0ms
+• Running devenv:enterShell
+✓ Running devenv:enterShell in 12.7ms
+✓ Running tasks in 25.3ms
+error[E0191]: the value of the associated types `Answer`, `Deferred`, `Cancellable` and `Fault` in `four_arm::Plugin` must be specified
+  --> /tmp/metis-plugin-registry-round-3/shape/probe_routed_trait.rs:54:43
+   |
+43 |         type Answer: Shape;
+   |         ------------------ `Answer` defined here
+44 |         type Deferred: Shape;
+   |         -------------------- `Deferred` defined here
+45 |         type Cancellable: Shape;
+   |         ----------------------- `Cancellable` defined here
+46 |         type Fault: Shape;
+   |         ----------------- `Fault` defined here
+...
+54 |     pub fn takes_dyn_four_arm(_p: Box<dyn Plugin>) {}
+   |                                           ^^^^^^
+   |
+help: specify the associated types
+   |
+54 |     pub fn takes_dyn_four_arm(_p: Box<dyn Plugin<Answer = /* Type */, Deferred = /* Type */, Cancellable = /* Type */, Fault = /* Type */>>) {}
+   |                                                 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0038]: the trait `routed_rpitit::Plugin` is not dyn compatible
+  --> /tmp/metis-plugin-registry-round-3/shape/probe_routed_trait.rs:81:44
+   |
+81 |     pub fn takes_dyn_routed_rpitit(_p: Box<dyn Plugin>) {}
+   |                                            ^^^^^^^^^^ `routed_rpitit::Plugin` is not dyn compatible
+   |
+note: for a trait to be dyn compatible it needs to allow building a vtable
+      for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
+  --> /tmp/metis-plugin-registry-round-3/shape/probe_routed_trait.rs:78:14
+   |
+73 |     pub trait Plugin: Send + Sync + 'static {
+   |               ------ this trait is not dyn compatible...
+...
+78 |         ) -> impl Future<Output = Result<Response, ()>> + Send;
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ...because method `call` references an `impl Trait` type in its return type
+   = help: consider moving `call` to another trait
+
+error: aborting due to 2 previous errors
+
+Some errors have detailed explanations: E0038, E0191.
+For more information about an error, try `rustc --explain E0038`.

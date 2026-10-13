@@ -1,0 +1,10 @@
+# command: /tmp/metis-plugin-registry-round-3/asyncffi/target/release/proto-host --probe-child hand-drop-panic <cdylib>
+# exit status: 0 (128 + signal means killed by that signal; 134 = SIGABRT)
+# stdout:
+    PROBE-CHILD kind=hand-drop-panic invoke=Ok poll=Pending
+    PROBE-CHILD kind=hand-drop-panic after-drop status=Ok(Ok)
+# stderr:
+    
+    thread '<unnamed>' (621458) panicked at crates/proto-plugin-cdylib/src/future.rs:1062:17:
+    author future panicked inside drop (hazard test)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

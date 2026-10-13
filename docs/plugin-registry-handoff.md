@@ -80,6 +80,44 @@ numbers are trusted. Its only output is partial scratch under
 lane there drafted a patch shape for open item O7, which is worth reading before
 that item is picked up.
 
+## Status as of round 3 (four lanes, verified in the parent, nothing folded)
+
+- Round three ran four lanes on their own copies under
+  `/tmp/metis-plugin-registry-round-3/`: shape (ABI and trait simplification plus
+  legacy-path decommission), reclaim (blocked-poll reclaim and the unload rule),
+  ownership (payload ownership plus a real C implementer), async-ffi (keep or
+  drop). All four completed and every headline number was re-run by the parent.
+- The record is `spikes/plugin-registry/FINDINGS4.md`, with the lane findings,
+  their evidence and the C plugin source preserved under
+  `spikes/plugin-registry/round-3/`, and the parent's own re-runs under
+  `round-3/verification/`.
+- Nothing is folded into the prototype: the operator asked for an approval round
+  on the final FFI/ABI and trait shape first. The proposal to approve is
+  `spikes/plugin-registry/CONTRACT-V2-PROPOSAL.md`, decisions D1 to D7.
+- Verified in the parent: shape 95/95 with the futures path on and 20/20 with the
+  legacy path compiled out (both in debug and release), reclaim 101/101 with zero
+  leaked ctx boxes and waker clones, ownership 92 host checks plus 14 C-probe
+  checks with a zero-live C ledger, async-ffi 100/100. The repository prototype
+  is untouched (`git status --porcelain` empty).
+- What round three settles, pending approval: one call path with no legacy
+  callbacks (D1); one capability-name-routed authoring method replacing the
+  four-arm vocabulary that caps a plugin at four capabilities (D2); `async-ffi`
+  is dropped, because a destructor panic in a plugin future aborts the daemon
+  with SIGABRT even for a plugin that returned `Ok` (D3); the unload rule is
+  quarantine plus one reclaim on a late poll, and the fixed 900 ms wait is
+  deleted (D4); the service ownership rules become contract text after a
+  hand-written C implementer drove them (D5); two unread vtable `size` fields are
+  deleted or read (D6); and the `metis.*` control plane moves onto the futures
+  path so `invoke` can be deleted rather than kept as an inline channel (D7).
+- Open items resolved or moved by round three: **O1** and **O2** designed and
+  proven, awaiting the operator's rule choice; **O3** written up, awaiting
+  contract text; **O4** resolved, drop the crate; **O5** becomes mostly moot
+  because D1 deletes the executor seam and the pool; **O7** becomes moot because
+  D1 deletes the landed `HostAdapter`, so no separate fix ticket is needed;
+  **O10** resolved for today's table by a real C implementer, and re-opened for
+  the v2 table if D1 and D2 are approved; **O16** answered by D2, awaiting
+  approval. Still untouched: O6, O8, O9, O11, O12, O13, O14, O15, O17, O18.
+
 ### How to run the prototype
 
 ```sh
@@ -336,7 +374,10 @@ settle.
 
 ## Next round (not started)
 
-This is the next step, not something already run. An earlier attempt was stopped
+Superseded in part: round three has now run (see the round 3 status above). What
+remains is the approval round on `CONTRACT-V2-PROPOSAL.md` and then the fold, not
+another round of the shape below. This is the historical plan the next step was
+drawn from, not something already run. An earlier attempt was stopped
 before producing findings, so start fresh from the repository copy. Reuse or
 ignore the abandoned scratch under `/tmp/metis-plugin-registry-round-2/` as you
 like.

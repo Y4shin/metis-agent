@@ -1,0 +1,58 @@
+NOTE cdylib: /tmp/metis-plugin-registry-round-3/shape/target/debug/libproto_plugin_cdylib.so
+NOTE built --no-default-features: the legacy invoke/complete path is compiled out
+
+== futures-only plugin registry
+PASS a futures-only cdylib was loaded from a library path
+PASS the futures-only plugin advertised only its future capabilities
+PASS schema discovery still works through the inline metis.schemas control plane
+PASS the registry routed a future capability by name
+PASS a native in-process plugin still registers behind the same seam
+
+== launch and await
+PASS launch returns a task and awaiting it returns the response
+PASS eight plugin futures are in flight at once and each answers its own launcher
+PASS the futures-only path spawned no plugin thread and no plugin runtime
+NOTE eight concurrent plugin futures completed in 84 us (10606 ns/future)
+PASS every waker clone the plugin made was released
+
+== futures-only hazards
+
+== host-polled future seam: hazards (lane 2)
+PASS the appended invoke_future/service_complete entries are present (presence decided by size)
+
+thread '<unnamed>' (655705) panicked at crates/proto-plugin-cdylib/src/future.rs:661:32:
+author future panicked inside poll (hazard test)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread '<unnamed>' (655705) panicked at crates/proto-plugin-cdylib/src/future.rs:661:32:
+author future panicked inside poll (hazard test)
+PASS 1 panic in the author's future becomes Internal, stays terminal, and drop still works
+
+thread '<unnamed>' (655705) panicked at crates/proto-plugin-cdylib/src/future.rs:809:17:
+author future panicked inside drop (hazard test)
+PASS 2 a panic in the future's drop shim does not abort and releases the buffer it still held
+
+thread 'main' (655705) panicked at crates/proto-host/src/future_driver.rs:278:13:
+host waker body panicked (hazard test)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+PASS 3 a panic in a host waker body is contained at the callback frame
+PASS 4 cancel wakes the future, which resolves as Cancelled, then the host drops it
+PASS 5 a plugin that ignores the cancel deadline is dropped after it, recorded, and the host stays usable
+PASS 6 double drop and drop after unload are refused, not undefined behaviour
+PASS 7 a waker clone that wakes after the future was dropped is reported, not crashed on
+PASS 8 a blocking poll is detected by a watchdog and reported, not allowed to hang the host
+PASS 9 the host never drops a future while a poll is in progress (ordering ledger)
+NOTE protocol violations recorded by the hazard run: 6
+NOTE violation (expected, recorded): future 268435460 missed the cancel deadline and was dropped by the host
+NOTE violation (expected, recorded): double drop of future 268435462 refused
+NOTE violation (expected, recorded): drop of future 268435463 after unload refused
+NOTE violation (expected, recorded): waker woken after future 268435464 was dropped
+NOTE violation (expected, recorded): poll for future 268435465 exceeded its 150ms deadline (blocking poll)
+NOTE violation (expected, recorded): a poll that blocked was detected by the watchdog and abandoned
+NOTE stale wakes detected (a waker clone woke after its future was dropped): 1
+
+== teardown
+PASS the library was dropped only after shutdown had returned
+NOTE teardown order: ["future host dropped", "shutdown returned", "library unloaded"]
+
+20 checks, 0 failures

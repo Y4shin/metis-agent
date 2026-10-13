@@ -1,0 +1,1 @@
+PASS the unload ordering holds for the C plugin: shutdown returned, then the future host dropped, then the library unloaded

@@ -1,0 +1,104 @@
+Lane async-ffi (round 3, O4): two-implementation comparison numbers.
+All measured in this copy, x86_64-linux, Rust nightly 1.101 (devenv shell).
+
+1. Per-call cost, one harness, release, from `future_bench::run` (BENCH lines of
+   artifacts/host-output-release-1.txt and -2.txt).
+
+   Same host-timer work, 2000 calls each (invoke_future + host timer
+   service_request + poll + drop):
+     run 1: async-ffi 4776 ns, hand-rolled async object 4530 ns, hand-written vtable 4431 ns
+     run 2: async-ffi 6069 ns, hand-rolled async object 6457 ns, hand-written vtable 6222 ns
+     run 3: async-ffi 7226 ns, hand-rolled async object 7079 ns, hand-written vtable 6652 ns
+
+   Same ready-on-first-poll work, 20000 calls each (invoke_future + 1 poll + drop):
+     run 1: async-ffi 899 ns, hand-rolled async object 880 ns, hand-written vtable 825 ns
+     run 2: async-ffi 902 ns, hand-rolled async object 885 ns, hand-written vtable 818 ns
+     run 3: async-ffi 738 ns, hand-rolled async object 584 ns, hand-written vtable 593 ns
+
+   Within-run deltas on the ready path, async-ffi minus hand-rolled object:
+     +19 ns (+2%), +17 ns (+2%), +154 ns (+26%). The three runs were taken under
+   different machine load (the concurrent host-timer loop moved from 5032 ns to
+   7382 ns between runs), so only the within-run deltas are meaningful, and they
+   do not settle a stable sign: the crate is a wash to a few percent slower.
+
+   The hand-written vtable was faster than the async-ffi object in all three
+   runs: -74 ns, -84 ns, -145 ns on the ready path. That gap is the price of
+   wrapping the author's future in a std::task::Waker, which both other objects
+   pay and the hand-written vtable does not.
+
+   The host-timer loop is dominated by the host timer round trip (last 1703 to
+   1804 ns, avg 1898 to 2004 ns over 2002 to 8002 samples) and by scheduler
+   noise: there the async-ffi object moved from +5% to -6% against the
+   hand-rolled object between runs, so that path cannot rank them at all.
+
+2. Plugin-side line counts of the three objects, from `count-impl-lines.sh`
+   (crates/proto-plugin-cdylib/src/future.rs, 1378 lines after this lane's
+   additions):
+
+     region                     total   code   lines containing `unsafe`
+     async-ffi object             271    213    13
+     hand-rolled async object     172    133     7
+     hand-written vtable          309    244    17
+     shared (waker bridge,
+       instrumentation, cancel,
+       pending map, probe types)  265    187    30
+
+   "code" excludes blank lines and comment-only lines. The probe-only types
+   (PanicOnDrop, PendingWithPanicGuard, ReadyThenPanicDrop) sit in the shared
+   region, not in either implementation.
+
+3. Footprint, two release cdylibs built from two clean target dirs so the
+   dependency codegen is identical:
+
+     CARGO_TARGET_DIR=/tmp/asyncffi-foot-ffi cargo build --release -p proto-plugin-cdylib
+     CARGO_TARGET_DIR=/tmp/asyncffi-foot-noffi cargo build --release -p proto-plugin-cdylib --no-default-features
+
+     with async-ffi:    1,139,912 bytes file, text 829,874, data 24,232, bss 4,480
+                        2,670 symbols, 641,420 symbol bytes
+                        25 `async_ffi::*` symbols, 2,725 bytes
+                        our async-ffi object code 4,868 bytes over 13 symbols
+                        our hand-rolled object code 4,695 bytes over 9 symbols
+     without:           1,117,184 bytes file, text 817,006, data 23,752, bss 1,408
+                        2,588 symbols, 632,367 symbol bytes
+                        0 `async_ffi::*` symbols
+                        our hand-rolled object code 5,787 bytes over 9 symbols
+
+     delta: 22,728 bytes file (2.0%), 12,868 bytes text (1.5%), 82 symbols,
+     9,053 symbol bytes. The delta also contains our own async-ffi object code
+     (4.9 KB of it), so the crate's own marginal text is on the order of 8 KB,
+     about 1% of the cdylib.
+
+     NEEDED dynamic libraries are identical in both: libgcc_s.so.1, libc.so.6,
+     ld-linux-x86-64.so.2. The cdylib exports exactly one dynamic symbol in
+     both: metis_plugin_entry_v1.
+
+     Note on method: a first measurement compared a whole-workspace build
+     against a partially rebuilt target directory and showed a 450 KB delta.
+     That number was an artifact of different dependency codegen attribution in
+     the two target directories and is discarded. Only the two clean builds
+     above are reported.
+
+4. Compile-time cost. Marginal rebuild of the cdylib crate only, after touching
+   src/future.rs, two runs each, wall clock in the devenv shell:
+
+     with async-ffi:    1.201 s, 1.311 s
+     without async-ffi: 1.210 s, 1.365 s
+
+   Indistinguishable. Dependency count from `cargo tree -p proto-plugin-cdylib
+   --prefix none --no-dedupe | sort -u | wc -l`: 25 packages with, 24 without.
+   `cargo tree -i async-ffi` shows async-ffi v0.5.1 as a leaf: it brings no
+   transitive dependency of its own.
+
+5. ABI surface. Both objects use exactly the same boundary types
+   (MetisFutureHandle, MetisFutureVtable, MetisWaker, MetisWakerVtable,
+   MetisBuffer, MetisStatus, MetisHostApiV1). Nothing from the crate crosses:
+   `grep -ci async crates/proto-abi/include/metis_plugin_abi.h` is 0. The
+   feature-off cdylib loads through the real ABI and answers `not_found` for the
+   async-ffi-backed capability:
+
+     PROTO_PLUGIN_LIB=/tmp/asyncffi-foot-noffi/release/libproto_plugin_cdylib.so \
+       target/release/proto-host --probe-child ffi-drop-panic
+     -> PROBE-CHILD kind=ffi-drop-panic invoke-failed status not_found (exit 2)
+
+   async-ffi's own `ABI_VERSION = 2` (src/lib.rs:148) stays crate-internal,
+   because `FfiFuture` is never the thing on the wire.

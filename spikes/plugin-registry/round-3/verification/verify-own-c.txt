@@ -1,0 +1,44 @@
+• Validating lock
+✓ Validating lock in 12.5ms
+  evaluating file '«nix-internal»/derivation-internal.nix'
+• Configuring shell
+• Configuring cachix
+✓ Configuring cachix in 1.56ms
+• Evaluating shell
+✓ Evaluating shell in 5.02ms (cached)
+✓ Configuring shell in 8.79ms
+• Loading tasks
+• Evaluating devenv.config.task.config
+✓ Evaluating devenv.config.task.config in 229µs (cached)
+✓ Loading tasks in 748µs
+• Running tasks
+• Running devenv:files:cleanup
+✓ Running devenv:files:cleanup in 7.48ms
+• Running devenv:enterShell
+✓ Running devenv:enterShell in 6.87ms
+✓ Running tasks in 14.7ms
+NOTE C plugin: /tmp/metis-plugin-registry-round-3/ownership/c-ownership/libmetis_c_plugin.so
+NOTE run nonce: ownership-651998
+c-plugin: run=ownership-651998 event=create_instance allocs=0 frees=0 live=0 double_frees=0 foreign_releases=0 unknown_releases=0 ready=0 service_payloads=0 frees_ready=0 frees_service=0 frees_legacy=0 late_completions=0 service_roundtrips=0 wake_calls=0 waker_clones=0 waker_releases=0 futures_created=0 futures_freed=0 futures_dropped=0 double_drops=0 polls=0 cross_thread_completions=0 instances=1 guard_tests=0
+PASS the hand-written C table answers the legacy discovery entry and the host releases its buffer
+NOTE accounting after load: {"alloc_failures":0,"allocs":1,"bad_envelope_in":0,"cancel_resolutions":0,"cancels":0,"create_host_size":48,"cross_thread_completions":0,"double_drops":0,"double_frees":0,"foreign_releases":0,"frees":1,"frees_legacy":1,"frees_ready":0,"frees_service":0,"futures_created":1,"futures_dropped":0,"futures_freed":0,"guard_tests":0,"host_owned_service_payloads":0,"impl":"c","instances":1,"late_completions":0,"legacy_buffers":1,"legacy_invoke_calls":0,"live":0,"live_overflow":0,"plugin_owned_service_payloads":0,"polls":1,"polls_ready":0,"ready_buffers":0,"service_host_size":56,"service_payloads":0,"service_request_failures":0,"service_roundtrips":0,"table_size":88,"unknown_releases":0,"wake_calls":0,"waker_clones":0,"waker_releases":0}
+PASS the C table's declared size covers both appended entries, and the C side saw the landed 48-byte create_instance host table with no service_request
+PASS the ready capability answers on its first poll with a plugin-allocated buffer, and the C side's own release guard refuses the host-owned request buffer
+PASS the ready buffer the host read was released through the C plugin's own release_buffer
+PASS the host answers the C plugin's service_request through service_complete, the plugin's cloned waker wakes the parked poll loop, and the future delivers its payload
+PASS the C implementer honours cancel: the wake resolves the future as Cancelled and the host drops it after a poll return
+PASS a future dropped while its service reply is in flight: the C plugin releases its waker clone, wakes nobody, and reports the late completion
+PASS the host is still usable after the late reply: a fresh C future answers and drops
+c-plugin: run=ownership-651998 event=create_instance allocs=11 frees=11 live=0 double_frees=0 foreign_releases=2 unknown_releases=0 ready=7 service_payloads=3 frees_ready=7 frees_service=3 frees_legacy=1 late_completions=2 service_roundtrips=3 wake_calls=2 waker_clones=3 waker_releases=3 futures_created=9 futures_freed=9 futures_dropped=9 double_drops=0 polls=12 cross_thread_completions=3 instances=2 guard_tests=2
+PASS the C instance lifecycle works: create_instance, destroy_instance, and a repeat destroy reported as not found
+NOTE accounting after all lane work: {"alloc_failures":0,"allocs":11,"bad_envelope_in":0,"cancel_resolutions":1,"cancels":1,"create_host_size":48,"cross_thread_completions":3,"double_drops":0,"double_frees":0,"foreign_releases":2,"frees":11,"frees_legacy":1,"frees_ready":7,"frees_service":3,"futures_created":10,"futures_dropped":9,"futures_freed":9,"guard_tests":2,"host_owned_service_payloads":3,"impl":"c","instances":2,"late_completions":2,"legacy_buffers":1,"legacy_invoke_calls":0,"live":0,"live_overflow":0,"plugin_owned_service_payloads":0,"polls":13,"polls_ready":7,"ready_buffers":7,"service_host_size":56,"service_payloads":3,"service_request_failures":0,"service_roundtrips":3,"table_size":88,"unknown_releases":0,"wake_calls":2,"waker_clones":3,"waker_releases":3}
+PASS the C plugin freed every buffer and every future it allocated, with zero double frees and zero releases of foreign pointers
+PASS the host side released exactly the service payloads the C side freed, and recorded no protocol violation of its own
+PASS every service answer was delivered on a different thread than the poll, so the C implementer had to be thread safe
+c-plugin: run=ownership-651998 event=shutdown allocs=12 frees=12 live=0 double_frees=0 foreign_releases=2 unknown_releases=0 ready=8 service_payloads=3 frees_ready=8 frees_service=3 frees_legacy=1 late_completions=2 service_roundtrips=3 wake_calls=2 waker_clones=3 waker_releases=3 futures_created=10 futures_freed=10 futures_dropped=10 double_drops=0 polls=13 cross_thread_completions=3 instances=2 guard_tests=2
+PASS the C plugin's own ledger, written at shutdown and read after the library unloaded, still reports zero live buffers, zero double frees and a balanced waker count
+PASS the unload ordering holds for the C plugin: shutdown returned, then the future host dropped, then the library unloaded
+NOTE teardown order: ["future host dropped", "shutdown returned", "library unloaded"]
+NOTE final C ledger line: run=ownership-651998 event=shutdown allocs=12 frees=12 live=0 double_frees=0 foreign_releases=2 unknown_releases=0 ready=8 service_payloads=3 frees_ready=8 frees_service=3 frees_legacy=1 late_completions=2 service_roundtrips=3 wake_calls=2 waker_clones=3 waker_releases=3 futures_created=10 futures_freed=10 futures_dropped=10 double_drops=0 polls=13 cross_thread_completions=3 instances=2 guard_tests=2
+
+14 checks, 0 failures

@@ -1,0 +1,10 @@
+# command: /tmp/metis-plugin-registry-round-3/asyncffi/target/release/proto-host --probe-child ffi-drop-panic <cdylib>
+# exit status: 134 (128 + signal means killed by that signal; 134 = SIGABRT)
+# stdout:
+    PROBE-CHILD kind=ffi-drop-panic invoke=Ok poll=Pending
+# stderr:
+    
+    thread '<unnamed>' (620373) panicked at crates/proto-plugin-cdylib/src/future.rs:389:9:
+    probe: a destructor inside the author's future panicked
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    async-ffi: abort due to panic across the FFI boundary in Future::drop

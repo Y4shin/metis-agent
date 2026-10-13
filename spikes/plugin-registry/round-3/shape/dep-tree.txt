@@ -1,0 +1,86 @@
+### ON (default features) cdylib dependency closure
+proto-plugin-cdylib v0.0.0 (/tmp/metis-plugin-registry-round-3/shape/crates/proto-plugin-cdylib)
+├── async-ffi v0.5.1
+├── proto-abi v0.0.0 (/tmp/metis-plugin-registry-round-3/shape/crates/proto-abi)
+│   [build-dependencies]
+│   └── cc v1.8.0
+│       ├── find-msvc-tools v0.1.14
+│       └── shlex v2.0.1
+├── proto-registry v0.0.0 (/tmp/metis-plugin-registry-round-3/shape/crates/proto-registry)
+├── proto-sdk v0.0.0 (/tmp/metis-plugin-registry-round-3/shape/crates/proto-sdk)
+│   └── proto-registry v0.0.0 (/tmp/metis-plugin-registry-round-3/shape/crates/proto-registry)
+├── schemars v1.2.3
+│   ├── dyn-clone v1.0.20
+│   ├── ref-cast v1.0.27
+│   │   └── ref-cast-impl v1.0.27 (proc-macro)
+│   │       ├── proc-macro2 v1.0.107
+│   │       │   └── unicode-ident v1.0.27
+│   │       ├── quote v1.0.47
+│   │       │   └── proc-macro2 v1.0.107 (*)
+│   │       └── syn v3.0.9
+│   │           ├── proc-macro2 v1.0.107 (*)
+│   │           ├── quote v1.0.47 (*)
+│   │           └── unicode-ident v1.0.27
+│   ├── schemars_derive v1.2.3 (proc-macro)
+│   │   ├── proc-macro2 v1.0.107 (*)
+│   │   ├── quote v1.0.47 (*)
+│   │   ├── serde_derive_internals v0.30.0
+│   │   │   ├── proc-macro2 v1.0.107 (*)
+│   │   │   ├── quote v1.0.47 (*)
+│   │   │   └── syn v3.0.9 (*)
+│   │   └── syn v3.0.9 (*)
+│   ├── serde v1.0.229
+│   │   ├── serde_core v1.0.229
+│   │   └── serde_derive v1.0.229 (proc-macro)
+│   │       ├── proc-macro2 v1.0.107 (*)
+│   │       ├── quote v1.0.47 (*)
+│   │       └── syn v3.0.9 (*)
+│   └── serde_json v1.0.154
+│       ├── itoa v1.0.18
+│       ├── memchr v2.8.3
+│       ├── serde_core v1.0.229
+│       └── zmij v1.0.23
+├── serde v1.0.229 (*)
+└── serde_json v1.0.154 (*)
+
+### OFF (--no-default-features) cdylib dependency closure
+proto-plugin-cdylib v0.0.0 (/tmp/metis-plugin-registry-round-3/shape/crates/proto-plugin-cdylib)
+├── async-ffi v0.5.1
+├── proto-abi v0.0.0 (/tmp/metis-plugin-registry-round-3/shape/crates/proto-abi)
+│   [build-dependencies]
+│   └── cc v1.8.0
+│       ├── find-msvc-tools v0.1.14
+│       └── shlex v2.0.1
+├── schemars v1.2.3
+│   ├── dyn-clone v1.0.20
+│   ├── ref-cast v1.0.27
+│   │   └── ref-cast-impl v1.0.27 (proc-macro)
+│   │       ├── proc-macro2 v1.0.107
+│   │       │   └── unicode-ident v1.0.27
+│   │       ├── quote v1.0.47
+│   │       │   └── proc-macro2 v1.0.107 (*)
+│   │       └── syn v3.0.9
+│   │           ├── proc-macro2 v1.0.107 (*)
+│   │           ├── quote v1.0.47 (*)
+│   │           └── unicode-ident v1.0.27
+│   ├── schemars_derive v1.2.3 (proc-macro)
+│   │   ├── proc-macro2 v1.0.107 (*)
+│   │   ├── quote v1.0.47 (*)
+│   │   ├── serde_derive_internals v0.30.0
+│   │   │   ├── proc-macro2 v1.0.107 (*)
+│   │   │   ├── quote v1.0.47 (*)
+│   │   │   └── syn v3.0.9 (*)
+│   │   └── syn v3.0.9 (*)
+│   ├── serde v1.0.229
+│   │   ├── serde_core v1.0.229
+│   │   └── serde_derive v1.0.229 (proc-macro)
+│   │       ├── proc-macro2 v1.0.107 (*)
+│   │       ├── quote v1.0.47 (*)
+│   │       └── syn v3.0.9 (*)
+│   └── serde_json v1.0.154
+│       ├── itoa v1.0.18
+│       ├── memchr v2.8.3
+│       ├── serde_core v1.0.229
+│       └── zmij v1.0.23
+├── serde v1.0.229 (*)
+└── serde_json v1.0.154 (*)

@@ -1,0 +1,12 @@
+### cfg-gated lines (occurrences of the feature gate)
+cdylib lib.rs: 34
+cdylib lib.rs (not- form): 5
+host main.rs: 6
+host main.rs (not- form): 2
+host abi_adapter.rs: 2
+ON  debug: cdylib 64953560 bytes, host 83189048 bytes
+OFF debug: cdylib 12803920 bytes, host 80835568 bytes
+delta cdylib: 52149640 bytes; host: 2353480 bytes
+ON  release: cdylib 1554520 bytes, host 7585288 bytes
+OFF release: cdylib 924328 bytes, host 7072328 bytes
+release delta cdylib: 630192 bytes (40%); host: 512960 bytes
