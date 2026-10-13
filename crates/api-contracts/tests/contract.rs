@@ -8,10 +8,12 @@
 use std::sync::Arc;
 
 use api_contracts::connect::metis::v1::{
-    DAEMON_SERVICE_SERVICE_NAME, DAEMON_SERVICE_STREAM_EVENTS_SPEC, DaemonService, DaemonServiceExt,
+    DAEMON_SERVICE_CANCEL_SPEC, DAEMON_SERVICE_SERVICE_NAME, DAEMON_SERVICE_STREAM_EVENTS_SPEC,
+    DaemonService, DaemonServiceExt,
 };
 use api_contracts::proto::metis::v1::{
-    EchoRequest, EchoResponse, Event, EventKind, PairRequest, PairResponse, StreamEventsRequest,
+    CancelOutcome, CancelRequest, CancelResponse, EchoRequest, EchoResponse, Event, EventKind,
+    PairRequest, PairResponse, StreamEventsRequest,
 };
 use buffa::Message;
 use connectrpc::{
@@ -29,6 +31,9 @@ const PAIR_PATH: &str = "metis.v1.DaemonService/Pair";
 
 /// The StreamEvents procedure path the contract declares.
 const STREAM_EVENTS_PATH: &str = "metis.v1.DaemonService/StreamEvents";
+
+/// The Cancel procedure path the contract declares.
+const CANCEL_PATH: &str = "metis.v1.DaemonService/Cancel";
 
 #[test]
 fn echo_request_matches_the_declared_wire_format() {
@@ -169,6 +174,42 @@ fn stream_events_is_declared_as_a_server_stream() {
     );
 }
 
+/// The cancel call is an ordinary unary RPC on the service's own procedure
+/// path, and its two messages carry the identifier in and the outcome out.
+#[test]
+fn cancel_is_declared_as_a_unary_call_with_an_outcome() {
+    assert_eq!(
+        DAEMON_SERVICE_CANCEL_SPEC.procedure,
+        "/metis.v1.DaemonService/Cancel"
+    );
+    assert_eq!(DAEMON_SERVICE_CANCEL_SPEC.stream_type, StreamType::Unary);
+
+    let request = CancelRequest {
+        request_id: "cli-7".to_owned(),
+        ..Default::default()
+    };
+    // Field 1, wire type 2 (length-delimited): 0x0a, then the length and bytes.
+    assert_eq!(request.encode_to_vec(), b"\x0a\x05cli-7");
+
+    let response = CancelResponse {
+        outcome: CancelOutcome::Cancelled.into(),
+        ..Default::default()
+    };
+    // Field 1, wire type 0 (varint): 0x08, then the outcome's number.
+    assert_eq!(response.encode_to_vec(), b"\x08\x01");
+    assert_eq!(CancelOutcome::Cancelled as i32, 1, "a cancelled request");
+    assert_eq!(
+        CancelOutcome::AlreadyFinished as i32,
+        2,
+        "the idempotent answer"
+    );
+    assert_eq!(CancelOutcome::Unspecified as i32, 0, "not set");
+
+    let decoded = CancelRequest::decode(&mut request.encode_to_vec().as_slice())
+        .expect("CancelRequest decodes what it encoded");
+    assert_eq!(decoded, request);
+}
+
 /// A stand-in service implementation. Nothing serves it here; this proves the
 /// generated trait is implementable from outside the crate.
 struct DummyDaemon;
@@ -215,6 +256,19 @@ impl DaemonService for DummyDaemon {
             ..Default::default()
         })]))
     }
+
+    /// Nothing in flight: enough to prove the cancel method is implementable
+    /// from outside the crate.
+    async fn cancel(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, CancelRequest>,
+    ) -> ServiceResult<CancelResponse> {
+        Response::ok(CancelResponse {
+            outcome: CancelOutcome::AlreadyFinished.into(),
+            ..Default::default()
+        })
+    }
 }
 
 #[test]
@@ -225,13 +279,18 @@ fn generated_service_trait_registers_its_route_on_a_router() {
     assert!(!Router::new().has_method(ECHO_PATH));
     assert!(!Router::new().has_method(PAIR_PATH));
     assert!(!Router::new().has_method(STREAM_EVENTS_PATH));
+    assert!(!Router::new().has_method(CANCEL_PATH));
 
     let router = Arc::new(DummyDaemon).register(Router::new());
 
     assert!(router.has_method(ECHO_PATH));
     assert!(router.has_method(PAIR_PATH));
     assert!(router.has_method(STREAM_EVENTS_PATH));
+    assert!(router.has_method(CANCEL_PATH));
     let mut methods = router.methods().collect::<Vec<_>>();
     methods.sort_unstable();
-    assert_eq!(methods, vec![ECHO_PATH, PAIR_PATH, STREAM_EVENTS_PATH]);
+    assert_eq!(
+        methods,
+        vec![CANCEL_PATH, ECHO_PATH, PAIR_PATH, STREAM_EVENTS_PATH]
+    );
 }

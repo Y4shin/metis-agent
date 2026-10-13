@@ -20,12 +20,19 @@
 //! `auth` is the credential's wire vocabulary, `keychain` is the platform's
 //! keychain, reached through its command line tool, and `time` is the stamp
 //! format the contract's `received_at` field asks for.
+//!
+//! `request` is the identifier a caller declares on a call it may want to stop
+//! and the echo that returns it, and `cancel` is the registry of the work such a
+//! call has in flight. The daemon and the client's in-process service share both,
+//! so a stream is cancellable the same way whichever one serves it.
 
 pub mod auth;
+pub mod cancel;
 pub mod connect;
 pub mod events;
 pub mod identity;
 pub mod keychain;
 pub mod proto;
+pub mod request;
 pub mod time;
 pub mod transport;

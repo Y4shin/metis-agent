@@ -223,6 +223,7 @@ version = "0.0.0"
 dependencies = [
  "api-contracts",
  "connectrpc",
+ "getrandom 0.4.3",
  "http",
  "hyper",
  "hyper-util",

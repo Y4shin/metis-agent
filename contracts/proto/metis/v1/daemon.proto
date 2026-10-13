@@ -1,8 +1,8 @@
 // The daemon's wire contract, first version.
 //
-// Two ordinary RPCs and the event stream. Later tickets append cancellation to
-// the same service and package. Changing or removing what is here already
-// breaks clients, and `buf breaking` in FILE mode is the gate that catches it.
+// Three ordinary RPCs, the event stream, and cancellation. Changing or removing
+// what is here already breaks clients, and `buf breaking` in FILE mode is the
+// gate that catches it.
 
 syntax = "proto3";
 
@@ -26,6 +26,13 @@ service DaemonService {
   // response is the event itself rather than a named response wrapper, which is
   // why this RPC carries the one lint exception in `buf.yaml`.
   rpc StreamEvents(StreamEventsRequest) returns (stream Event);
+
+  // Stop the in-flight work a caller started under the request identifier it
+  // declared. The call is idempotent: it stops what is in flight and reports
+  // whether anything was, so a caller that repeats it is answered rather than
+  // refused. Work is keyed by the declaring surface and the identifier, so a
+  // cancel stops only work its own surface started.
+  rpc Cancel(CancelRequest) returns (CancelResponse);
 }
 
 message EchoRequest {
@@ -71,6 +78,21 @@ message StreamEventsRequest {
   // `metis-cursor-error: expired` response header, and the caller answers by
   // opening a cursorless stream, which begins with the snapshot.
   uint64 last_event_id = 2;
+}
+
+// The request identifier whose work should stop.
+message CancelRequest {
+  // The identifier the work declared as request metadata, in the spelling the
+  // `metis-request-id` header carries: at most 64 bytes, every byte in
+  // `0x21..=0x7E`. An identifier this daemon cannot act on is refused as an
+  // invalid argument rather than treated as work that was never seen.
+  string request_id = 1;
+}
+
+// What a cancel call did.
+message CancelResponse {
+  // Whether anything was in flight under the identifier.
+  CancelOutcome outcome = 1;
 }
 
 // One message on an event stream: the snapshot that opens a stream with no
@@ -119,4 +141,21 @@ enum EventKind {
 
   // A published event.
   EVENT_KIND_EVENT = 3;
+}
+
+// What a cancel call did.
+enum CancelOutcome {
+  // Not set. A receiver treats it as an answer it cannot act on.
+  CANCEL_OUTCOME_UNSPECIFIED = 0;
+
+  // An in-flight request under that identifier was found and is being stopped.
+  // What the work already published stays published: cancellation stops work,
+  // it does not undo it.
+  CANCEL_OUTCOME_CANCELLED = 1;
+
+  // Nothing was in flight under that identifier: the work finished, was already
+  // cancelled, or was never seen. A caller reads this as "already finished",
+  // which is what makes a repeated cancel idempotent and what keeps the answer
+  // from telling a caller whether an identifier it does not own exists.
+  CANCEL_OUTCOME_ALREADY_FINISHED = 2;
 }
