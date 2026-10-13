@@ -50,11 +50,18 @@ jobs:
         env:
           # The two codegen plugins are BSR remote plugins, so this step
           # resolves them over the network. A configured secret lifts the
-          # anonymous rate limit; an absent secret arrives as the empty string,
-          # which buf treats like an unset variable (measured), so the gate
-          # still works unauthenticated.
+          # anonymous rate limit.
           BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
-        run: devenv shell -- bash scripts/regenerate-contracts.sh --check
+        run: |
+          # An absent secret arrives here as the empty string. Measured on buf
+          # 1.73.0: an empty `BUF_TOKEN` is treated like an unset one, while a
+          # non-empty token the BSR cannot verify is refused before any plugin
+          # resolves. The step does not rely on that distinction: it drops the
+          # variable when the secret carries nothing, so buf is either given a
+          # real token or no variable at all, and the gate keeps working
+          # without authentication.
+          if [ -z "${BUF_TOKEN:-}" ]; then unset BUF_TOKEN; fi
+          devenv shell -- bash scripts/regenerate-contracts.sh --check
 
       # The harness rebuilds the fixture cdylib itself before loading it, so a
       # stale library cannot be loaded even when this step follows a cached
