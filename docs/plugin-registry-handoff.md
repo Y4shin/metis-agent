@@ -4,6 +4,18 @@ Entry point for continuing the plugin-boundary work. It carries the objective,
 the condensed context, the prototyping toolbox, what is already answered, what is
 still open, and how to resume the task workflow afterwards.
 
+## Start here
+
+1. Read this document end to end.
+2. Read `spikes/plugin-registry/README.md`, then its `FINDINGS3.md` for the
+   detailed record, and `spikes/plugin-registry/SEAM-SPEC.md` for the contract.
+3. Run the prototype once to see it green, with the commands under "How to run
+   the prototype".
+4. Then either resume the task workflow as described at the bottom, or, if the
+   operator asks for prototyping, run the round described under "Next round (not
+   started)".
+5. Report before starting anything that spends significant effort.
+
 ## Objective
 
 Keep prototyping until every important question is answered, both the ones listed
@@ -17,6 +29,10 @@ current prototype, or several agents on their own copies for independent
 questions), let the parent analyse the findings, fold the agreed findings back
 into the main prototype with one writer, update this document, and repeat until
 the open list is empty of things that matter.
+
+A round runs only when the operator asks for one. This loop describes how the
+work proceeds once they do; it is not a standing instruction to start
+prototyping. When unsure, report and wait.
 
 ## Notifications
 
@@ -42,10 +58,16 @@ back. The same convention applies to every session that continues this work:
 - It is green: **92 checks, 0 failures, exit 0** in debug and release, with the
   legacy callback path, the plugin registry, both-direction schema validation,
   version gating, and the host-polled future seam all present.
-- A pre-seam snapshot is kept at `~/.local/share/metis/prototypes/plugin-registry`.
-  The three seam lane copies are at `/tmp/metis-plugin-registry-prototype-c1`,
-  `-c2`, `-c3`.
-- The written seam contract is `spikes/plugin-registry/SEAM-SPEC.md`.
+- Durable: a pre-seam snapshot is kept at
+  `~/.local/share/metis/prototypes/plugin-registry`.
+- Ephemeral, expect these to vanish and do not depend on them: the seam lane
+  copies at `/tmp/metis-plugin-registry-prototype-c1`, `-c2`, `-c3`, the earlier
+  candidate copies at `/tmp/metis-plugin-registry-prototype-cand-a` and `-cand-b`,
+  and the round-2 scratch under `/tmp/metis-plugin-registry-round-2/`. Their
+  results are already folded into the repository prototype and its findings.
+- The written seam contract is `spikes/plugin-registry/SEAM-SPEC.md`, and the
+  source summary of the async approaches that started this work is committed
+  beside it at `spikes/plugin-registry/context/async-ffi-summary.md`.
 - Findings: `FINDINGS.md` (registry shape, dyn compatibility, type erasure),
   `FINDINGS2.md` (async and lifecycle surface, registry proper, descriptor and
   naming fixes), `FINDINGS3.md` (the folded host-polled future seam, hazard
@@ -329,7 +351,8 @@ Fan out one copy per lane under a fresh round directory, one writer per copy:
    small ticket in `plugin-contract`, not a prototype.
 
 Then fold the agreed findings into `spikes/plugin-registry` with one writer, add
-`FINDINGS4.md`, update this document's open list, and start the next round.
+`FINDINGS4.md`, update this document's open list, report the round to the
+operator, and wait for them before starting another round.
 
 ## Where findings go
 

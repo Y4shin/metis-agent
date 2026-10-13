@@ -52,6 +52,10 @@ path, so it drives the landed ABI types rather than a copy.
   and the descriptor and naming fixes.
 - `FINDINGS3.md`: the folded host-polled future seam, the hazard handling, the
   versioning and compatibility evidence, and the measurements.
+- `SEAM-SPEC.md`: the written contract the seam implements, which every lane in a
+  prototyping round works against.
+- `context/async-ffi-summary.md`: the source summary of the async approaches that
+  started this work.
 - Still open, recorded in `FINDINGS3.md`: reclaiming an abandoned blocking poll;
   unloading while a blocked poll is still inside plugin code; payload ownership
   for the two host-service entries; and the fact that only one implementation
