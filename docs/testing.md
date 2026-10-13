@@ -60,13 +60,22 @@ Plugin ABI, documented in `crates/plugin-contract/src/abi` and
   the hazard set, printing one `[ok]` or `[fail]` line per check, the teardown
   ordering as it happens, and a `[result] PASS`/`FAIL` line; it exits non-zero on
   any failure. The harness rebuilds the fixture library first, so a stale `.so`
-  is never loaded.
+  is never loaded. It also carries the compatibility checks: the entry symbol
+  resolved for this major against a library built for another one, the
+  per-capability version gate, a request body carrying a field this build does
+  not know, and, on Linux, tables placed against a page with no access, so a
+  reader that touched an entry past the reported size would fault rather than
+  quietly read it.
 - `bash scripts/build-c-plugin.sh` -- compile the C implementer of the table
   (`crates/plugin-fixture/c/c-plugin.c`) with `-std=c11 -Wall -Wextra -Werror`
   under both gcc and clang, and leave the gcc build at
   `target/c-plugin/libcplugin.so`. The ABI harness runs this script itself and
   then drives that library end to end, so the header is proven usable by a
-  compiler other than rustc and by a plugin that is not the fixture.
+  compiler other than rustc and by a plugin that is not the fixture. The same
+  script compiles `crates/plugin-fixture/c/other-major-plugin.c` into
+  `target/c-plugin/libother-major.so`: a library whose only `metis_*` symbol is
+  `metis_plugin_entry_v2`, which the harness resolves the v1 entry symbol
+  against to require a typed major refusal.
 - `bash scripts/regenerate-abi-header.sh` -- regenerate the committed C header
   from the `repr(C)` Rust; `--check` regenerates into a scratch file and fails
   on any difference.

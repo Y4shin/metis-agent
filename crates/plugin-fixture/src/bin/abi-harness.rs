@@ -23,6 +23,16 @@
 //! plugin's own `release_buffer`, polls the plugin's futures on threads it
 //! owns, and compares its counters with the fixture's ledger. Nothing here
 //! reimplements the ABI.
+//!
+//! It also carries the version tolerance checks, which are about compiled
+//! versions rather than about one table: a table with an entry appended after
+//! this build's last one (the reader stops at its own layout), the retired
+//! pre-release minor refused before any entry is read, a library built for
+//! another ABI major refused at symbol resolution with a typed error, one
+//! capability refused by descriptor version while the plugin keeps serving, and
+//! a request body carrying a field this build does not know. On Linux the
+//! reader's restraint is asserted by memory that cannot be read: the guarded
+//! table probes below.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
