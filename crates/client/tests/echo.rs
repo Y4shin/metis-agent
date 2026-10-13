@@ -8,7 +8,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use api_contracts::connect::metis::v1::DaemonServiceClient;
 use api_contracts::proto::metis::v1::EchoRequest;
@@ -124,16 +123,17 @@ async fn serve_stream_serves_a_router_over_a_duplex_stream() {
         .expect("the duplex stream carries the call");
 
     assert_eq!(response.view().message, "hello over a duplex");
-    // The contract says `received_at` is an RFC 3339 UTC string.
-    assert!(
-        response.view().received_at.ends_with('Z'),
-        "received_at is an RFC 3339 UTC stamp, got {:?}",
-        response.view().received_at
-    );
-
-    // Keep the test bounded: `#[tokio::test]` uses a current-thread runtime,
-    // and the server task above completes when the connection closes.
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // The contract says `received_at` is an RFC 3339 UTC string, so the stamp
+    // has that shape independent of the clock the test runs at.
+    let stamp = response.view().received_at;
+    assert_eq!(stamp.len(), 20, "RFC 3339 UTC seconds, got {stamp:?}");
+    assert!(stamp.starts_with("20"), "a plausible year, got {stamp:?}");
+    assert_eq!(stamp.as_bytes()[4], b'-');
+    assert_eq!(stamp.as_bytes()[7], b'-');
+    assert_eq!(stamp.as_bytes()[10], b'T');
+    assert_eq!(stamp.as_bytes()[13], b':');
+    assert_eq!(stamp.as_bytes()[16], b':');
+    assert!(stamp.ends_with('Z'), "a UTC marker, got {stamp:?}");
 }
 
 /// The wrapper reaches the skeleton over a real socket and returns the echoed
