@@ -113,15 +113,16 @@ fn main() -> ExitCode {
 
     // --- the entry symbol --------------------------------------------------
 
-    let entry = unsafe { library.get::<MetisPluginEntryV1Fn>(METIS_PLUGIN_ENTRY_V1) };
-    let table_ptr = match &entry {
+    // The library's exported `metis_*` symbols are read before the entry symbol
+    // is resolved, because the resolution error names the major a library
+    // exports instead of this build's symbol.
+    let symbols = metis_dynamic_symbols(&path);
+    let exported = symbols.clone().unwrap_or_default();
+
+    let table_ptr = match resolve_entry(&library, &exported) {
         Ok(entry) => unsafe { entry() },
-        Err(err) => {
-            checks.check(
-                false,
-                "symbol.entry_v1_resolved",
-                format!("dlsym failed: {err}"),
-            );
+        Err(error) => {
+            checks.check(false, "symbol.entry_v1_resolved", error.to_string());
             return checks.report();
         }
     };
@@ -133,17 +134,7 @@ fn main() -> ExitCode {
         return checks.report();
     }
 
-    let wrong_major = unsafe { library.get::<MetisPluginEntryV1Fn>(b"metis_plugin_entry_v2\0") };
-    checks.check(
-        wrong_major.is_err(),
-        "symbol.wrong_major_absent",
-        match &wrong_major {
-            Ok(_) => "metis_plugin_entry_v2 unexpectedly resolved".to_string(),
-            Err(err) => format!("metis_plugin_entry_v2 lookup failed: {err}"),
-        },
-    );
-
-    match metis_dynamic_symbols(&path) {
+    match symbols {
         Ok(symbols) => {
             checks.check(
                 symbols == vec!["metis_plugin_entry_v1".to_string()],
@@ -263,6 +254,7 @@ fn main() -> ExitCode {
     run_hazard_checks(&mut checks, &state, instance);
 
     drive_c_plugin(&mut checks);
+    drive_other_major_plugin(&mut checks);
 
     // --- teardown: quiesce, drop, then unload ------------------------------
 
@@ -458,6 +450,89 @@ fn fixture_library_path() -> PathBuf {
         "libplugin_fixture.so"
     };
     directory.join(name)
+}
+
+/// Why this build's entry symbol did not resolve from a library.
+///
+/// The loader's own error names the byte string it searched for, which is a fact
+/// about the loader and not about the plugin. A host reports what it learned
+/// about the plugin instead: the symbol name carries the ABI major, so a library
+/// that exports only another major's entry symbol is a plugin built for that
+/// major. `plugin-runtime` inherits this shape when it owns library loading;
+/// until then the probe lives here.
+#[derive(Debug)]
+enum EntryError {
+    /// The library exports no entry symbol for this build's major, and it does
+    /// export one for another major.
+    MajorMismatch {
+        /// The major this build speaks.
+        expected: u32,
+        /// The major the library exports an entry symbol for.
+        found: u32,
+    },
+    /// The library exports no `metis_plugin_entry_v*` symbol at all, so it is
+    /// not a plugin this host can load. The loader's own message is the detail.
+    NoEntrySymbol {
+        /// The major this build speaks.
+        expected: u32,
+        /// What the loader said, kept as detail rather than as the error.
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for EntryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EntryError::MajorMismatch { expected, found } => write!(
+                f,
+                "the plugin exports the entry symbol for ABI major {found}, and this build speaks major {expected}"
+            ),
+            EntryError::NoEntrySymbol { expected, detail } => write!(
+                f,
+                "the plugin exports no entry symbol for ABI major {expected}: {detail}"
+            ),
+        }
+    }
+}
+
+/// The ABI majors a library exports an entry symbol for.
+fn exported_entry_majors(exported: &[String]) -> Vec<u32> {
+    exported
+        .iter()
+        .filter_map(|name| name.strip_prefix("metis_plugin_entry_v"))
+        .filter_map(|major| major.parse().ok())
+        .collect()
+}
+
+/// Resolves this build's entry symbol, reporting a typed refusal.
+///
+/// This is the resolution half of the major check, and it runs before any table
+/// exists: a plugin built for another major exports `metis_plugin_entry_v<its
+/// major>` and not this build's symbol, so no table pointer is ever obtained and
+/// nothing in a table is read.
+fn resolve_entry(
+    library: &Library,
+    exported: &[String],
+) -> Result<MetisPluginEntryV1Fn, EntryError> {
+    // SAFETY: the caller loaded this library and keeps it alive for the call.
+    match unsafe { library.get::<MetisPluginEntryV1Fn>(METIS_PLUGIN_ENTRY_V1) } {
+        Ok(entry) => Ok(*entry),
+        Err(err) => {
+            let other = exported_entry_majors(exported)
+                .into_iter()
+                .find(|major| *major != METIS_ABI_MAJOR);
+            Err(match other {
+                Some(found) => EntryError::MajorMismatch {
+                    expected: METIS_ABI_MAJOR,
+                    found,
+                },
+                None => EntryError::NoEntrySymbol {
+                    expected: METIS_ABI_MAJOR,
+                    detail: err.to_string(),
+                },
+            })
+        }
+    }
 }
 
 /// The `metis_*` symbols the library defines dynamically (seam: entry symbol).
@@ -853,11 +928,7 @@ impl Default for WatchdogOutcome {
 /// through the same host driver as the fixture, and the C side's own ledger has
 /// to agree with the host's counters at the end.
 fn drive_c_plugin(checks: &mut Checks) {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|crates| crates.parent())
-        .expect("the repository root")
-        .to_path_buf();
+    let root = repo_root();
     let script = root.join("scripts/build-c-plugin.sh");
     let compiled = Command::new("bash").arg(&script).output();
     match compiled {
@@ -1083,6 +1154,90 @@ fn drive_c_plugin(checks: &mut Checks) {
     // library may go.
     drop(library);
     state.order("the C library unloaded after destroy");
+}
+
+/// A plugin built for another ABI major.
+///
+/// The symbol name carries the major, so this host cannot resolve a v2 plugin's
+/// entry symbol at all: there is no table pointer to read, and the refusal names
+/// the major the plugin exports instead of the loader's own byte string. The
+/// library is the one `scripts/build-c-plugin.sh` compiles, which is the same
+/// step the C section above runs, so this section follows it.
+fn drive_other_major_plugin(checks: &mut Checks) {
+    let path = repo_root().join("target/c-plugin/libother-major.so");
+    if !checks.check(
+        path.exists(),
+        "symbol.other_major_library_present",
+        path.display(),
+    ) {
+        return;
+    }
+    // SAFETY: the harness built this library from the tree it is testing.
+    let library = match unsafe { Library::new(&path) } {
+        Ok(library) => library,
+        Err(err) => {
+            checks.check(
+                false,
+                "symbol.other_major_library_loaded",
+                format!("dlopen failed: {err}"),
+            );
+            return;
+        }
+    };
+    checks.check(
+        true,
+        "symbol.other_major_library_loaded",
+        "the library built for major 2 loads",
+    );
+
+    let symbols = match metis_dynamic_symbols(&path) {
+        Ok(symbols) => symbols,
+        Err(err) => {
+            checks.check(false, "symbol.other_major_exactly_one_symbol", err);
+            return;
+        }
+    };
+    checks.check(
+        symbols == vec!["metis_plugin_entry_v2".to_string()],
+        "symbol.other_major_exactly_one_symbol",
+        format!("nm -D --defined-only reports {symbols:?}"),
+    );
+
+    // The refusal: typed, naming both majors, and reached without a table.
+    match resolve_entry(&library, &symbols) {
+        Err(
+            error @ EntryError::MajorMismatch {
+                expected: 1,
+                found: 2,
+            },
+        ) => {
+            checks.check(true, "symbol.other_major_typed_error", format!("{error}"));
+        }
+        Ok(_) => {
+            checks.check(
+                false,
+                "symbol.other_major_typed_error",
+                "the v1 entry symbol resolved in a plugin built for another major",
+            );
+        }
+        Err(other) => {
+            checks.check(
+                false,
+                "symbol.other_major_typed_error",
+                format!("the refusal is not the typed major mismatch: {other}"),
+            );
+        }
+    }
+    drop(library);
+}
+
+/// The repository root, which is where the build scripts and their outputs live.
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|crates| crates.parent())
+        .expect("the repository root")
+        .to_path_buf()
 }
 
 /// The outcome of one driven call.
