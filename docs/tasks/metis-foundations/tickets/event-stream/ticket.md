@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Event stream with snapshot and identifier
 status: stable
-workflow_state: ready
-blocked_by: [local-transport-rpc-skeleton]
+workflow_state: done
+blocked_by:
+- local-transport-rpc-skeleton
 size: m
 ---
 
@@ -74,3 +75,13 @@ replaces it; two `HEARTBEAT_DEFAULT` constants (`daemon::service` and
 (25 ms heartbeat against 5 s bounds) and showed no flake in three repeats; and
 `crates/client/Cargo.toml` carries a cosmetic double blank line, which no gate
 reads.
+
+Knowledge harvested at finalize: the effort map gained the decision bullet for
+the realtime path, and its BSR fog entry now records that the local machine is
+authenticated through `~/.netrc` while the CI repository secret is still
+outstanding. The deviation report records `EVENT_CAPACITY` as 1024 in both
+`daemon::service` and `client::skeleton`; the landed values are 1024 and 64, the
+skeleton's deliberately smaller, and the arch spec carries the measured values.
+The chain history is worth knowing: the first run timed out during tdd only
+because the contract drift check was rate limited, and the retry re-verified the
+already-complete tree unchanged.

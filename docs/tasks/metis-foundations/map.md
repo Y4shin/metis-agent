@@ -303,6 +303,17 @@ streaming assumptions before anything is built on top.
   header and reach the client as typed errors. Closing pairing is a state, not a
   revocation: a surface paired earlier keeps serving until its token row is
   deleted.
+- The realtime path is real: `metis.v1` gained a server-streaming `StreamEvents`
+  RPC with a channel selection and a `last_event_id` cursor, `Event` carrying a
+  daemon-wide monotonic identifier, an `EventKind` and a JSON-text payload, and
+  `EventKind` is the contract's first enum. `api-contracts::events` holds the
+  bounded ring (`publish`, `latest_id`, `snapshot`, `since`, `earliest_resumable`,
+  `subscribe`, and one `stream(...)` assembly shared by the daemon and the
+  in-process test service), the daemon serves it with heartbeats as ordinary
+  messages, and the client drains it through `Client::stream_events`. The stream
+  is authorized at establishment, so the credential policy covers streaming as
+  well as unary calls, and both the stream over TCP and its paired-token case are
+  asserted.
 - A listener mounts a `ConnectRpcService`, not a `Router`: `connectrpc` 0.9.1
   keeps the interceptor chain on the service, so a policy cannot travel through a
   `Router`. `serve_uds_service` mounts one on the Unix socket and
@@ -341,10 +352,13 @@ streaming assumptions before anything is built on top.
   means for the auth and error model.
 - Whether the contract pipeline's BSR dependency should stay anonymous: the
   regeneration and drift checks resolve both pinned plugins from the BSR over the
-  network on every run, anonymous rate limiting can fail them for a non-code
-  reason, and CI now lifts that limit with a `BUF_TOKEN` when the secret exists.
-  Recording a real token in the repository secret is a human action; until it is
-  done, a pull request can still go red on rate limiting and needs a re-run.
+  network on every run, and an anonymous rate limit failed them for a non-code
+  reason, which timed out an `event-stream` chain after its work was complete. The
+  local machine is now authenticated, because the operator installed a token with
+  `buf registry login --token-stdin` and the credential lives in `~/.netrc` rather
+  than in the repository; the CI side still needs the `BUF_TOKEN` repository
+  secret, which remains a human action, and until it is set a pull request can go
+  red on rate limiting and need a re-run.
 - How the client distinguishes a deliberate slow-consumer stream drop from a
   transport failure, so the resync decision is not guesswork.
 - The endpoint override's variable name is a private constant in `client`, so the
