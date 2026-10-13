@@ -294,6 +294,15 @@ streaming assumptions before anything is built on top.
   carries it on TCP. The client keeps its token in the keychain or in a 600 file
   under the data directory and attaches it as a default header, and
   `Client::with_surface` is fallible because it loads that credential.
+- Remote pairing is real and optional: an absent or empty `METIS_PRESHARED_KEY`
+  resolves to `None`, which closes pairing while every other call keeps serving,
+  and a configured reference that cannot be resolved stays a loud error. A
+  remote client pairs over the TCP listener with the preshared key and then
+  serves authenticated calls on the same transport, and the three refusals
+  (disabled, wrong key, already paired) cross the wire in the `metis-pair-error`
+  header and reach the client as typed errors. Closing pairing is a state, not a
+  revocation: a surface paired earlier keeps serving until its token row is
+  deleted.
 - A listener mounts a `ConnectRpcService`, not a `Router`: `connectrpc` 0.9.1
   keeps the interceptor chain on the service, so a policy cannot travel through a
   `Router`. `serve_uds_service` mounts one on the Unix socket and
@@ -312,6 +321,11 @@ streaming assumptions before anything is built on top.
   proxy, there is no certificate for the daemon to present and no fingerprint for
   it to pin, so the question is what a client should verify about a proxied
   endpoint beyond the proxy's own certificate validation.
+- Pairing over a network-reachable listener has no rate limit and no lockout, so
+  repeated guesses at the preshared key are slowed only by the network.
+  `remote-pairing` recorded it, no ticket owns it yet, and it matters most once
+  the remote listener runs behind a proxy, which is when the listener becomes
+  reachable by anything the proxy exposes.
 - Windows pipe verification, from the `windows-pipe-security` findings: the exact
   error a remote client observes, whether a low-integrity same-user process is
   denied, and the Windows runner needed for the descriptor and pipe-mode

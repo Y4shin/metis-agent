@@ -3,8 +3,10 @@ type: ticket
 subtype: feature
 title: Pairing over the remote listener
 status: stable
-workflow_state: ready
-blocked_by: [pairing-and-tokens, serve-tcp-service]
+workflow_state: done
+blocked_by:
+- pairing-and-tokens
+- serve-tcp-service
 size: s
 ---
 
@@ -72,3 +74,9 @@ targets have none; the event-stream half of criterion 2, owned by
 `event-stream`; closed pairing as a state and not a revocation; no rate limit or
 lockout on repeated attempts; and the daemon binary still mounting no listener,
 which remains the daemon effort's.
+
+Knowledge harvested at finalize: the effort map gained the decision bullet for
+remote pairing and a fog entry for the missing pairing rate limit and lockout,
+which no ticket owns yet. `docs/dev-env.md` and `docs/testing.md` already carried
+the optional-key rule and the remote run commands from the implementation, so
+they needed no further change.
