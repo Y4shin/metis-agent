@@ -879,6 +879,24 @@ mod tests {
             assert_eq!(mode_of(&directory), 0o755, "the directory is not chmodded");
         }
 
+        /// The same rule follows the configured group: with a group the mode
+        /// may be 770, and anything wider is still refused untouched.
+        #[test]
+        fn a_directory_wider_than_the_group_mode_is_refused() {
+            let (name, _group) = a_group_the_process_belongs_to();
+            let base = TempDir::new("group-wide");
+            let directory = base.join("shared");
+            std::fs::create_dir(&directory).expect("create the pre-existing directory");
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777))
+                .expect("widen the pre-existing directory");
+
+            let grouped = SocketGroupEnv::set(&name);
+            ensure_socket_dir(&directory.join("daemon.sock"))
+                .expect_err("mode 777 is wider than 770");
+            assert_eq!(mode_of(&directory), 0o777, "the directory is not chmodded");
+            drop(grouped);
+        }
+
         /// A symlink is refused rather than followed, so the ACL cannot be
         /// aimed at a directory the daemon was not told about.
         #[test]
