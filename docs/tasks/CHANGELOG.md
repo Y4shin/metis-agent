@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Remote TCP listener, off by default (tcp-listener)
+
+The daemon's service is now reachable over TCP when `METIS_TCP_ADDR` names an `IP:port` literal, and no socket is opened when it does not: there is no default bind address, an absent or empty value disables the listener, and a malformed value is a typed `ConfigError` rather than a silent disable. `transport::serve_tcp_listener` is the one TCP accept loop over the landed `serve_stream`, `serve_tcp` is the bind-and-delegate entry point the daemon will call, `remote_authority` keeps the connection authority and the request authority in step, and `Client::with_remote_addr` reaches the listener without adding a transport injection point to the wrapper. The listener is plaintext and unauthenticated until the TLS, proxy and pairing tickets land, and `serve_tcp` itself has no direct test yet, which the operator accepted as a documented gap.
+
 ## 2026-10-13, Plugin version tolerance across compiled versions (plugin-compatibility)
 
 `metis_read_table` now compares `abi_minor` additively with `found >= known`, so a plugin built for a newer minor inside major 1 interoperates while the retired pre-release table at minor 0 is still refused with `MinorMismatch` before any entry is read. A library built for another major fails at symbol resolution with `MajorMismatch` over a real second C library, and the fixture advertises an eighth capability at descriptor version 2, which makes the per-capability gate falsifiable end to end: only that capability is refused and the rest of the plugin keeps serving. Payload types prove that a body carrying an unknown field still decodes, and the harness grew from 62 to 73 checks, including Linux-only faulting-page probes that prove a reader touches only the entries its own `size` covers.
