@@ -259,6 +259,7 @@ fn main() -> ExitCode {
     let list = list_capabilities(&mut checks, &state, instance);
     drive_capability_gate(&mut checks, &state, instance, list.as_ref());
     drive_capabilities(&mut checks, &state, instance, list.as_ref());
+    drive_unknown_field(&mut checks, &state, instance);
     run_hazard_checks(&mut checks, &state, instance);
 
     drive_c_plugin(&mut checks);
@@ -736,6 +737,26 @@ fn drive_capabilities(
         missed.missed_deadline && missed.status == MetisStatus::Ok,
         "cancel.missed_deadline_recorded",
         format!("{:?}", missed.status),
+    );
+}
+
+/// A request body carrying a field this build does not know.
+///
+/// The payload types never deny an unknown field and a field added later is
+/// optional with a default, so a plugin built later and a host built earlier
+/// still interoperate. The body is written here byte for byte because that is
+/// the only place such a field can come from: no type in this build has it.
+fn drive_unknown_field(checks: &mut Checks, state: &HostState, instance: *mut c_void) {
+    let body = br#"{"echo":"from a newer build","repeat":2,"added_after_this_build":true}"#;
+    let outcome = state.drive_body(instance, "tool.echo", body, 210);
+    checks.check(
+        outcome.status == MetisStatus::Ok && outcome.body == "from a newer build".repeat(2),
+        "payload.unknown_field_tolerated",
+        format!(
+            "status={} body={:?} (the known fields kept their meaning)",
+            outcome.status.as_str(),
+            outcome.body
+        ),
     );
 }
 
@@ -1232,17 +1253,30 @@ impl HostState {
         body: &str,
         request_id: u64,
     ) -> Option<MetisFutureHandle> {
+        let request = serde_json::to_vec(&EchoRequest {
+            echo: body.to_string(),
+            repeat: 1,
+        })
+        .unwrap_or_default();
+        self.invoke_body(instance, capability, &request, request_id)
+    }
+
+    /// Starts one call whose request body the caller wrote itself.
+    ///
+    /// A body carrying a field this build does not know cannot come from a type
+    /// this build has, so the bytes are the only place it can come from.
+    fn invoke_body(
+        &self,
+        instance: *mut c_void,
+        capability: &str,
+        body: &[u8],
+        request_id: u64,
+    ) -> Option<MetisFutureHandle> {
         if self.quarantined.load(SeqCst) {
             println!("[order] a new future was refused: the instance is quarantined");
             return None;
         }
-        let request = metis_encode_payload(
-            &serde_json::to_vec(&EchoRequest {
-                echo: body.to_string(),
-                repeat: 1,
-            })
-            .unwrap_or_default(),
-        );
+        let request = metis_encode_payload(body);
         let mut handle = MetisFutureHandle::null();
         // SAFETY: the instance is live, the request buffer is host-owned and
         // valid for this call, and the out parameter is a live local.
@@ -1318,8 +1352,24 @@ impl HostState {
         body: &str,
         request_id: u64,
     ) -> CallOutcome {
+        let request = serde_json::to_vec(&EchoRequest {
+            echo: body.to_string(),
+            repeat: 1,
+        })
+        .unwrap_or_default();
+        self.drive_body(instance, capability, &request, request_id)
+    }
+
+    /// Drives one call whose request body the caller wrote itself.
+    fn drive_body(
+        &self,
+        instance: *mut c_void,
+        capability: &str,
+        body: &[u8],
+        request_id: u64,
+    ) -> CallOutcome {
         let mut outcome = CallOutcome::default();
-        let Some(handle) = self.invoke(instance, capability, body, request_id) else {
+        let Some(handle) = self.invoke_body(instance, capability, body, request_id) else {
             outcome.status = MetisStatus::Internal;
             return outcome;
         };

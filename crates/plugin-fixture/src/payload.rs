@@ -50,3 +50,56 @@ pub struct TimerRequest {
 pub struct TimerAnswer {
     pub delay_ms: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The unknown-field rule, which is what makes a payload additive: a type
+    /// never denies a field it does not know, so a body from a newer build
+    /// decodes here and the fields this build does know keep their meaning.
+    #[test]
+    fn a_request_with_a_field_this_build_does_not_know_decodes() {
+        let request: EchoRequest = serde_json::from_str(
+            r#"{"echo":"later","repeat":2,"added_after_this_build":{"nested":true}}"#,
+        )
+        .expect("an unknown field is ignored rather than fatal");
+        assert_eq!(
+            request,
+            EchoRequest {
+                echo: "later".to_string(),
+                repeat: 2,
+            }
+        );
+    }
+
+    /// The other half of the same rule: a field added later is optional with a
+    /// default, so a body from an older build still decodes. `repeat` is this
+    /// build's live example of it.
+    #[test]
+    fn a_request_without_a_field_that_has_a_default_decodes() {
+        let request: EchoRequest =
+            serde_json::from_str(r#"{"echo":"older"}"#).expect("repeat has a default");
+        assert_eq!(
+            request,
+            EchoRequest {
+                echo: "older".to_string(),
+                repeat: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_response_with_a_field_this_build_does_not_know_decodes() {
+        let response: EchoResponse =
+            serde_json::from_str(r#"{"echo":"hi","bytes":2,"added_after_this_build":null}"#)
+                .expect("an unknown field is ignored rather than fatal");
+        assert_eq!(
+            response,
+            EchoResponse {
+                echo: "hi".to_string(),
+                bytes: 2,
+            }
+        );
+    }
+}
