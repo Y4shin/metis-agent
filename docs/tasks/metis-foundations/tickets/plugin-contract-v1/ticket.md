@@ -3,7 +3,7 @@ type: ticket
 subtype: feature
 title: Plugin contract v1, futures-only ABI with routed authoring and host enforcement
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 size: xl
 ---
