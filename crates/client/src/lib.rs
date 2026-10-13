@@ -424,9 +424,9 @@ pub enum CredentialCause {
 /// The typed error for a pairing refusal.
 ///
 /// The refusal is read from the response header, never from the message text, so
-/// a wrong key and a repeated pairing are told apart by the daemon's own
-/// vocabulary rather than by prose. `None` means the failure is not a pairing
-/// refusal, and the caller keeps the transport error.
+/// a closed pairing, a wrong key and a repeated pairing are told apart by the
+/// daemon's own vocabulary rather than by prose. `None` means the failure is not
+/// a pairing refusal, and the caller keeps the transport error.
 fn pair_refusal(err: &ConnectError) -> Option<ClientError> {
     let header = err.response_headers().get(auth::PAIR_ERROR_HEADER)?;
     let refusal = PairRefusal::parse(header.to_str().ok()?)?;
