@@ -1,4 +1,5 @@
-//! The fixture plugin: a real cdylib written through the authoring trait.
+//! The fixture plugin: a real cdylib written through the routed authoring
+//! trait.
 //!
 //! It is test support, not product code. `src/bin/abi-harness.rs` loads it as a
 //! shared library and drives it, and nothing outside this crate depends on it.
@@ -6,166 +7,107 @@
 //! `plugin-contract`, not by a mock or by a second copy of the ABI.
 //!
 //! This file is an author's file: it names no buffer, no status, no callback, no
-//! thread, and no payload header. The five capabilities it exposes, and what
-//! each one proves:
+//! thread it did not start itself, and no payload header. The capabilities it
+//! exposes, and what each one proves:
 //!
-//! - `tool.echo`, the capability that used to finish inline: through the trait
-//!   it completes through the host's `complete` callback like every other arm
-//!   (D15), and it emits an event, which is the capability half of the event
-//!   route.
-//! - `tool.pending`, the deferred half of D11: a `progress` callback, then a
-//!   result through `complete`. It does not honour a cancel, which is what makes
-//!   the host drop a completion that arrives after one (D12).
-//! - `tool.cancellable`, which parks on the cancellation token and is woken by
-//!   the cancel (D15); its own budget is the backstop that makes the other half
-//!   of the suppression rule observable, because the same `Cancelled` value
-//!   returned without a successful cancel still completes.
-//! - `tool.panic`, a deliberate panic inside a capability, which the adapter's
-//!   worker turns into an internal-error completion instead of losing the call
-//!   (D7).
+//! - `tool.echo`, ready on its first poll, and it emits an event.
+//! - `tool.pending`, which asks the host for a timer and answers when
+//!   `service_complete` arrives.
+//! - `tool.cancellable`, which parks on its cancellation token and resolves as
+//!   `Cancelled`.
+//! - `tool.stubborn`, which never honours a cancel, so the host's deadline
+//!   expires and it records a missed cancel.
+//! - `tool.panic`, which panics inside its poll.
+//! - `tool.panic_drop`, whose future owns a guard whose destructor panics.
+//! - `tool.blocking`, which blocks inside its poll, which the host's watchdog
+//!   has to detect.
+//!
+//! Seven capabilities, not four: the routed `call` has no ceiling, and the
+//! harness drives every one by name.
 //!
 //! The wiring at the bottom is the whole ABI footprint: one `const fn` table and
 //! one entry point.
 
 pub mod payload;
 
-use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Once};
-use std::task::{Context, Poll, Waker};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::sync::Once;
+use std::time::Duration;
 
 use plugin_contract::abi::MetisPluginTableV1;
 use plugin_contract::authoring::{
-    Call, CancellationToken, Cancelled, CapabilityDescriptor, CapabilityKind, Host, LogLevel,
-    Plugin, PluginError, Shape, accounting, table,
+    Call, CapabilityDescriptor, CapabilityKind, Host, LogLevel, Plugin, PluginError, Request,
+    Response, accounting, schemars, table,
 };
 
-use crate::payload::{EchoRequest, EchoResponse, Progress};
+use crate::payload::{EchoRequest, EchoResponse, Progress, TimerAnswer, TimerRequest};
 
-/// How long the cancellable arm waits for a cancel before giving up on its own.
-///
-/// Long enough that the harness's cancel always wins the race and short enough
-/// that an uncancelled call still ends.
-const CANCELLABLE_BUDGET: Duration = Duration::from_millis(1500);
-
-/// How long the pending arm stays in flight. Long enough that a cancel arriving
-/// right after the pending return is observed before the completion.
-const PENDING_DELAY: Duration = Duration::from_millis(120);
+/// How long the blocking capability blocks, which is longer than the host's
+/// watchdog window on purpose.
+const BLOCKING: Duration = Duration::from_millis(250);
 
 /// The fixture plugin.
 #[derive(Default)]
 pub struct Fixture;
 
-/// The one payload shape the fixture's capabilities use.
-///
-/// Public because it appears in the plugin's associated types, which are part of
-/// the public implementation; it is still fixture-local, and no payload type
-/// reaches `plugin-contract`.
-pub struct Echo;
-
-impl Shape for Echo {
-    type Request = EchoRequest;
-    type Response = EchoResponse;
-}
-
-fn descriptor(name: &str, kind: CapabilityKind) -> CapabilityDescriptor {
+/// One capability descriptor, with the inline schemas its bodies imply.
+fn descriptor(name: &str) -> CapabilityDescriptor {
     CapabilityDescriptor {
         name: name.to_string(),
-        kind,
+        kind: CapabilityKind::Tool,
         version: 1,
-        schema: format!("{name}/v1"),
+        request_schema: schemars::schema_for!(EchoRequest),
+        response_schema: schemars::schema_for!(EchoResponse),
+    }
+}
+
+/// The capability names, in the order the plugin declares them.
+pub const CAPABILITIES: [&str; 7] = [
+    "tool.echo",
+    "tool.pending",
+    "tool.cancellable",
+    "tool.stubborn",
+    "tool.panic",
+    "tool.panic_drop",
+    "tool.blocking",
+];
+
+/// The guard whose destructor panics, so the panic lands in the host's `drop`
+/// call rather than in a poll.
+struct PanicOnDrop;
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        panic!("fixture: a deliberate panic inside a future destructor")
     }
 }
 
 impl Plugin for Fixture {
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
-        vec![
-            descriptor(Self::ANSWER, CapabilityKind::Tool),
-            descriptor(Self::DEFERRED, CapabilityKind::Tool),
-            descriptor(Self::CANCELLABLE, CapabilityKind::Tool),
-            descriptor(Self::FAULT, CapabilityKind::Tool),
-        ]
+        CAPABILITIES.iter().map(|name| descriptor(name)).collect()
     }
 
-    const ANSWER: &'static str = "tool.echo";
-    const DEFERRED: &'static str = "tool.pending";
-    const CANCELLABLE: &'static str = "tool.cancellable";
-    const FAULT: &'static str = "tool.panic";
-
-    type Answer = Echo;
-    type Deferred = Echo;
-    type Cancellable = Echo;
-    type Fault = Echo;
-
-    async fn answer(&self, call: Call, request: EchoRequest) -> Result<EchoResponse, PluginError> {
-        let echo = request.echo.repeat(request.repeat as usize);
-        call.emit_event(
-            "fixture.answered",
-            &serde_json::json!({ "bytes": echo.len() }),
-        )?;
-        Ok(EchoResponse {
-            bytes: echo.len(),
-            echo,
-        })
-    }
-
-    async fn deferred(
-        &self,
-        call: Call,
-        _request: EchoRequest,
-    ) -> Result<EchoResponse, PluginError> {
-        call.progress(&Progress {
-            stage: "working".to_string(),
-        })?;
-        // Cancellation is not honoured here on purpose: the completion arrives
-        // anyway and the host has to drop it (D12). The worker thread belongs to
-        // this call and to no other, so a sleep is what "in flight" means here.
-        thread::sleep(PENDING_DELAY);
-        Ok(EchoResponse {
-            echo: "async".to_string(),
-            bytes: 5,
-        })
-    }
-
-    async fn cancellable(
-        &self,
-        call: Call,
-        _request: EchoRequest,
-    ) -> Result<EchoResponse, PluginError> {
-        let parked = Instant::now();
-        let outcome = WaitFor::new(call.cancellation(), CANCELLABLE_BUDGET).await;
-        match outcome {
-            GiveUp::Token => call.log(
-                LogLevel::Info,
-                &format!(
-                    "fixture: cancellable observed the cancel after {}ms",
-                    parked.elapsed().as_millis()
-                ),
-            ),
-            GiveUp::Budget => call.log(
-                LogLevel::Info,
-                &format!(
-                    "fixture: cancellable gave up without a cancel after {}ms",
-                    parked.elapsed().as_millis()
-                ),
-            ),
+    async fn call(&self, call: Call, request: Request<'_>) -> Result<Response, PluginError> {
+        match request.capability {
+            "tool.echo" => echo(&call, &request),
+            "tool.pending" => pending(&call).await,
+            "tool.cancellable" => cancellable(&call).await,
+            "tool.stubborn" => stubborn(&call).await,
+            "tool.panic" => panic!("fixture: a deliberate panic inside a capability"),
+            "tool.panic_drop" => {
+                let _guard = PanicOnDrop;
+                std::future::pending::<()>().await;
+                unreachable!("the guard is only dropped when the host drops the future")
+            }
+            "tool.blocking" => {
+                std::thread::sleep(BLOCKING);
+                Response::json(&EchoResponse {
+                    echo: "blocked".to_string(),
+                    bytes: 0,
+                })
+            }
+            other => Err(PluginError::NotFound(other.to_string())),
         }
-        // The same value either way: the adapter's rule is what decides whether
-        // the host hears about it, because a give-up after a successful cancel
-        // has a host that is no longer waiting.
-        Err(PluginError::Cancelled)
-    }
-
-    async fn fault(&self, _call: Call, _request: EchoRequest) -> Result<EchoResponse, PluginError> {
-        panic!("fixture: deliberate panic inside a capability")
-    }
-
-    fn cancel(&self, _call: Call) -> Result<(), PluginError> {
-        Ok(())
     }
 
     fn started(&self, host: &Host) -> Result<(), PluginError> {
@@ -176,9 +118,8 @@ impl Plugin for Fixture {
 
     fn stopped(&self, host: &Host) {
         // The adapter owns every buffer the plugin hands out, so the ledger it
-        // keeps is the plugin's side of the ownership check (D6). This runs
-        // after `shutdown` has joined every worker, which is what makes the
-        // numbers final.
+        // keeps is the plugin's side of the ownership check. This runs when the
+        // host has dropped every future, which is what makes the numbers final.
         host.log(
             LogLevel::Info,
             &format!("FIXTURE_ACCOUNT {}", accounting().line()),
@@ -186,100 +127,49 @@ impl Plugin for Fixture {
     }
 }
 
-// --- the fixture's bounded wait --------------------------------------------
-
-/// Which half of the wait ended it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GiveUp {
-    /// The call was cancelled and the token woke the future.
-    Token,
-    /// The fixture's own budget ran out, with no cancel.
-    Budget,
+fn echo(call: &Call, request: &Request<'_>) -> Result<Response, PluginError> {
+    let request: EchoRequest = request.json()?;
+    let echo = request.echo.repeat(request.repeat as usize);
+    call.emit_event(
+        "fixture.answered",
+        &serde_json::json!({ "bytes": echo.len() }),
+    )?;
+    Response::json(&EchoResponse {
+        bytes: echo.len(),
+        echo,
+    })
 }
 
-/// Waits for a cancellation token, and no longer than a budget.
-///
-/// The contract ships no select combinator, so this fixture-local future races
-/// the two endings itself: it polls the token's future, which registers the
-/// worker's waker with the token (so a cancel wakes it promptly), and a timer
-/// thread wakes the worker at the deadline so an uncancelled call still ends.
-///
-/// The timer thread is joined when the future is dropped, which happens on the
-/// worker before it exits, so no thread of this library can run after the host
-/// unloads it.
-struct WaitFor {
-    token: Cancelled,
-    deadline: Instant,
-    timer: Option<Timer>,
+async fn pending(call: &Call) -> Result<Response, PluginError> {
+    call.progress(&Progress {
+        stage: "working".to_string(),
+    })?;
+    let answer: TimerAnswer = call
+        .service_request("timer", &TimerRequest { delay_ms: 5 })?
+        .await?;
+    Response::json(&EchoResponse {
+        echo: format!("timer {}", answer.delay_ms),
+        bytes: 6,
+    })
 }
 
-impl WaitFor {
-    fn new(token: CancellationToken, budget: Duration) -> Self {
-        WaitFor {
-            token: token.cancelled(),
-            deadline: Instant::now() + budget,
-            timer: None,
-        }
-    }
+async fn cancellable(call: &Call) -> Result<Response, PluginError> {
+    call.cancellation().cancelled().await;
+    call.log(LogLevel::Info, "fixture: cancellable observed the cancel");
+    Err(PluginError::Cancelled)
 }
 
-impl Future for WaitFor {
-    type Output = GiveUp;
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<GiveUp> {
-        let this = self.get_mut();
-        if Pin::new(&mut this.token).poll(context).is_ready() {
-            return Poll::Ready(GiveUp::Token);
-        }
-        if Instant::now() >= this.deadline {
-            return Poll::Ready(GiveUp::Budget);
-        }
-        if this.timer.is_none() {
-            this.timer = Some(Timer::until(this.deadline, context.waker().clone()));
-        }
-        Poll::Pending
-    }
-}
-
-/// A thread that wakes a task at a deadline, and stops when the task says so.
-struct Timer {
-    abandoned: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl Timer {
-    fn until(deadline: Instant, waker: Waker) -> Timer {
-        let abandoned = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&abandoned);
-        let handle = thread::spawn(move || {
-            while !flag.load(Ordering::SeqCst) {
-                let now = Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                thread::park_timeout(deadline - now);
-            }
-            if !flag.load(Ordering::SeqCst) {
-                waker.wake();
-            }
-        });
-        Timer {
-            abandoned,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for Timer {
-    fn drop(&mut self) {
-        self.abandoned.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.handle.take() {
-            // The park is bounded by the deadline, and an unpark returns from it
-            // at once, so this join is brief.
-            handle.thread().unpark();
-            let _ = handle.join();
-        }
-    }
+async fn stubborn(call: &Call) -> Result<Response, PluginError> {
+    // Cancellation is not honoured here on purpose: the host's deadline expires
+    // and it records a missed cancel, then answers the timer anyway so the call
+    // can still finish.
+    let answer: TimerAnswer = call
+        .service_request("timer", &TimerRequest { delay_ms: 20 })?
+        .await?;
+    Response::json(&EchoResponse {
+        echo: format!("stubborn {}", answer.delay_ms),
+        bytes: 9,
+    })
 }
 
 // --- the wiring (the fixture's whole ABI footprint) -------------------------
@@ -294,10 +184,10 @@ pub extern "C" fn metis_plugin_entry_v1() -> *const MetisPluginTableV1 {
 
 /// Reports a caught panic in one line instead of the default hook's notice.
 ///
-/// The adapter catches a capability panic and turns it into a completion (D7),
-/// so the panic is a designed failure mode rather than a crash. A panic hook
-/// cannot reach the host: it has no context, which is why the adapter logs the
-/// catch through the host callback and this one only quiets the process.
+/// The adapter catches a panic in a poll and turns it into a terminal status, so
+/// the panic is a designed failure mode rather than a crash. A panic hook cannot
+/// reach the host: it has no context, which is why the adapter logs the catch
+/// through the host callback and this one only quiets the process.
 fn install_panic_hook() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {

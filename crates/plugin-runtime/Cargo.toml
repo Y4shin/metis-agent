@@ -9,4 +9,22 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The wire: the tables, the status space, the ownership rules, and the envelope.
+# The authoring feature stays off, so the host sees the primitives and the
+# payload envelope alone and no serde in the C ABI surface.
 plugin-contract.workspace = true
+# `libloading` resolves the one versioned entry symbol of a cdylib.
+libloading.workspace = true
+# The capability list is JSON payload, and the registry validates payloads
+# against the schemas a plugin publishes. `jsonschema` is taken with
+# `default-features = false` because its defaults pull in `reqwest` and
+# `rustls`, which a boundary that validates local bytes does not need.
+serde_json.workspace = true
+serde = { workspace = true, features = ["derive"] }
+jsonschema.workspace = true
+
+[dev-dependencies]
+# The integration test drives a real cdylib. It builds the fixture itself and
+# reuses its payload shapes, which is why the fixture is a dev dependency here
+# and not a normal one: the runtime never names a fixture type.
+plugin-fixture.workspace = true

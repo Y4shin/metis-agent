@@ -30,3 +30,6 @@ plugin-contract = { workspace = true, features = ["authoring"] }
 libloading.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The fixture derives its inline capability schemas, which is what an author
+# does with the re-exported derive.
+schemars.workspace = true

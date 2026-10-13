@@ -1,76 +1,64 @@
 //! The plugin side of the translation: `MetisPluginTableV1` on one side, the
 //! `Plugin` trait on the other.
 //!
-//! Everything the ABI forces onto a plugin lives here: the payload envelope
-//! (D4), buffer ownership (D6), panic catching (D7), the pending registry and
-//! the worker join (D11, D12), the cancellation registry that lets `cancel`
-//! reach the call a capability is parked on (D15), and the check that a
-//! plugin's capability declaration lines up with the arms this module
-//! dispatches on (D9).
+//! Everything the ABI forces onto a plugin lives here: the payload envelope,
+//! buffer ownership, panic catching at every exported entry, the cancellation
+//! registry that lets `cancel` reach the call a future is parked on, the
+//! service completion the host answers an awaited service through, and the
+//! check that a plugin's capability declaration has no duplicate names.
 //!
-//! The trait path is always pending (D15). The ABI keeps its inline path for a
-//! plugin that implements the table directly, which is a different
-//! implementation of the same entries and not something this adapter reaches.
+//! There is no executor here and no worker thread. The host polls the future
+//! this adapter hands out, on the host's own runtime, so a plugin needs no
+//! runtime, no pool, and no thread per call, which is also what makes unloading
+//! safe: plugin code only runs inside a call the host made.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::future::Future;
 use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::pin::Pin;
 use std::slice;
 use std::str;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread::JoinHandle;
-
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 use crate::abi::{
-    METIS_ABI_MAJOR, METIS_ABI_MINOR, METIS_BUFFER_OWNER_HOST, MetisBuffer, MetisHostApiV1,
-    MetisPluginTableV1, MetisStatus,
+    METIS_ABI_MAJOR, METIS_ABI_MINOR, METIS_BUFFER_OWNER_HOST, MetisBuffer, MetisFutureHandle,
+    MetisHostApiV1, MetisPluginTableV1, MetisStatus,
 };
-use crate::authoring::alloc::{note_suppressed, plugin_alloc, release_buffer, violation};
-use crate::authoring::call::{Call, CancellationToken, Host, LogLevel};
-use crate::authoring::capability::{CapabilityList, Shape};
-use crate::authoring::executor;
-use crate::authoring::traits::{Plugin, PluginError};
+use crate::authoring::alloc::{plugin_alloc, release_buffer, violation};
+use crate::authoring::call::{Call, CancellationToken, Host, LogLevel, resolve_service};
+use crate::authoring::capability::CapabilityList;
+use crate::authoring::future::{ErasedFuture, new_handle};
+use crate::authoring::traits::{Plugin, PluginError, Request};
 use crate::payload::{metis_encode_payload, metis_payload_body};
 
 /// One live instance.
 ///
-/// The plugin sits behind an `Arc` so a call can move onto a worker thread
-/// without borrowing the handle, and the host table is retained because
-/// callbacks may come from any plugin thread (D1 as amended, D12).
+/// The plugin sits behind an `Arc` so a future can own a handle to it, and the
+/// host table is retained because a future may be polled from any host thread.
 struct Instance<P: Plugin> {
     plugin: Arc<P>,
     host: Host,
 }
 
-/// Request id to the call, so `cancel` reaches the same token the capability
-/// method is parked on (D12, D15).
+/// Request id to the call, so `cancel` reaches the same token a future is
+/// parked on.
 ///
-/// Process-wide, because the table is a `const fn` (D1, D8) with no user data
-/// to key it by; request ids are host-supplied and unique, which is what keeps
-/// two instances of one plugin from colliding.
-fn pending() -> &'static Mutex<HashMap<u64, Call>> {
-    static PENDING: OnceLock<Mutex<HashMap<u64, Call>>> = OnceLock::new();
-    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+/// Process-wide, because the table is a `const fn` with no user data to key it
+/// by; request ids are host-supplied and unique, which is what keeps two
+/// instances of one plugin from colliding.
+fn calls() -> &'static Mutex<HashMap<u64, Call>> {
+    static CALLS: OnceLock<Mutex<HashMap<u64, Call>>> = OnceLock::new();
+    CALLS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Worker handles, joined at `shutdown` before the host may unload the library
-/// (D12).
-fn workers() -> &'static Mutex<Vec<JoinHandle<()>>> {
-    static WORKERS: OnceLock<Mutex<Vec<JoinHandle<()>>>> = OnceLock::new();
-    WORKERS.get_or_init(|| Mutex::new(Vec::new()))
+/// Removes a call from the registry, which the future's own release does, so
+/// the registry cannot outlive the future it describes.
+fn release_call(request_id: u64) {
+    calls().lock().unwrap().remove(&request_id);
 }
 
 /// Instance handles this plugin has already taken back, so a second release is
 /// reported rather than becoming a double free.
-///
-/// `shutdown` releases the instance, because it has joined every worker and
-/// told the plugin it is stopping; the host's `destroy_instance` after it sees
-/// a handle this plugin has already collected.
 fn released_instances() -> &'static Mutex<HashSet<usize>> {
     static RELEASED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
     RELEASED.get_or_init(|| Mutex::new(HashSet::new()))
@@ -78,9 +66,6 @@ fn released_instances() -> &'static Mutex<HashSet<usize>> {
 
 /// The whole plugin side of the translation as one `const fn`, which the plugin
 /// instantiates into a static and exports through `metis_plugin_entry_v1`.
-///
-/// That is the spike's six-line wiring, and the reason no macro is justified at
-/// this size.
 pub const fn table<P: Plugin + Default>() -> MetisPluginTableV1 {
     MetisPluginTableV1 {
         size: mem::size_of::<MetisPluginTableV1>(),
@@ -89,19 +74,16 @@ pub const fn table<P: Plugin + Default>() -> MetisPluginTableV1 {
         create_instance: create_instance::<P>,
         destroy_instance: destroy_instance::<P>,
         list_capabilities: list_capabilities::<P>,
-        invoke: invoke::<P>,
+        invoke_future: invoke_future::<P>,
         cancel: cancel::<P>,
         release_buffer,
         shutdown: shutdown::<P>,
+        service_complete: service_complete::<P>,
     }
 }
 
-/// Every dispatch arm produces this shape, because the four capability methods
-/// return four different opaque future types.
-type Work = Pin<Box<dyn Future<Output = Result<Vec<u8>, PluginError>> + Send + 'static>>;
-
-/// The status an authoring error maps onto (D7).
-fn metis_status(error: &PluginError) -> MetisStatus {
+/// The status an authoring error maps onto.
+pub(crate) fn metis_status(error: &PluginError) -> MetisStatus {
     match error {
         PluginError::InvalidArgument(_) => MetisStatus::InvalidArgument,
         PluginError::NotFound(_) => MetisStatus::NotFound,
@@ -112,18 +94,9 @@ fn metis_status(error: &PluginError) -> MetisStatus {
     }
 }
 
-/// A plugin buffer holding an envelope around `body` (D4, D6).
-fn plugin_buffer(body: &[u8]) -> MetisBuffer {
-    plugin_alloc(&metis_encode_payload(body))
-}
-
-fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, PluginError> {
+fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, PluginError> {
     serde_json::to_vec(value)
         .map_err(|err| PluginError::Internal(format!("response payload: {err}")))
-}
-
-fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T, MetisStatus> {
-    serde_json::from_slice(body).map_err(|_| MetisStatus::InvalidArgument)
 }
 
 /// Copies a borrowed host buffer and validates its payload envelope.
@@ -132,8 +105,8 @@ fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T, MetisStatus> {
 ///
 /// # Safety
 ///
-/// `buffer` must be the buffer the host passed to `invoke`, valid for the
-/// duration of the call (D6).
+/// `buffer` must be the buffer the host passed, valid for the duration of the
+/// call.
 unsafe fn read_host_payload(buffer: MetisBuffer) -> Result<Vec<u8>, MetisStatus> {
     if buffer.owner != METIS_BUFFER_OWNER_HOST {
         violation("the plugin received a buffer it does not believe the host allocated");
@@ -142,86 +115,30 @@ unsafe fn read_host_payload(buffer: MetisBuffer) -> Result<Vec<u8>, MetisStatus>
     if buffer.ptr.is_null() {
         return Err(MetisStatus::InvalidArgument);
     }
-    // SAFETY: the host owns the buffer and keeps it alive for the call (D6).
+    // SAFETY: the host owns the buffer and keeps it alive for the call.
     let bytes = unsafe { slice::from_raw_parts(buffer.ptr, buffer.len) };
     Ok(metis_payload_body(bytes)?.to_vec())
 }
 
-/// The arms this adapter dispatches on: the one place the ABI's `invoke` knows
-/// about the trait's capability methods.
-fn arm_names<P: Plugin>() -> [&'static str; 4] {
-    [P::ANSWER, P::DEFERRED, P::CANCELLABLE, P::FAULT]
-}
-
-/// Checks the plugin's capability declaration against the dispatch arms.
+/// Checks that a plugin's capability declaration is usable.
 ///
-/// The two are separate declarations: `capabilities()` is what the host is
-/// told, and the arm names are what the adapter answers. A descriptor whose
-/// name no arm answers would otherwise surface as `not_found` at call time, so
-/// it is a creation failure instead (D9).
+/// There is one declaration now, not a declaration plus a set of dispatch arms,
+/// so the only way it can be wrong is to name the same capability twice, which
+/// would make the routed `call` ambiguous for a host that routes by name. It is
+/// a creation failure rather than a call-time surprise.
 fn check_declaration<P: Plugin>(plugin: &P) -> Result<(), String> {
-    let arms = arm_names::<P>();
-    for (index, name) in arms.iter().enumerate() {
-        if name.is_empty() {
-            // An arm this plugin does not implement. Nothing advertises it, so
-            // no host reaches it.
-            continue;
-        }
-        if arms[..index].contains(name) {
-            return Err(format!("two capability arms claim the name {name}"));
-        }
-    }
+    let mut seen = HashSet::new();
     for descriptor in plugin.capabilities() {
-        if !arms.contains(&descriptor.name.as_str()) {
-            return Err(format!(
-                "capability {} has a descriptor but no dispatch arm (arms: {arms:?})",
-                descriptor.name
-            ));
+        if !seen.insert(descriptor.name.clone()) {
+            return Err(format!("two capabilities are named {}", descriptor.name));
         }
     }
     Ok(())
 }
 
-/// The one place the ABI's `invoke` reaches a trait method.
-///
-/// Dispatch is by capability name (D9). A name no arm answers is `NotFound`,
-/// which the creation-time check makes unreachable for a declared capability.
-fn dispatch<P: Plugin>(
-    plugin: Arc<P>,
-    call: Call,
-    capability: &str,
-    body: &[u8],
-) -> Result<Work, MetisStatus> {
-    if capability == P::ANSWER {
-        let request: <P::Answer as Shape>::Request = decode(body)?;
-        return Ok(Box::pin(async move {
-            encode(&plugin.answer(call, request).await?)
-        }));
-    }
-    if capability == P::DEFERRED {
-        let request: <P::Deferred as Shape>::Request = decode(body)?;
-        return Ok(Box::pin(async move {
-            encode(&plugin.deferred(call, request).await?)
-        }));
-    }
-    if capability == P::CANCELLABLE {
-        let request: <P::Cancellable as Shape>::Request = decode(body)?;
-        return Ok(Box::pin(async move {
-            encode(&plugin.cancellable(call, request).await?)
-        }));
-    }
-    if capability == P::FAULT {
-        let request: <P::Fault as Shape>::Request = decode(body)?;
-        return Ok(Box::pin(async move {
-            encode(&plugin.fault(call, request).await?)
-        }));
-    }
-    Err(MetisStatus::NotFound)
-}
-
 // --- exported adapters -----------------------------------------------------
 //
-// Every exported function catches panics (D7), so a panic in a plugin becomes a
+// Every exported function catches panics, so a panic in a plugin becomes a
 // status instead of unwinding across the boundary.
 
 unsafe extern "C" fn create_instance<P: Plugin + Default>(
@@ -234,8 +151,6 @@ unsafe extern "C" fn create_instance<P: Plugin + Default>(
         }
         let host = Host::from_raw(host);
         let plugin = P::default();
-        // D9: the declaration and the dispatch arms are separate declarations,
-        // and this is where they are made to agree.
         if let Err(mismatch) = check_declaration::<P>(&plugin) {
             host.log(LogLevel::Error, &format!("authoring: {mismatch}"));
             return MetisStatus::InvalidArgument;
@@ -245,7 +160,8 @@ unsafe extern "C" fn create_instance<P: Plugin + Default>(
             host,
         });
         // `Default` construction cannot fail or take configuration, so this is
-        // where initialisation reports failure (spike finding 8).
+        // where initialisation reports failure. A plugin whose `started` fails
+        // yields no instance.
         if let Err(error) = instance.plugin.started(&instance.host) {
             instance.host.log(
                 LogLevel::Error,
@@ -254,6 +170,9 @@ unsafe extern "C" fn create_instance<P: Plugin + Default>(
             drop(instance);
             return metis_status(&error);
         }
+        instance
+            .host
+            .log(LogLevel::Info, "authoring: instance created");
         let raw = Box::into_raw(instance);
         // A released handle's address can be handed to the next instance by the
         // allocator; creating an instance there makes it live again.
@@ -261,14 +180,9 @@ unsafe extern "C" fn create_instance<P: Plugin + Default>(
         // SAFETY: the host owns the out parameter and gets the only handle to
         // this box, which `destroy_instance` takes back exactly once.
         unsafe { *out_instance = raw as *mut c_void };
-        instance_log(&host, "authoring: instance created");
         MetisStatus::Ok
     }));
     result.unwrap_or(MetisStatus::Internal)
-}
-
-fn instance_log(host: &Host, message: &str) {
-    host.log(LogLevel::Info, message);
 }
 
 unsafe extern "C" fn destroy_instance<P: Plugin>(instance: *mut c_void) -> MetisStatus {
@@ -286,7 +200,9 @@ unsafe extern "C" fn destroy_instance<P: Plugin>(instance: *mut c_void) -> Metis
         // SAFETY: the handle came from `create_instance`, and the insert above
         // makes this path run exactly once per handle.
         let state = unsafe { Box::from_raw(instance as *mut Instance<P>) };
-        instance_log(&state.host, "authoring: instance released");
+        state
+            .host
+            .log(LogLevel::Info, "authoring: instance released");
         drop(state);
         MetisStatus::Ok
     }));
@@ -317,23 +233,23 @@ unsafe extern "C" fn list_capabilities<P: Plugin>(
             }
         };
         // SAFETY: the host owns the out parameter and releases the buffer.
-        unsafe { *out_payload = plugin_buffer(&body) };
+        unsafe { *out_payload = plugin_alloc(&metis_encode_payload(&body)) };
         MetisStatus::Ok
     }));
     result.unwrap_or(MetisStatus::Internal)
 }
 
-unsafe extern "C" fn invoke<P: Plugin>(
+unsafe extern "C" fn invoke_future<P: Plugin>(
     instance: *mut c_void,
     capability: *const u8,
     capability_len: usize,
     request_id: u64,
     payload: MetisBuffer,
     host: *const MetisHostApiV1,
-    out_payload: *mut MetisBuffer,
+    out: *mut MetisFutureHandle,
 ) -> MetisStatus {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        if instance.is_null() || capability.is_null() || out_payload.is_null() || host.is_null() {
+        if instance.is_null() || capability.is_null() || host.is_null() || out.is_null() {
             return MetisStatus::InvalidArgument;
         }
         let host = Host::from_raw(host);
@@ -355,80 +271,32 @@ unsafe extern "C" fn invoke<P: Plugin>(
         };
         // SAFETY: the handle is the live instance this capability belongs to.
         let state = unsafe { &*(instance as *const Instance<P>) };
-
-        // The request is decoded, and the arm resolved, before anything is
-        // registered or spawned: a malformed request or an unknown capability
-        // is an ordinary error return that leaves nothing pending.
         let call = Call::new(request_id, host, CancellationToken::new());
-        let work = match dispatch::<P>(Arc::clone(&state.plugin), call.clone(), capability, &body) {
-            Ok(work) => work,
-            Err(status) => {
-                host.log(
-                    LogLevel::Warn,
-                    &format!(
-                        "authoring: invoke for {capability} returned {}",
-                        status.as_str()
-                    ),
-                );
-                return status;
-            }
-        };
 
-        // D11: the pending record exists before the future can run, so a cancel
-        // that races the completion still finds the call.
-        pending().lock().unwrap().insert(request_id, call.clone());
-        let handle = executor::spawn(async move {
-            // D7: the worker is a boundary. A panic inside the capability
-            // becomes an internal-error completion instead of a worker that
-            // dies without answering the host.
-            let outcome = match executor::catch_panic(work).await {
-                Ok(outcome) => outcome,
-                Err(panic) => {
-                    let detail = panic_message(&panic);
-                    host.log(
-                        LogLevel::Error,
-                        &format!("authoring: the {capability} capability panicked: {detail}"),
-                    );
-                    pending().lock().unwrap().remove(&request_id);
-                    host.complete(request_id, MetisStatus::Internal, MetisBuffer::empty());
-                    return;
-                }
-            };
-            pending().lock().unwrap().remove(&request_id);
-            let (status, payload) = match outcome {
-                // D12: the plugin gave up on a call the host cancelled, so its
-                // completion is suppressed. Nothing was allocated, so there is
-                // nothing to release either. The same value without a
-                // successful cancel still completes, so a host is never parked
-                // on a completion that will not arrive.
-                Err(PluginError::Cancelled) if call.is_cancelled() => {
-                    note_suppressed();
-                    host.log(
-                        LogLevel::Info,
-                        &format!(
-                            "authoring: completion suppressed for cancelled request {request_id}"
-                        ),
-                    );
-                    return;
-                }
-                Ok(body) => (MetisStatus::Ok, plugin_buffer(&body)),
-                Err(error) => (metis_status(&error), MetisBuffer::empty()),
-            };
-            host.complete(request_id, status, payload);
+        // The registry entry exists before the future can be polled, so a
+        // cancel that races the first poll still finds the call. The registry
+        // and the future share one cancellation token, so marking either marks
+        // the one the author parked on.
+        calls().lock().unwrap().insert(request_id, call.clone());
+
+        // The future owns everything it needs, so it is `'static` and the host
+        // may poll it from any thread. The request borrows the owned name and
+        // body inside the async block, which is why the block exists at all.
+        let plugin = Arc::clone(&state.plugin);
+        let capability_name = capability.to_string();
+        let future: ErasedFuture = Box::pin(async move {
+            let request = Request::new(&capability_name, &body);
+            plugin.call(call, request).await
         });
-        workers().lock().unwrap().push(handle);
 
-        // D15: the trait is async, so there is never a synchronous result to
-        // hand back. The ABI keeps its inline path for a plugin that implements
-        // the table directly.
-        MetisStatus::Pending
+        // SAFETY: the host owns the out parameter, and the handle it receives
+        // is dropped exactly once through the vtable it carries.
+        unsafe { *out = new_handle(future, request_id, release_call) };
+        MetisStatus::Ok
     }));
     match result {
         Ok(status) => status,
         Err(_) => {
-            // Nothing here has the host pointer in hand any more, and the panic
-            // is a plugin bug rather than a protocol event, so it goes to the
-            // process's own diagnostics.
             eprintln!("plugin-contract: a panic escaped an authoring adapter");
             MetisStatus::Internal
         }
@@ -442,12 +310,12 @@ unsafe extern "C" fn cancel<P: Plugin>(instance: *mut c_void, request_id: u64) -
         }
         // SAFETY: the handle is the live instance for this call.
         let state = unsafe { &*(instance as *const Instance<P>) };
-        let call = match pending().lock().unwrap().get(&request_id) {
+        let call = match calls().lock().unwrap().get(&request_id) {
             Some(call) => call.clone(),
             None => return MetisStatus::NotFound,
         };
-        // The token fires before the plugin's own cancel method runs, so an arm
-        // parked on it is woken whether or not the method says anything (D15).
+        // The token fires before the plugin's own cancel method runs, so a
+        // future parked on it is woken whether or not the method says anything.
         call.mark_cancelled();
         match state.plugin.cancel(call) {
             Ok(()) => {
@@ -475,29 +343,49 @@ unsafe extern "C" fn shutdown<P: Plugin>(instance: *mut c_void) -> MetisStatus {
         {
             return MetisStatus::NotFound;
         }
-        // D12: join every worker first, so no callback can arrive after this
-        // returns and the ledger the plugin reports is final.
-        let handles: Vec<JoinHandle<()>> = mem::take(&mut *workers().lock().unwrap());
-        for handle in handles {
-            let _ = handle.join();
-        }
-        // SAFETY: the handle is live, and the check above plus the insert in
-        // `destroy_instance` make this run once per handle.
+        // SAFETY: the handle is live, and the host drops every future before
+        // calling this, so nothing is in flight here.
         let state = unsafe { &*(instance as *const Instance<P>) };
         state.plugin.stopped(&state.host);
-        // SAFETY: as above; `shutdown` collects the handle it was given.
-        unsafe { destroy_instance::<P>(instance) }
+        MetisStatus::Ok
     }));
     result.unwrap_or(MetisStatus::Internal)
 }
 
-/// The message inside a caught panic payload, for the host's log.
-fn panic_message(panic: &executor::Panic) -> String {
-    if let Some(message) = panic.downcast_ref::<&str>() {
-        return (*message).to_string();
-    }
-    if let Some(message) = panic.downcast_ref::<String>() {
-        return message.clone();
-    }
-    "<non-string panic payload>".to_string()
+unsafe extern "C" fn service_complete<P: Plugin>(
+    instance: *mut c_void,
+    request_id: u64,
+    status: MetisStatus,
+    payload: MetisBuffer,
+) -> MetisStatus {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if instance.is_null() {
+            return MetisStatus::InvalidArgument;
+        }
+        // The payload is host-owned and borrowed for this call: the plugin
+        // copies what it needs and never frees it. An error status may carry no
+        // payload at all.
+        let body = if status == MetisStatus::Ok {
+            match unsafe { read_host_payload(payload) } {
+                Ok(body) => body,
+                Err(status) => return status,
+            }
+        } else {
+            Vec::new()
+        };
+        if resolve_service(request_id, status, body) {
+            MetisStatus::Ok
+        } else {
+            // A completion for a call the plugin no longer holds. That is a
+            // recorded event rather than a crash: the host may have given up.
+            // SAFETY: the handle is the live instance.
+            let state = unsafe { &*(instance as *const Instance<P>) };
+            state.host.log(
+                LogLevel::Warn,
+                &format!("authoring: no awaited service for request {request_id}"),
+            );
+            MetisStatus::NotFound
+        }
+    }));
+    result.unwrap_or(MetisStatus::Internal)
 }

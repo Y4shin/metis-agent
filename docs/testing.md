@@ -55,10 +55,18 @@ Plugin ABI, documented in `crates/plugin-contract/src/abi` and
 `crates/plugin-fixture`:
 
 - `cargo run -p plugin-fixture --bin abi-harness` -- loads the fixture `cdylib`
-  through `plugin-contract` and drives every table entry, printing one `[ok]`
-  or `[fail]` line per check and a `[result] PASS`/`FAIL` line; it exits
-  non-zero on any failure. The harness rebuilds the fixture library first, so
-  a stale `.so` is never loaded.
+  through `plugin-contract` and drives the revised table: the version gate, the
+  capability declaration, the futures path, the service round trip, cancel, and
+  the hazard set, printing one `[ok]` or `[fail]` line per check, the teardown
+  ordering as it happens, and a `[result] PASS`/`FAIL` line; it exits non-zero on
+  any failure. The harness rebuilds the fixture library first, so a stale `.so`
+  is never loaded.
+- `bash scripts/build-c-plugin.sh` -- compile the C implementer of the table
+  (`crates/plugin-fixture/c/c-plugin.c`) with `-std=c11 -Wall -Wextra -Werror`
+  under both gcc and clang, and leave the gcc build at
+  `target/c-plugin/libcplugin.so`. The ABI harness runs this script itself and
+  then drives that library end to end, so the header is proven usable by a
+  compiler other than rustc and by a plugin that is not the fixture.
 - `bash scripts/regenerate-abi-header.sh` -- regenerate the committed C header
   from the `repr(C)` Rust; `--check` regenerates into a scratch file and fails
   on any difference.
@@ -68,15 +76,30 @@ Plugin ABI, documented in `crates/plugin-contract/src/abi` and
   `cargo clippy` and `cargo test` all carry that check; the numbers it
   measured are compared with Rust's by
   `crates/plugin-contract/tests/c_layout.rs`.
-- The authoring surface (the `Plugin` trait, the export and host adapters, and
-  the crate's minimal executor) is behind `plugin-contract`'s `authoring`
-  feature, which is off by default so the runtime sees the primitives and the
-  payload envelope alone. Its tests live in
+- The authoring surface (the capability-name-routed `Plugin` trait and the
+  boxed-future helper that replaces `async-ffi`) is behind `plugin-contract`'s
+  `authoring` feature, which is off by default so the host sees the primitives
+  and the payload envelope alone. Its tests live in
   `crates/plugin-contract/tests/authoring.rs` under that feature, and the
   fixture turns the feature on, so the workspace `cargo test` build unifies it
   in and runs them. `cargo test -p plugin-contract --features authoring` runs
   them on their own, and `cargo test -p plugin-contract` runs the feature-off
-  path (the gate checks in `tests/feature_gate.rs`).
+  path (the gate checks in `tests/feature_gate.rs`). The revision added the
+  version gate and the presence rule in `crates/plugin-contract/tests/abi.rs`,
+  and the no-executor check in `crates/plugin-contract/tests/no_plugin_thread.rs`,
+  which has its own binary so the thread count it takes is not the harness's own
+  threads.
+
+Plugin host, documented in `crates/plugin-runtime`:
+
+- `cargo test -p plugin-runtime` -- the loader, the registry and the driver,
+  driven against the real fixture cdylib. The tests build the fixture first, then
+  load it through the version gate. `tests/registry.rs` covers routing, version
+  gating, duplicate refusal, enable and disable, unregister, both-direction
+  schema validation, quarantine and the unload ordering; `tests/concurrency.rs`
+  runs eight plugin futures on one host loop and asserts the plugin started no
+  thread. The runtime starts no runtime of its own: it hands back a `Future` and
+  the test's small loop polls it.
 
 ## CI
 

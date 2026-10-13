@@ -63,6 +63,21 @@ jobs:
           if [ -z "${BUF_TOKEN:-}" ]; then unset BUF_TOKEN; fi
           devenv shell -- bash scripts/regenerate-contracts.sh --check
 
+      # The C implementer of the plugin table. The committed header is the
+      # artifact a non-Rust author compiles against, so it is compiled under
+      # `-std=c11 -Wall -Wextra -Werror` with both gcc and clang before the
+      # harness loads the gcc build and drives it end to end.
+      - name: C plugin build
+        run: devenv shell -- bash scripts/build-c-plugin.sh
+
+      # The authoring feature is off by default, and the fixture turns it on,
+      # so the workspace build unifies it in and never compiles the feature-off
+      # path. This step compiles the crate alone that way, which is the only
+      # thing that proves the boundary still stands on the primitives and the
+      # payload envelope alone.
+      - name: Plugin contract without the authoring feature
+        run: devenv shell -- cargo check -p plugin-contract --no-default-features
+
       # The harness rebuilds the fixture cdylib itself before loading it, so a
       # stale library cannot be loaded even when this step follows a cached
       # build. It prints one line per check and exits non-zero on failure.

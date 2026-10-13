@@ -10,14 +10,18 @@
 #include <stdlib.h>
 
 /**
- * ABI major version. It is part of the exported symbol name (D8).
+ * ABI major version. It is part of the exported symbol name.
  */
 #define METIS_ABI_MAJOR 1
 
 /**
- * ABI minor version. It travels in the function table (D8).
+ * ABI minor version. It travels in the function table.
+ *
+ * It is 1 because this revision changed the entry order under an unchanged
+ * symbol and major. A reader refuses a minor it does not know, so a plugin
+ * built against the superseded order is refused instead of misread.
  */
-#define METIS_ABI_MINOR 0
+#define METIS_ABI_MINOR 1
 
 /**
  * No owner: an unset buffer, such as a null out parameter.
@@ -55,7 +59,114 @@
 #define METIS_LOG_ERROR 3
 
 /**
- * The status space, frozen within ABI major 1 (D7).
+ * The `create_instance` pointer slot of the plugin table, after its prefix.
+ */
+#define METIS_PLUGIN_TABLE_V1_CREATE_INSTANCE_SLOT 0
+
+/**
+ * The `destroy_instance` pointer slot of the plugin table, after its prefix.
+ */
+#define METIS_PLUGIN_TABLE_V1_DESTROY_INSTANCE_SLOT 1
+
+/**
+ * The `list_capabilities` pointer slot of the plugin table, after its prefix.
+ */
+#define METIS_PLUGIN_TABLE_V1_LIST_CAPABILITIES_SLOT 2
+
+/**
+ * The `invoke_future` pointer slot of the plugin table, after its prefix.
+ */
+#define METIS_PLUGIN_TABLE_V1_INVOKE_FUTURE_SLOT 3
+
+/**
+ * The `cancel` pointer slot of the plugin table, after its prefix.
+ */
+#define METIS_PLUGIN_TABLE_V1_CANCEL_SLOT 4
+
+/**
+ * The `release_buffer` pointer slot of the plugin table, after its prefix.
+ */
+#define METIS_PLUGIN_TABLE_V1_RELEASE_BUFFER_SLOT 5
+
+/**
+ * The `shutdown` pointer slot of the plugin table, after its prefix.
+ */
+#define METIS_PLUGIN_TABLE_V1_SHUTDOWN_SLOT 6
+
+/**
+ * The `service_complete` pointer slot of the plugin table, after its prefix.
+ */
+#define METIS_PLUGIN_TABLE_V1_SERVICE_COMPLETE_SLOT 7
+
+/**
+ * The number of pointer slots in the plugin table, after its prefix.
+ */
+#define METIS_PLUGIN_TABLE_V1_SLOTS 8
+
+/**
+ * The `user_data` pointer slot of the host table, after its `size` field.
+ */
+#define METIS_HOST_API_V1_USER_DATA_SLOT 0
+
+/**
+ * The `progress` pointer slot of the host table, after its `size` field.
+ */
+#define METIS_HOST_API_V1_PROGRESS_SLOT 1
+
+/**
+ * The `emit_event` pointer slot of the host table, after its `size` field.
+ */
+#define METIS_HOST_API_V1_EMIT_EVENT_SLOT 2
+
+/**
+ * The `log` pointer slot of the host table, after its `size` field.
+ */
+#define METIS_HOST_API_V1_LOG_SLOT 3
+
+/**
+ * The `service_request` pointer slot of the host table, after its `size`
+ * field.
+ */
+#define METIS_HOST_API_V1_SERVICE_REQUEST_SLOT 4
+
+/**
+ * The number of pointer slots in the host table, after its `size` field.
+ */
+#define METIS_HOST_API_V1_SLOTS 5
+
+/**
+ * Mask for the low four bits: the payload format version.
+ */
+#define METIS_PAYLOAD_VERSION_MASK 15
+
+/**
+ * Bit 4: the codec selector.
+ */
+#define METIS_PAYLOAD_CODEC_BIT 16
+
+/**
+ * Bits 5 to 7: reserved, must be zero.
+ */
+#define METIS_PAYLOAD_RESERVED_MASK 224
+
+/**
+ * The only payload format version defined at first.
+ */
+#define METIS_PAYLOAD_FORMAT_VERSION 1
+
+/**
+ * Codec 0: UTF-8 JSON. The only codec this build implements.
+ */
+#define METIS_CODEC_JSON 0
+
+/**
+ * Codec 1: MessagePack. Defined by D4 so it can arrive without a format
+ * break, not implemented by this build, and therefore refused as unsupported.
+ */
+#define METIS_CODEC_MESSAGEPACK 1
+
+/**
+ * The status space, frozen within ABI major 1.
  *
  * The members are an enum because every entry of the function table returns
  * one, and because a frozen integer space is what lets a host written in
@@ -70,15 +181,14 @@ typedef enum MetisStatus {
     METIS_STATUS_INTERNAL = 5,
     METIS_STATUS_UNSUPPORTED = 6,
     /**
-     * The result did not finish inline and will arrive through the host's
-     * `complete` callback (D11). This member joins the frozen list because no
-     * other member can express a deferred outcome.
+     * Not finished yet. A poll returns it, the plugin wakes the host waker
+     * when the answer arrives, and the host polls again.
      */
     METIS_STATUS_PENDING = 7,
 } MetisStatus;
 
 /**
- * A byte buffer crossing the boundary (D6).
+ * A byte buffer crossing the boundary.
  *
  * The owner tag is what makes "each side releases only what it allocated"
  * checkable at runtime: a receiver never frees a buffer it does not own, it
@@ -132,19 +242,9 @@ typedef struct MetisTablePrefix {
 } MetisTablePrefix;
 
 /**
- * A completion, inline or late, carrying a plugin-allocated payload (D11).
+ * Progress for an in-flight call, carrying a plugin-allocated payload.
  *
- * The receiver releases the payload through `release_buffer` even when it
- * discards it, for example a completion that arrived after a successful
- * cancel.
- */
-typedef void (*MetisCompleteFn)(void *user_data,
-                                uint64_t request_id,
-                                enum MetisStatus status,
-                                struct MetisBuffer payload);
-
-/**
- * Progress for a pending request, carrying a plugin-allocated payload.
+ * The receiver releases the payload through `release_buffer`.
  */
 typedef void (*MetisProgressFn)(void *user_data, uint64_t request_id, struct MetisBuffer payload);
 
@@ -165,7 +265,22 @@ typedef void (*MetisLogFn)(void *user_data,
                            size_t message_len);
 
 /**
- * The version 1 host callback table (D1).
+ * The plugin asks the host for a service it can await: today a timer, later
+ * IO.
+ *
+ * The host answers later through the plugin's `service_complete`, with the
+ * same `request_id`, and the plugin wakes its future's waker when the answer
+ * arrives. The payload is plugin-owned and the host releases it, including
+ * from inside this callback, where `release_buffer` is reentrant.
+ */
+typedef enum MetisStatus (*MetisServiceRequestFn)(void *user_data,
+                                                  const uint8_t *service,
+                                                  size_t service_len,
+                                                  uint64_t request_id,
+                                                  struct MetisBuffer payload);
+
+/**
+ * The version 1 host callback table, revision 1 of the contract.
  *
  * Same rules as the plugin table: append-only, presence decided by `size`, and
  * entries are plain function pointers. `user_data` is what makes the callbacks
@@ -173,12 +288,16 @@ typedef void (*MetisLogFn)(void *user_data,
  * A host that does not support a callback installs a no-op stub rather than a
  * null pointer.
  *
+ * There is deliberately no `complete` entry. A call completes when a poll of
+ * its future returns `Ok`, and a callback that duplicated that would be a
+ * second protocol for the same event.
+ *
  * Each callback is an `extern "C"` frame reached from plugin code, so a panic
  * inside one unwinds into plugin frames and aborts across the boundary. The
  * host must wrap every callback body in `catch_unwind` and turn a panic into a
  * status the plugin sees, exactly as the plugin side wraps its exported
- * adapters (D7 as amended by the mechanics spike); only the callback's own
- * frame can do this, because the plugin that called it catches nothing.
+ * adapters; only the callback's own frame can do this, because the plugin that
+ * called it catches nothing.
  */
 typedef struct MetisHostApiV1 {
     /**
@@ -190,11 +309,7 @@ typedef struct MetisHostApiV1 {
      */
     void *user_data;
     /**
-     * Completion of a pending request (D11).
-     */
-    MetisCompleteFn complete;
-    /**
-     * Progress of a pending request.
+     * Progress of an in-flight call.
      */
     MetisProgressFn progress;
     /**
@@ -205,6 +320,10 @@ typedef struct MetisHostApiV1 {
      * A log line.
      */
     MetisLogFn log;
+    /**
+     * A host service the plugin awaits.
+     */
+    MetisServiceRequestFn service_request;
 } MetisHostApiV1;
 
 /**
@@ -219,52 +338,200 @@ typedef enum MetisStatus (*MetisCreateInstanceFn)(const struct MetisHostApiV1 *h
 typedef enum MetisStatus (*MetisDestroyInstanceFn)(void *instance);
 
 /**
- * Returns a plugin-allocated payload holding the capability descriptors (D9).
+ * Returns a plugin-allocated payload holding the capability descriptors.
  */
 typedef enum MetisStatus (*MetisListCapabilitiesFn)(void *instance, struct MetisBuffer *out_payload);
 
 /**
- * One generic call, addressed by capability name (D1, D9, D11).
- *
- * Returns `Ok` with a plugin-allocated payload for an inline result, `Pending`
- * when the result will arrive through the host's `complete` callback, or a
- * failure status. `host` is passed per call as well as retained by the
- * instance, so an implementation can use either without a cost.
+ * Produces a second owning waker from a borrowed one.
  */
-typedef enum MetisStatus (*MetisInvokeFn)(void *instance,
-                                          const uint8_t *capability,
-                                          size_t capability_len,
-                                          uint64_t request_id,
-                                          struct MetisBuffer payload,
-                                          const struct MetisHostApiV1 *host,
-                                          struct MetisBuffer *out_payload);
+typedef struct MetisWaker (*MetisWakerCloneFn)(const struct MetisWaker *waker);
 
 /**
- * Requests cancellation of a pending request (D11, D12).
+ * Consumes a waker and schedules the future's task.
+ */
+typedef void (*MetisWakerWakeFn)(struct MetisWaker waker);
+
+/**
+ * Schedules the future's task without consuming the waker.
+ */
+typedef void (*MetisWakerWakeByRefFn)(const struct MetisWaker *waker);
+
+/**
+ * Consumes a waker without waking it.
+ */
+typedef void (*MetisWakerDropFn)(struct MetisWaker waker);
+
+/**
+ * The host's waker vtable.
+ *
+ * There is deliberately no `size` field, for the same reason as
+ * [`MetisFutureVtable`]: the handle is the only route to it, the four entries
+ * below are the whole surface, and a wrong-shape vtable is its author's bug.
+ */
+typedef struct MetisWakerVtable {
+    /**
+     * Produces a second owning waker from a borrowed one.
+     */
+    MetisWakerCloneFn clone;
+    /**
+     * Consumes a waker and schedules the future's task. May be called from any
+     * thread; must be cheap and non-blocking.
+     */
+    MetisWakerWakeFn wake;
+    /**
+     * Schedules the future's task without consuming the waker.
+     */
+    MetisWakerWakeByRefFn wake_by_ref;
+    /**
+     * Consumes a waker without waking it.
+     */
+    MetisWakerDropFn drop;
+} MetisWakerVtable;
+
+/**
+ * The host's waker: how a plugin asks to be polled again.
+ *
+ * The waker the host passes to `poll` is borrowed and valid until the future
+ * is dropped. The plugin may clone it, each clone is one `clone` call, and it
+ * must `drop` every clone. `wake` may be called from any thread, must be cheap
+ * and non-blocking, and may arrive after the future was dropped, which the
+ * host records rather than crashing on.
+ *
+ * There is deliberately no `Copy`: duplicating this value in Rust would make a
+ * second owning handle without a `clone` call, and every clone has to be
+ * counted and released through the vtable.
+ */
+typedef struct MetisWaker {
+    /**
+     * Host-owned state behind the waker, opaque to the plugin.
+     */
+    void *data;
+    /**
+     * The host's waker vtable.
+     */
+    const struct MetisWakerVtable *vtable;
+} MetisWaker;
+
+/**
+ * Polls a future's context.
+ *
+ * Returns `Ok` with a plugin-allocated buffer in `out_value` when the call is
+ * done, `Pending` when it is not (the plugin wakes `waker` when it is), and
+ * any other status when the call failed and the future is terminal. A poll
+ * must not block.
+ */
+typedef enum MetisStatus (*MetisFuturePollFn)(void *ctx,
+                                              struct MetisWaker waker,
+                                              struct MetisBuffer *out_value);
+
+/**
+ * Releases a future's context. Called by the host exactly once, and never
+ * while a poll is in progress.
+ */
+typedef enum MetisStatus (*MetisFutureDropFn)(void *ctx);
+
+/**
+ * The plugin's future vtable: how the host polls a plugin-owned context.
+ *
+ * There is deliberately no `size` field. A vtable is reached through the
+ * handle that carries it, one poll and one drop are the whole surface, and a
+ * plugin that publishes a vtable of the wrong shape is that plugin's own bug:
+ * it is not detectable at load, and a size field nobody reads would not make
+ * it detectable. The residual is recorded here rather than paid for in every
+ * poll.
+ */
+typedef struct MetisFutureVtable {
+    /**
+     * The single non-blocking poll entry.
+     */
+    MetisFuturePollFn poll;
+    /**
+     * The exactly-once release entry.
+     */
+    MetisFutureDropFn drop;
+} MetisFutureVtable;
+
+/**
+ * A plugin-owned future: an opaque context plus the vtable it is polled
+ * through.
+ *
+ * The host never looks inside `ctx`; it only passes it back to `poll` and to
+ * `drop`. The value is copyable because that is what a two-field C struct is,
+ * and copying it does not create a second future: the host still drops the one
+ * handle it was given, exactly once.
+ */
+typedef struct MetisFutureHandle {
+    /**
+     * Plugin-owned state for one in-flight future.
+     */
+    void *ctx;
+    /**
+     * The plugin's future vtable.
+     */
+    const struct MetisFutureVtable *vtable;
+} MetisFutureHandle;
+
+/**
+ * The only call entry: starts a host-polled future for a capability.
+ *
+ * On success `*out` holds a plugin-owned future. Nothing is called back for
+ * the call's result: the host polls the future it was handed. The request
+ * payload is host-owned and valid for the call only.
+ */
+typedef enum MetisStatus (*MetisInvokeFutureFn)(void *instance,
+                                                const uint8_t *capability,
+                                                size_t capability_len,
+                                                uint64_t request_id,
+                                                struct MetisBuffer payload,
+                                                const struct MetisHostApiV1 *host,
+                                                struct MetisFutureHandle *out);
+
+/**
+ * Marks a call's cancellation token.
+ *
+ * The plugin's future for that request is expected to resolve as `Cancelled`
+ * rather than be dropped mid-flight.
  */
 typedef enum MetisStatus (*MetisCancelFn)(void *instance, uint64_t request_id);
 
 /**
- * Releases a buffer this plugin allocated (D6).
+ * Releases a buffer this plugin allocated.
  *
  * The host calls it for every plugin-owned buffer it received, including a
- * payload it decided to drop.
+ * payload it decided to drop and one it is handed from inside
+ * `service_request`, where this entry is reentrant.
  */
 typedef enum MetisStatus (*MetisReleaseBufferFn)(struct MetisBuffer buffer);
 
 /**
- * Shuts an instance down: no callback may arrive after it returns (D12).
+ * Quiesces an instance.
+ *
+ * The host drops every future before calling it, so nothing may arrive after
+ * it returns and the instance may then be destroyed.
  */
 typedef enum MetisStatus (*MetisShutdownFn)(void *instance);
 
 /**
- * The version 1 function table (D1, D8).
+ * Delivers the host's answer to an earlier `service_request`.
  *
- * Append-only evolution: a new entry is appended after `shutdown` and `size`
- * grows to cover it. A reader compares `size` against the prefix it knows
- * before touching a field, and never decides presence from a null pointer:
- * the fields are plain function pointers, because `Option<NamedFnAlias>` has
- * no C rendering cbindgen can emit (measured).
+ * The plugin wakes its future's waker from here. The payload is host-owned and
+ * borrowed for the call.
+ */
+typedef enum MetisStatus (*MetisServiceCompleteFn)(void *instance,
+                                                   uint64_t request_id,
+                                                   enum MetisStatus status,
+                                                   struct MetisBuffer payload);
+
+/**
+ * The version 1 function table, revision 1 of the contract.
+ *
+ * Append-only evolution from here: a new entry is appended after
+ * `service_complete` and `size` grows to cover it. A reader compares `size`
+ * against the prefix it knows before touching a field, and never decides
+ * presence from a null pointer: the fields are plain function pointers,
+ * because `Option<NamedFnAlias>` has no C rendering cbindgen can emit
+ * (measured).
  */
 typedef struct MetisPluginTableV1 {
     /**
@@ -276,7 +543,7 @@ typedef struct MetisPluginTableV1 {
      */
     uint32_t abi_major;
     /**
-     * ABI minor version, which may exceed the one a host was built with.
+     * ABI minor version, which must be the one this build speaks.
      */
     uint32_t abi_minor;
     /**
@@ -288,25 +555,29 @@ typedef struct MetisPluginTableV1 {
      */
     MetisDestroyInstanceFn destroy_instance;
     /**
-     * Capability discovery (D9).
+     * Capability discovery.
      */
     MetisListCapabilitiesFn list_capabilities;
     /**
-     * The single generic call (D1).
+     * The only call entry.
      */
-    MetisInvokeFn invoke;
+    MetisInvokeFutureFn invoke_future;
     /**
-     * Cancellation (D11).
+     * Cancellation.
      */
     MetisCancelFn cancel;
     /**
-     * Buffer release (D6).
+     * Buffer release.
      */
     MetisReleaseBufferFn release_buffer;
     /**
-     * Shutdown (D12).
+     * Quiescence.
      */
     MetisShutdownFn shutdown;
+    /**
+     * Service completion.
+     */
+    MetisServiceCompleteFn service_complete;
 } MetisPluginTableV1;
 
 /**

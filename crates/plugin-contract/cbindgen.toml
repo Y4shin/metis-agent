@@ -29,29 +29,44 @@ include = [
     "MetisCreateInstanceFn",
     "MetisDestroyInstanceFn",
     "MetisListCapabilitiesFn",
-    "MetisInvokeFn",
+    "MetisInvokeFutureFn",
     "MetisCancelFn",
     "MetisReleaseBufferFn",
     "MetisShutdownFn",
-    "MetisCompleteFn",
+    "MetisServiceCompleteFn",
     "MetisProgressFn",
     "MetisEmitEventFn",
     "MetisLogFn",
+    "MetisServiceRequestFn",
+    "MetisFutureHandle",
+    "MetisFutureVtable",
+    "MetisFuturePollFn",
+    "MetisFutureDropFn",
+    "MetisWaker",
+    "MetisWakerVtable",
+    "MetisWakerCloneFn",
+    "MetisWakerWakeFn",
+    "MetisWakerWakeByRefFn",
+    "MetisWakerDropFn",
     "MetisPluginEntryV1Fn",
 ]
 
-# The payload envelope lives in `crate::payload`, deliberately outside the C ABI
-# surface, and its constants are excluded here so the generated header contains
-# exactly the contents of `crate::abi`. cbindgen emits every public constant of
-# the crate regardless of the include list above (measured), so the exclusion is
-# what keeps the C ABI surface and the cbindgen surface the same thing.
+# cbindgen emits every public constant of the crate regardless of the include
+# list above (measured), so the two surfaces are kept the same thing from this
+# side: the payload envelope constants and the presence slot constants belong in
+# the header and are absent here, while every constant that is *not* part of the
+# ABI surface is named below.
+#
+# The three presence thresholds are excluded because cbindgen cannot render
+# them at all: they are computed with `size_of`, which it does not evaluate
+# (measured, and the same reason the prototype's landed-size constants left
+# blank lines in its header). The header carries the slot constants they are
+# built from instead, and the C presence predicate is written in terms of
+# those.
 exclude = [
-    "METIS_PAYLOAD_VERSION_MASK",
-    "METIS_PAYLOAD_CODEC_BIT",
-    "METIS_PAYLOAD_RESERVED_MASK",
-    "METIS_PAYLOAD_FORMAT_VERSION",
-    "METIS_CODEC_JSON",
-    "METIS_CODEC_MESSAGEPACK",
+    "METIS_PLUGIN_TABLE_V1_INVOKE_FUTURE_THRESHOLD",
+    "METIS_PLUGIN_TABLE_V1_SERVICE_COMPLETE_THRESHOLD",
+    "METIS_HOST_API_V1_SERVICE_REQUEST_THRESHOLD",
 ]
 
 [enum]
