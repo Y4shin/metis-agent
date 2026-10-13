@@ -1,0 +1,24 @@
+# Code generation for the wire contract.
+#
+# Both plugins are BSR remote plugins pinned by tag, so generating never
+# installs a local plugin binary, `protoc`, or a JVM. `file_per_package=true`
+# makes each plugin emit one `<dotted.package>.rs` per package; the handwritten
+# module tree in `crates/api-contracts/src/proto.rs` and
+# `crates/api-contracts/src/connect.rs` mounts those files with `include!`.
+#
+# Regenerate with `bash scripts/regenerate-contracts.sh`; see
+# `contracts/README.md` for the command and the CI gates.
+version: v2
+clean: true
+plugins:
+  - remote: buf.build/anthropics/buffa:v0.9.2
+    out: ../crates/api-contracts/generated/buffa
+    opt:
+      - views=true
+      - json=true
+      - file_per_package=true
+  - remote: buf.build/connectrpc/rust:v0.9.0
+    out: ../crates/api-contracts/generated/connect
+    opt:
+      - buffa_module=crate::proto
+      - file_per_package

@@ -9,3 +9,16 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The protocol pair moves together and is pinned exactly; the generated code is
+# committed against these versions.
+connectrpc = { version = "=0.9.1", default-features = false, features = [
+    "client",
+    "server",
+    "json",
+] }
+buffa = "=0.9.2"
+
+# Generated types and stubs name these directly.
+serde = "1"
+http = "1"
+http-body = "1"
