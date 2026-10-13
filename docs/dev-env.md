@@ -41,6 +41,43 @@ binary, so a fresh install needs no preparation step and no `sqlx-cli` call.
 The database carries the table the per-surface token hashes live in. A token
 itself is never written to it: only the SHA-256 of the token's text.
 
+## Pairing and credentials
+
+A surface pairs once and then holds its own credential. The daemon keeps only a
+token's hash, so the token text lives on the surface that paired it.
+
+`METIS_PRESHARED_KEY` is the daemon's pairing secret, written as a secret
+reference:
+
+- `literal:<value>` is the secret itself, and a value with no prefix is the same
+  thing;
+- `env:<VARIABLE>` reads an environment variable;
+- `keystore:<account>` reads the platform keychain through its command line tool
+  (`secret-tool` on Linux, `security` on macOS), under the service name
+  `metis-daemon`;
+- `file:<path>` reads a file. The file must be readable by its owner alone: a
+  mode that grants anything to group or others is refused rather than read.
+
+An unset or empty `METIS_PRESHARED_KEY` closes pairing: there is no key to pair
+with, and the refusal names the variable. Pairing is reachable on both
+transports, and the key travels in the pairing request body, so it never appears
+in a URL or a log line.
+
+The local socket needs no credential, because the operating system's access
+control on the socket's directory and file is what authenticates a local caller.
+The remote listener requires one: every call carries its token as an
+`Authorization: Bearer` header, and a call without one is refused with a typed
+error that says whether pairing is needed or the access is gone. Each listener
+mounts its own policy (`AuthPolicy::LocalAcl` or `AuthPolicy::TokenRequired`) in
+`daemon::service::service`; nothing inspects the peer address to decide.
+
+The client keeps the token in the platform keychain when that command line tool
+is on `PATH`, and otherwise in `$XDG_DATA_HOME/metis/client/<surface>.token`
+at mode 600 inside a directory at mode 700. Pairing reports which backend took
+it. A keychain that is present but refuses is an error rather than a silent
+fallback to the file: a credential that is stored and cannot be read must not
+look like one that was never stored.
+
 ## Reproduction
 
 The first runnable path is the local transport skeleton:
@@ -50,5 +87,7 @@ endpoint, calls the echo RPC through the client wrapper, and prints
 when that variable is set, otherwise `$TMPDIR/metis/daemon.sock`, and there is
 no fallback to a shared `/tmp` path: a host with neither variable needs
 `METIS_ENDPOINT` to name one. The daemon creates the socket's directory and
-restricts it to its own user, so the example needs no credential. There is no
-product daemon yet.
+restricts it to its own user, so the example needs no credential. The daemon's
+binary is still a thin entry point: its own service (`daemon::service::service`)
+is what a listener serves, and the daemon effort wires the listeners into
+`main`.
