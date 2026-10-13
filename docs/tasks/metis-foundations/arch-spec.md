@@ -36,10 +36,14 @@ spec-reconciler when they become pending.
   `cargo test`, all through `devenv shell --`. Every crate carries
   `[lints] workspace = true`.
 - Rustfmt: `crates/` and `contracts/` config stays as committed
-  (`edition = "2024"`, `max_width = 100`).
+  (`edition = "2024"`, `max_width = 100`). The generated-tree post-step adds
+  `normalize_comments=true` as a command-line config only, so the committed
+  files stay as they are (see the `contract-pipeline` section).
 - Generated code is mounted, never edited; handwritten behaviour lives outside
   the generated trees. Generated trees are not excluded from fmt, clippy, or
-  test, they carry the measured allow set.
+  test, they carry the measured allow set (`clippy::match_single_binding` is
+  load-bearing today, `clippy::derivable_impls` stays dormant until the
+  contract declares its first enum).
 - Dependency posture: pin the pre-1.0 protocol pair exactly (`connectrpc` and
   `buffa` move together). Keep `plugin-contract` free of async runtimes and of
   serde in its C ABI surface.
@@ -50,10 +54,16 @@ spec-reconciler when they become pending.
 
 ---
 
-## Pending ticket: `contract-pipeline`
+## Landed ticket: `contract-pipeline`
 
-Builds the contract pipeline end to end: one `.proto`, pinned BSR generation
-into committed Rust, the regeneration command, and the CI gates.
+Landed first in the effort (merge `adea161` on `task/contract-pipeline`); the
+surfaces below are the measured ones. Builds the contract pipeline end to end:
+one `.proto`, pinned BSR generation into committed Rust, the regeneration
+command, and the CI gates.
+
+Two file locations below are superseded by `contract-gate-hardening`, which
+moves the buf configuration to the repository root: read that pending section
+before copying a path out of this one.
 
 ### Exports
 
@@ -67,7 +77,14 @@ into committed Rust, the regeneration command, and the CI gates.
   reserves the shape without declaring them.
 - `contracts/buf.yaml`: module root `proto`, `lint` STANDARD with no exception
   yet (the `RPC_RESPONSE_STANDARD_NAME` exception arrives with the streaming
-  `Event` message, and is recorded then), `breaking` FILE.
+  `Event` message, and is recorded then), `breaking` FILE. As landed, this
+  file's `breaking` block governs nothing in CI: the `buf breaking` step runs
+  from the repository root, where buf reads its built-in defaults, because from
+  `contracts/` the `.git#branch=main` target cannot resolve at all (measured:
+  exit 1, "does not appear to be a git repository"). The gate's category
+  happens to agree with the declared one only because buf's default is FILE.
+  `contract-gate-hardening` moves this configuration to a root `buf.yaml` and
+  deletes this file.
 - `contracts/buf.gen.yaml`: `version: v2`, `clean: true`, two BSR remote plugins
   pinned by tag:
   - `remote: buf.build/anthropics/buffa:v0.9.2`, out
@@ -77,6 +94,11 @@ into committed Rust, the regeneration command, and the CI gates.
     `../crates/api-contracts/generated/connect`, opts
     `buffa_module=crate::proto`, `file_per_package` (bare option, the plugin
     rejects `=true`; measured)
+
+  As landed, generation runs from the repository root against this template
+  file. `contract-gate-hardening` moves the file to the root with the same
+  pins, options, and output trees, so later chains should take the location
+  from that pending section.
 - Committed generated trees:
   `crates/api-contracts/generated/buffa/metis.v1.rs` (messages and views) and
   `crates/api-contracts/generated/connect/metis.v1.rs` (service trait, register
@@ -86,7 +108,11 @@ into committed Rust, the regeneration command, and the CI gates.
   mounts the buffa tree with `include!` and
   `#![allow(clippy::derivable_impls)]`. `src/connect.rs` does the same for the
   connect tree with `#![allow(clippy::match_single_binding)]`. The mount point
-  is `crate::proto`, which is exactly what `buffa_module` names.
+  is `crate::proto`, which is exactly what `buffa_module` names. Both allows are
+  present as planned, but only `clippy::match_single_binding` is load-bearing
+  (removing it fails clippy with three errors); `clippy::derivable_impls` stays
+  dormant until the contract declares its first enum, which `event-stream` adds
+  as `EventKind`.
 - `crates/api-contracts/Cargo.toml` dependencies: `connectrpc = "=0.9.1"` with
   `default-features = false, features = ["client", "server", "json"]`,
   `buffa = "=0.9.2"`, `serde = "1"`, `http = "1"`, `http-body = "1"`. The
@@ -96,14 +122,30 @@ into committed Rust, the regeneration command, and the CI gates.
 - `scripts/regenerate-contracts.sh` with an optional `--check`: regenerate with
   `buf generate`, apply the rustfmt post-step to both generated trees, and in
   `--check` mode regenerate into a temporary directory, format it, and diff
-  against the committed trees, exiting non-zero on any difference.
+  against the committed trees, exiting non-zero on any difference. The
+  post-step is `rustfmt --edition 2024 --config-path rustfmt.toml --config
+  normalize_comments=true`, one option beyond the repository config. Without
+  it, buffa's multi-line `/** */` doc comments keep the item indentation,
+  rustdoc reads the prose as an indented Markdown code block, and the doctests
+  it collects cannot compile, so `cargo test` fails. The user confirmed
+  `normalize_comments=true` as the precedent every later generated tree
+  inherits.
+- Generation and the drift check resolve the two pinned plugins from the BSR
+  over the network on every run, so the gates depend on the network being
+  reachable and on anonymous rate limits: `resource_exhausted: too many
+  requests` was reproduced here and can fail a pull request for a non-code
+  reason. CI pins `BUF_TOKEN` from `secrets.BUF_TOKEN` for the two BSR-backed
+  steps (`contract-gate-hardening`).
 - `contracts/README.md` documenting the one developer-facing regeneration
   command and what the CI gates assert.
 - CI (`.github/workflows/ci.yml`) additions, all in the existing
   `devenv shell --` style: `actions/checkout` gains `fetch-depth: 0` (needed by
-  `buf breaking`), then `buf lint` (from `contracts/`),
-  `buf breaking --against '.git#branch=main'`, and
-  `bash scripts/regenerate-contracts.sh --check`.
+  `buf breaking`), then `buf lint` (from `contracts/`, the one buf command that
+  reads the declared configuration),
+  `buf breaking --against '.git#branch=main'` from the repository root (buf's
+  built-in defaults, see this ticket's `buf.yaml` entry), and
+  `bash scripts/regenerate-contracts.sh --check`. The two BSR-backed steps take
+  `BUF_TOKEN` from `secrets.BUF_TOKEN`.
 - `devenv.nix`: add `pkgs.buf` so `buf` is on the shell path (pinned by
   `devenv.lock`).
 
@@ -147,7 +189,13 @@ Each seam is a public boundary the worker tests; nothing deeper.
 3. **Script seam.** `bash scripts/regenerate-contracts.sh --check` exits 0 on a
    clean tree and non-zero after a hand edit to a generated file.
 4. **Gate seam.** `buf lint` and `buf breaking --against '.git#branch=main'`
-   exit 0 on the committed contract, and the CI job runs both.
+   exit 0 on the committed contract, and the CI job runs both. The breaking
+   gate only has a comparison input once `main` itself carries the contract,
+   which the landing merge established: on a working branch whose base predates
+   the proto, every change to the declared contract is an addition on the
+   comparison's input side, so the gate cannot fail retroactively there
+   (measured: the CI command exits 0 with a breaking field rename in the
+   working tree, while `--against '.git#branch=<branch>'` exits 100).
 
 Test types: an integration test at `crates/api-contracts/tests/contract.rs` for
 seams 1 and 2; the two scripts and the two buf commands for seams 3 and 4.
@@ -167,14 +215,22 @@ seams 1 and 2; the two scripts and the two buf commands for seams 3 and 4.
   This applies to `local-transport-rpc-skeleton` and to the daemon effort.
 - `buf breaking` in FILE mode is the compatibility gate for later contract
   additions: adding RPCs and messages is allowed, changing or removing the echo
-  surface is not.
+  surface is not. The mode that governs CI is the one in the root `buf.yaml`
+  once `contract-gate-hardening` lands; until then it is buf's built-in
+  default, which happens to be FILE. A later contract ticket may not weaken the
+  breaking gate by editing the configuration surface alone, because the same
+  file feeds `buf lint`. Regeneration keeps going through
+  `scripts/regenerate-contracts.sh` after the move.
 
 ---
 
-## Pending ticket: `plugin-abi-core`
+## Landed ticket: `plugin-abi-core`
 
-Builds the plugin boundary itself: the primitive ABI, the generated header, and
-a fixture plugin driven by a harness.
+Landed on `task/plugin-abi-core` (merge `8ff64fa`, on top of the landed
+`contract-pipeline`). The ABI surface below matches the plan name for name; the
+corrections landed in tooling and test support. Builds the plugin boundary
+itself: the primitive ABI, the generated header, and a fixture plugin driven by
+a harness.
 
 ### Exports
 
@@ -219,16 +275,31 @@ a fixture plugin driven by a harness.
   version or non-zero reserved bits and `Unsupported` for a codec this build does
   not know, plus encode and body-strip helpers.
 - `crates/plugin-contract/cbindgen.toml` and the committed generated header
-  `crates/plugin-contract/include/metis_plugin_abi.h`.
+  `crates/plugin-contract/include/metis_plugin_abi.h`. The `[export] include`
+  list carries every ABI type, and an `exclude` list names the six
+  `crate::payload` constants (`METIS_PAYLOAD_VERSION_MASK`,
+  `METIS_PAYLOAD_CODEC_BIT`, `METIS_PAYLOAD_RESERVED_MASK`,
+  `METIS_PAYLOAD_FORMAT_VERSION`, `METIS_CODEC_JSON`,
+  `METIS_CODEC_MESSAGEPACK`), because cbindgen emits every public constant of
+  the crate regardless of the include list: the first generated header leaked
+  them. Any new public constant in `plugin-contract` must be excluded by name
+  too.
 - `scripts/regenerate-abi-header.sh` with an optional `--check`, mirroring the
   contracts script: regenerate the header from the crate, and in `--check` mode
   regenerate into a temporary file and diff, exiting non-zero on drift.
 - `crates/plugin-fixture/`, one workspace member, test support:
-  - `src/lib.rs` a `cdylib` fixture implementing the v1 table with
-    `tool.echo` (inline), a pending capability completed through the host
-    `complete` callback with a `progress` callback, a cancel path, a
-    late-completion-after-cancel path, a panic path, and an allocation ledger
-    that reports `allocs`, `frees`, `live`, `violations`, `suppressed`.
+  - `src/lib.rs` a `cdylib` plus `rlib` fixture implementing the v1 table with
+    four capabilities: `tool.echo` (inline), `tool.pending` (pending, then a
+    `progress` callback, then a completion through the host `complete`
+    callback), `tool.cancellable` (suppresses its completion after a cancel),
+    and `tool.panic`, plus an allocation ledger that reports `allocs`, `frees`,
+    `live`, `violations`, `suppressed`. The `rlib` exists only so the sibling
+    harness binary shares the payload shapes instead of restating the JSON; the
+    loaded `cdylib` is unchanged and still exports exactly one `metis_*`
+    symbol. The late-completion-after-cancel path is `tool.pending` itself,
+    which never honours a cancel, so no separate `tool.late` name exists: the
+    host's cancel succeeds, the plugin's completion still arrives, and the host
+    drops it and still releases its buffer.
   - `src/bin/abi-harness.rs` the harness: it builds the fixture first with
     `env!("CARGO")` (`cargo build -p plugin-fixture --lib`), then loads the
     library placed next to `current_exe()`, prints one `[ok]`/`[fail]` line per
@@ -237,8 +308,11 @@ a fixture plugin driven by a harness.
     encoded rather than documented.
 - `Cargo.toml` and `devenv.nix` additions: workspace member
   `crates/plugin-fixture`; workspace dependencies for `libloading = "0.9"`,
-  `serde = "1"`, `serde_json = "1"`, and the `cc` build-dependency for
-  `plugin-contract`; `pkgs.cbindgen` in `devenv.nix`.
+  `serde = "1"` (with `derive`), `serde_json = "1"`, and the `cc`
+  build-dependency for `plugin-contract`; `pkgs.rust-cbindgen` in `devenv.nix`.
+  The attribute is `rust-cbindgen`, not `cbindgen`: the pinned nixpkgs has no
+  `cbindgen` attribute, and `rust-cbindgen` installs the `cbindgen` binary at
+  0.29.4, the version the mechanics spike measured.
 - CI: one step running the harness
   (`devenv shell -- cargo run -p plugin-fixture --bin abi-harness`) and one
   running `bash scripts/regenerate-abi-header.sh --check`.
@@ -270,7 +344,10 @@ a fixture plugin driven by a harness.
   to the prototype (measured).
 - Do not skip the `[export] include` list in `cbindgen.toml`: a crate whose ABI
   surface is a table of function pointers exports no functions to seed the
-  dependency graph, so cbindgen emits only constants (measured).
+  dependency graph, so cbindgen emits only constants (measured). The include
+  list is not sufficient on its own: every public constant outside `crate::abi`
+  needs a matching `exclude` entry, because cbindgen emits public constants
+  regardless of the include list (measured).
 - Do not hand-write the header, and do not edit it to fix a compile error. Fix
   the Rust source.
 - Do not add a cross-boundary allocator, a shared heap, or a `free` call from the
@@ -292,7 +369,8 @@ a fixture plugin driven by a harness.
 2. **Table seam.** The harness resolves the symbol, reads `size`, `abi_major`,
    and `abi_minor`, and drives instance creation, capability listing, invoke
    (inline and pending), cancel, buffer release, and shutdown from the real
-   library.
+   library. The pending capability is `tool.pending` and the cancel path is
+   `tool.cancellable`.
 3. **Envelope seam.** `crate::payload` round-trips a header, rejects a bad
    format version or set reserved bit with `InvalidArgument`, and rejects an
    unknown codec with `Unsupported`. Exercised as a unit test and across the
@@ -302,7 +380,14 @@ a fixture plugin driven by a harness.
    harness drops and still releases.
 5. **Panic seam.** A panic inside an exported adapter and a panic inside a host
    callback each become `MetisStatus::Internal`, and the instance still serves
-   the next call.
+   the next call. The host-callback half is harness-owned rather than
+   fixture-owned: the harness panics on purpose inside its own `complete`
+   callback for one designated request, catches it in that frame, and records
+   the request as `internal`. A panic inside a Rust `extern "C"` callback
+   cannot be caught by the plugin that called it, because unwinding out of an
+   `extern "C"` frame aborts, so only the callback's own frame can convert it.
+   Every host must wrap every callback it installs the same way; that is an
+   obligation on `plugin-runtime` (metis-plugins), not a fixture detail.
 6. **Layout seam.** The Rust const assertions and the C translation unit
    static-assert the same numbers in pointer-size terms, and both compile on
    every build.
@@ -317,24 +402,108 @@ compile-time assertions for seam 6; the script for seam 7.
 - `plugin-compatibility` reads only the prefix. It uses `metis_read_prefix` and a
   `size`-based presence predicate, never a direct field read past the prefix it
   knows, and it appends nothing to the layout. Per-capability version gating
-  reads descriptor payloads, not the table.
+  reads descriptor payloads, not the table. The predicate is named here as the
+  contract but is not exported today: this ticket landed `metis_read_prefix`
+  only, and `plugin-compatibility` adds the helper in-crate, which is additive
+  and changes no layout. A per-capability version gate check was written
+  against the fixture and removed before landing, because the fixture
+  advertises no version a host would refuse, so the check could not fail;
+  gating is `plugin-compatibility`'s subject.
 - `plugin-authoring-trait` lives in the same crate behind a feature gate named
   `authoring` and imports only `crate::abi` and `crate::payload`. It supplies
   `table::<P: Plugin + Default>()` returning a `const MetisPluginTableV1`, and
   the host adapter. The trait adapter always returns `Pending` (D15) while the
-  ABI keeps its inline path for direct implementers.
+  ABI keeps its inline path for direct implementers. Every public item it adds
+  is subject to the cbindgen rule above: a new public constant lands in the
+  header unless it is excluded, so an item meant for Rust authors only must be
+  excluded by name.
 - `plugin-runtime` (metis-plugins) and `metis-plugin-sdk` consume these types;
   this effort hands them the ABI and the layout guarantees, not a loader.
+  `plugin-runtime` must wrap every host callback it installs so a panic is
+  converted inside the callback's own frame (seam 5).
 - The fixture and the harness are test support. Nothing outside
   `crates/plugin-fixture` depends on them, and the fixture's payload types are
   deliberately not exported from `plugin-contract`.
 
 ---
 
+## Pending ticket: `contract-gate-hardening`
+
+Hardens the contract gates `contract-pipeline` landed: one configuration that
+every buf command reads, and authentication for the two BSR-backed gates. It
+supersedes the `contracts/buf.yaml` and `contracts/buf.gen.yaml` locations in
+the `contract-pipeline` section above.
+
+### Exports
+
+- A root `buf.yaml` declaring the module at `contracts/proto`, `lint` STANDARD
+  with still no exception, and `breaking` FILE. `contracts/buf.yaml` is deleted.
+- A root `buf.gen.yaml` carrying the same `version: v2`, `clean: true`, two BSR
+  plugin pins, options, and output trees that `contracts/buf.gen.yaml` carries
+  today, so the committed trees under `crates/api-contracts/generated/` are
+  reproduced byte for byte.
+- `buf lint`, `buf breaking`, and generation all run from the repository root
+  and read that one configuration; `buf lint` stops reading a directory-local
+  configuration surface.
+- CI supplies `BUF_TOKEN` from `secrets.BUF_TOKEN` to the steps that resolve
+  plugins (generation and the drift check). An absent or empty secret must leave
+  both gates working unauthenticated, and the form buf needs is measured rather
+  than assumed, because an empty variable may not equal an unset one.
+- `contracts/README.md` and `docs/testing.md` updated to the new locations, with
+  the documented developer command unchanged or shorter.
+- `scripts/regenerate-contracts.sh` keeps its behaviour, including the
+  `normalize_comments=true` rustfmt post-step, and still exits 0 with `--check`
+  on a clean tree.
+
+### Existing abstractions to use
+
+- `contracts/buf.yaml`, `contracts/buf.gen.yaml`, and
+  `scripts/regenerate-contracts.sh` as landed: this ticket moves configuration,
+  it does not rewrite the pipeline.
+- `docs/testing.md` owns the run commands; `contracts/README.md` owns the
+  developer-facing regeneration command.
+- CI keeps its existing `devenv shell --` style steps and adds the token only to
+  the steps that resolve plugins.
+
+### Do NOT reimplement
+
+- Do not add a second regeneration script or a second generation path.
+- Do not change the two plugin pins, their options, or the committed tree
+  layout: the drift check must still reproduce the committed output.
+- Do not weaken the root `lint` policy or the `breaking` category to make the
+  configuration move easier.
+- Do not exclude the generated trees from `cargo fmt`, `clippy`, or `test`.
+
+### Seams
+
+1. **Configuration seam.** One deliberate edit to the root `breaking` block
+   changes the verdict of `buf breaking` run from the repository root, which
+   proves the gate reads that file. `buf lint` reads the same file.
+2. **Token seam.** The steps that resolve plugins receive `BUF_TOKEN` from
+   `secrets.BUF_TOKEN`, and both BSR-backed gates still work when the secret is
+   absent or empty.
+3. **Reproduction seam.** `bash scripts/regenerate-contracts.sh --check` exits 0
+   on a clean tree from the new root layout.
+
+Test types: the two buf commands and the deliberate-edit probe for seams 1 and
+2; the script for seam 3. No new Rust test.
+
+### Interface contract
+
+- After this ticket the repository has exactly one buf configuration surface, at
+  the root, and every buf command reads it. A later contract ticket that changes
+  lint or breaking policy edits that one file, so a declared policy and the
+  verdict of the gate cannot drift apart again.
+- The Rust gates, the `plugin-abi-core` header drift check, and the ABI harness
+  are unaffected: this ticket changes where buf reads its configuration and how
+  CI authenticates, not what is generated.
+
+---
+
 ## Downstream interface contracts (outline)
 
 These tickets are not pending yet. Their sections are added when they reach the
-frontier; the commitments below are what the two landing tickets must already
+frontier; the commitments below are what the two landed tickets must already
 support.
 
 - `local-transport-rpc-skeleton`: `crates/api-contracts` gains a handwritten
@@ -346,7 +515,9 @@ support.
   request, the snapshot as the stream's first message, heartbeats as ordinary
   messages, and correlation ids in request metadata. The
   `RPC_RESPONSE_STANDARD_NAME` lint exception is added here, and the contract
-  regenerates through `scripts/regenerate-contracts.sh`.
+  regenerates through `scripts/regenerate-contracts.sh`. `EventKind` is the
+  contract's first enum, which is what makes the buffa mount's dormant
+  `clippy::derivable_impls` allow load-bearing.
 - `windows-named-pipe`, `tcp-listener`, `tls-and-client-trust`,
   `reverse-proxy-mode`: extend the same `transport` module; no second service
   implementation.
@@ -356,24 +527,33 @@ support.
 - `plugin-authoring-trait`: the `authoring` feature in `plugin-contract`, with
   the settled cancellation token and always-pending adapter, plus the
   descriptor/dispatch consistency check and the lifecycle and `emit_event` gaps
-  the authoring spike recorded.
+  the authoring spike recorded. It extends the crate `plugin-abi-core` landed,
+  so its new public items must respect the cbindgen `exclude` rule.
 - `plugin-compatibility`: prefix reading and per-capability version gating on
-  top of the unchanged layout.
+  top of the unchanged layout. It adds the `size`-based presence predicate
+  in-crate, since `plugin-contract` exports `metis_read_prefix` but not the
+  predicate.
 
 ## Architecture notes
 
-- The pending tickets are independent (no `blocked_by` edge between them), so
-  they run in level 0 sequentially on the shared repo cwd, in the order
-  `tw_dependency_levels` returns.
+- The two landed tickets were independent (no `blocked_by` edge between them),
+  so they ran in level 0 sequentially on the shared repo cwd, in the order
+  `tw_dependency_levels` returned, and `plugin-abi-core` landed on
+  `contract-pipeline`'s landing branch.
+- `contract-gate-hardening` is `blocked_by` `contract-pipeline` and edits the
+  pipeline that ticket landed, so it lands on the same chain.
 - Both tickets touch the workspace root (`Cargo.toml`, `devenv.nix`,
   `.github/workflows/ci.yml`) and `crates/`, which is why they cannot run in
   parallel and why the second chain lands on the first chain's landing branch.
 - `contract-pipeline` adds the first committed generated tree in the repository,
-  so the fmt and clippy allowances it establishes are the precedent every later
+  so the fmt and clippy allowances it establishes, and the
+  `normalize_comments=true` rustfmt post-step, are the precedent every later
   generated tree follows.
 - `plugin-abi-core` is the first place the repository compiles C. The `cc`
   build-dependency plus `-std=c11` is the measured minimum; the C compiler is
   already in the devenv toolchain.
 - The plugin fixture adds a workspace member that exists only to prove the
   boundary. That is deliberate and is the shape the effort spec's plugin ABI
-  seam describes.
+  seam describes. The harness is the owner of the host-callback panic probe and
+  of the library rebuild, so no consumer of the fixture can load a stale or
+  unwrapped library.
