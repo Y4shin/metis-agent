@@ -3846,14 +3846,158 @@ window is built for this policy.
 
 ---
 
+## Pending ticket: `reverse-proxy-mode`
+
+Blocked by the deprecated `tls-and-client-trust`, whose alternative it is, so its
+blocking edge is satisfied by a done ticket. It lands the deployment shape ADR
+0004 chose: the daemon stays plaintext, a reverse proxy terminates TLS in front of
+it, the daemon reads forwarded information only from proxies the operator names,
+and it warns honestly wherever plaintext remains.
+
+### Exports
+
+- `crates/api-contracts/src/proxy.rs` (new, mounted as `pub mod proxy;`): the
+  trusted-proxy set, the forwarded-header rule and the exposure decision. It sits
+  beside `transport` because both the listener and the daemon's handlers reach
+  `api-contracts`.
+  - `pub const TRUSTED_PROXIES_ENV: &str = "METIS_TRUSTED_PROXIES";`
+  - `pub struct TrustedProxies(Vec<IpAddr>)` with `resolve() -> Result<Self,
+    ConfigError>`, `parse(&str) -> Result<Self, ConfigError>`, `contains(&self, peer:
+    IpAddr) -> bool`, `is_empty()` and `Display`. An absent or empty variable is the
+    empty set, which is off by default, the shape `resolve_remote_addr` set; a
+    malformed entry is `ConfigError::InvalidTrustedProxy { variable, value }`, the
+    variant the non-exhaustive enum was declared to gain. Entries are exact
+    addresses, comma separated, whitespace tolerated, and loopback is not trusted
+    implicitly: the trust rule stays visible in configuration.
+  - `pub enum ClientAddress { Peer(IpAddr), Forwarded(IpAddr) }` with `address()`
+    and a `Display` naming which it is, so a test asserts where the answer came from
+    and not only what it is.
+  - `pub fn client_address(peer: Option<IpAddr>, trusted: &TrustedProxies, headers:
+    &HeaderMap) -> Option<ClientAddress>`: the peer, or, when the peer is trusted and
+    `X-Forwarded-For` is present, its left-most entry. An untrusted peer's forwarded
+    headers are never read, so a hostile client cannot influence the answer, and a
+    missing peer (the Unix socket) is `None`.
+  - `pub enum ClientScheme { Plaintext, Encrypted }` and `pub fn client_scheme(peer,
+    trusted, headers) -> ClientScheme`: `X-Forwarded-Proto: https` from a trusted peer
+    is `Encrypted`; everything else, an untrusted peer included, is `Plaintext`,
+    because the daemon must not claim an encryption it cannot see.
+  - `pub enum Warning { PlaintextListener { addr: SocketAddr }, PlaintextSecret {
+    client: Option<IpAddr> } }`, whose `Display` names what is exposed and the remedy
+    (`TRUSTED_PROXIES_ENV`), with the two decisions as pure functions:
+    `listener_warning(addr, trusted)`, `Some` exactly when the bind address is not
+    loopback and no trusted proxy is named, and `secret_warning(scheme, client)`,
+    `Some` on a plaintext client leg. Plus `pub struct WarnOnce` (an `AtomicBool`) so
+    a per-request warning reaches the operator once per process rather than once per
+    call.
+- `crates/api-contracts/src/transport.rs`: the TCP front-ends stop discarding the
+  peer. `serve_tcp_listener_service` reads `stream.peer_addr()` and stamps
+  `connectrpc::PeerAddr(peer)` into each request's extensions before the mounted
+  service sees it, which is what `RequestContext::peer_addr()` reads. The private
+  `serve_connection` and the single accept loop keep their shape, so the interceptor
+  chain stays mounted and no second connection path appears. The front-end resolves
+  `TRUSTED_PROXIES_ENV` the way `serve_uds_service` resolves its ACL, and prints
+  `listener_warning(local_addr, &trusted)` once at bind through the `eprintln!` this
+  file already uses for connection errors. The two doc comments that say the proxy
+  trust rule belongs to another ticket are corrected.
+- `crates/daemon/src/service.rs`: the `Pair` handler, the one call that carries a
+  secret in a body, asks `secret_warning` with the request's peer and scheme and
+  emits through the service's `WarnOnce` when the client leg is plaintext. Nothing
+  on the wire changes, and a loopback local call warns at most once.
+- `crates/client/src/skeleton.rs`: unchanged in shape; its remote path reaches the
+  same front-end, so the peer stamp and the warning come for free and the in-process
+  tests can drive the rule over a real loopback listener.
+- `docs/dev-env.md` gains `TRUSTED_PROXIES_ENV` beside `REMOTE_ADDR_ENV`, and
+  `docs/testing.md` gains the rule and warning commands with the properties they
+  assert.
+
+### Existing abstractions to use
+
+- `ConfigError`'s non-exhaustive enum, declared for exactly this, and
+  `resolve_remote_addr`'s shape (absent or empty means off, a malformed value is a
+  loud error) as the pattern for the new variable.
+- The landed TCP front-ends and their one accept loop as the only place a peer
+  address is known, and `connectrpc::PeerAddr` with `RequestContext::peer_addr()`
+  rather than a hand-rolled extension type the library would not read.
+- `PathAcl::from_env()` in the Unix front-end as the precedent for reading listener
+  configuration where the listener binds, and the file's existing `eprintln!` for its
+  own diagnostics.
+- `identity::from_headers` and the existing per-handler header reads as the shape for
+  reading forwarded headers, and the landed test fixtures: the daemon stream and
+  auth tests' `serve_over_tcp` and `Fixture`, and the client remote test's loopback
+  listener.
+
+### Do NOT reimplement
+
+- Do not terminate TLS, add a certificate, key or trusted-CA setting, or present a
+  fingerprint (ADR 0004). No rustls, no tower-http.
+- Do not trust a forwarded header from an unnamed peer, and do not walk a multi-hop
+  `X-Forwarded-For` chain: the daemon takes the left-most entry from a single trusted
+  hop and nothing else.
+- Do not add a second connection path, a second service or a second accept loop; the
+  peer stamp goes into the landed front-end.
+- Do not add rate limiting, IP allow-listing or a new authorization policy. The
+  trusted-proxy list decides only whether forwarded information is read.
+- Do not change the wire contract, the identity headers, the credential, the event
+  stream, the ABI, or the plugin crates.
+
+### Seams
+
+1. **Configuration seam.** Absent and empty mean no trusted proxies;
+   comma-separated literals parse with whitespace tolerated; a malformed entry is
+   `ConfigError::InvalidTrustedProxy` naming variable and value; `contains` is
+   exact-address and does not trust loopback implicitly.
+2. **Forwarded-rule seam (criteria 1 and 3).** With the peer named and
+   `X-Forwarded-For: 203.0.113.7`, the client address is `Forwarded(203.0.113.7)`;
+   with the same header from an unnamed peer it is `Peer(peer)`; an unnamed peer's
+   `X-Forwarded-Proto: https` leaves the scheme `Plaintext` while a named peer's
+   `https` makes it `Encrypted`; with no peer at all the answer is `None` and nothing
+   is forwarded.
+3. **Peer-stamp seam.** Over a real loopback listener through the landed
+   service-taking front-end, a handler reads `ctx.peer_addr()` as `Some(loopback)`,
+   which is what makes the rule reachable end to end; over the Unix socket it is
+   `None`.
+4. **Warning seam (criterion 2).** `listener_warning` on a non-loopback address with
+   no proxy named is `Some`, the same address with a proxy named is `None`, and a
+   loopback address with none named is `None`; a plaintext client leg on the
+   secret-bearing call is `Some` and an `Encrypted` one is `None`; and `WarnOnce`
+   allows exactly one emission.
+5. **Additivity seam.** The ABI and plugin crates are untouched at 73 checks, the
+   contract is unchanged, the local socket path is unaffected, `Pair` behaves
+   identically over a loopback listener, and the workspace suite stays green.
+
+Test types: unit tests in `api-contracts` for the configuration, the forwarded rule,
+the scheme rule and the warning decisions; integration tests over a real loopback
+listener in the daemon's test suite for the peer stamp and the
+accepted-versus-ignored assertion; the existing client remote test for the in-process
+path; the contract and workspace gates for the rest.
+
+### Interface contract
+
+- `windows-named-pipe` inherits the rule as an `Option<IpAddr>` peer, so a named pipe
+  passes `None` and forwards nothing unless that ticket decides otherwise. It adds no
+  proxy notion of its own.
+- The daemon effort starts its listener through the landed front-ends, so it inherits
+  the bind-time warning and the peer stamp; it must never use a forwarded header for
+  authorization, only for exposure and, if it records one, for its audit record.
+- The map's deferred question of what a client should verify about a proxied endpoint
+  stays deferred with no owner (ADR 0004), and this ticket does not answer it.
+- Recorded residuals: the daemon cannot detect an operator who exposes the listener
+  without a proxy; the stamp covers the landed TCP front-ends only; the warning is
+  stderr text behind a once-per-process latch with no logging framework; a multi-hop
+  chain is not walked, so the left-most entry is only the client when the first hop
+  is honest; and `X-Forwarded-*` is a convention rather than a schema, so a proxy
+  that sets none leaves the daemon believing plaintext.
+
+---
+
 ## Downstream interface contracts (outline)
 
-The tickets still pending in this effort are `reverse-proxy-mode` and
-`windows-named-pipe`. Their sections are added when their chains reach the
-frontier; the commitments below are what the landed tickets must already support,
-including the surfaces `local-identity-and-acl`, `state-store`,
-`pairing-and-tokens`, `remote-pairing`, `event-stream`,
-`stream-resume-and-expiry` and `cancellation-and-slow-consumers` landed.
+The only ticket still pending in this effort is `windows-named-pipe`. Its section is
+added when its chain reaches the frontier, and every ticket landed so far has one;
+the commitments below are what the landed tickets must already support, including
+the surfaces `local-identity-and-acl`, `state-store`, `pairing-and-tokens`,
+`remote-pairing`, `event-stream`, `stream-resume-and-expiry` and
+`cancellation-and-slow-consumers` landed.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
