@@ -12,6 +12,7 @@
 //! dropped and [`Ring::earliest_resumable`] advances, and a restart empties it.
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
@@ -20,6 +21,52 @@ use futures_util::stream::{self, Stream};
 use tokio::sync::broadcast;
 
 use crate::proto::metis::v1::{self, EventKind};
+
+/// Why a cursor cannot be served.
+///
+/// One value covers both ways a cursor expires, because a caller's answer is
+/// the same either way: open a cursorless stream, which begins with the
+/// snapshot. The window's bounds are in the value rather than in prose, so a
+/// caller can say how far the daemon has moved on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorError {
+    /// The cursor is outside what the ring can still serve: the window moved
+    /// past it, or the daemon restarted and the identifier space began again.
+    Expired {
+        /// The cursor the caller presented.
+        cursor: u64,
+        /// The oldest identifier the ring can still resume from.
+        earliest_resumable: u64,
+        /// The newest identifier the ring has assigned.
+        latest_id: u64,
+    },
+}
+
+impl fmt::Display for CursorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Expired {
+                cursor,
+                earliest_resumable,
+                latest_id,
+            } => {
+                if cursor > latest_id {
+                    write!(
+                        f,
+                        "cursor {cursor} is expired: the daemon restarted and its identifier space began again, so the newest identifier is {latest_id} and the window begins at {earliest_resumable}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "cursor {cursor} is expired: the window moved past it, and now begins at {earliest_resumable} and ends at {latest_id}"
+                    )
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for CursorError {}
 
 /// One event: the Rust mirror of the contract's `Event` message.
 ///
@@ -94,6 +141,46 @@ struct State {
     next_id: u64,
 }
 
+impl State {
+    /// The oldest identifier a cursor can still resume from: the identifier of
+    /// the event that opened the window, or `0` when the ring holds nothing.
+    fn earliest_resumable(&self) -> u64 {
+        self.events.front().map_or(0, |event| event.id)
+    }
+
+    /// The identifier most recently assigned, or `0` when nothing has been
+    /// published.
+    fn latest_id(&self) -> u64 {
+        self.next_id.saturating_sub(1)
+    }
+
+    /// The current head of each selected channel, in identifier order.
+    ///
+    /// A channel with nothing in the window contributes nothing, a channel
+    /// named twice contributes once, and an empty selection selects nothing.
+    fn heads(&self, channels: &[&str]) -> Vec<Event> {
+        let mut heads: HashMap<&str, Event> = HashMap::new();
+        for event in &self.events {
+            if channels.contains(&event.channel.as_str()) {
+                heads.insert(event.channel.as_str(), event.clone());
+            }
+        }
+        let mut heads: Vec<Event> = heads.into_values().collect();
+        heads.sort_unstable_by_key(|event| event.id);
+        heads
+    }
+
+    /// Every held event after `id`, for the selected channels, in identifier
+    /// order.
+    fn since(&self, id: u64, channels: &[&str]) -> Vec<Event> {
+        self.events
+            .iter()
+            .filter(|event| event.id > id && channels.contains(&event.channel.as_str()))
+            .cloned()
+            .collect()
+    }
+}
+
 impl Ring {
     /// A ring holding at most `capacity` events.
     ///
@@ -151,14 +238,14 @@ impl Ring {
     /// published.
     #[must_use]
     pub fn latest_id(&self) -> u64 {
-        self.lock().next_id.saturating_sub(1)
+        self.lock().latest_id()
     }
 
     /// The oldest identifier a cursor can still resume from: the identifier of
     /// the event that opened the window, or `0` when the ring holds nothing.
     #[must_use]
     pub fn earliest_resumable(&self) -> u64 {
-        self.lock().events.front().map_or(0, |event| event.id)
+        self.lock().earliest_resumable()
     }
 
     /// The current head of each selected channel, in identifier order.
@@ -167,28 +254,14 @@ impl Ring {
     /// named twice contributes once, and an empty selection selects nothing.
     #[must_use]
     pub fn snapshot(&self, channels: &[&str]) -> Vec<Event> {
-        let state = self.lock();
-        let mut heads: HashMap<&str, Event> = HashMap::new();
-        for event in &state.events {
-            if channels.contains(&event.channel.as_str()) {
-                heads.insert(event.channel.as_str(), event.clone());
-            }
-        }
-        let mut heads: Vec<Event> = heads.into_values().collect();
-        heads.sort_unstable_by_key(|event| event.id);
-        heads
+        self.lock().heads(channels)
     }
 
     /// Every held event after `id`, for the selected channels, in identifier
     /// order.
     #[must_use]
     pub fn since(&self, id: u64, channels: &[&str]) -> Vec<Event> {
-        self.lock()
-            .events
-            .iter()
-            .filter(|event| event.id > id && channels.contains(&event.channel.as_str()))
-            .cloned()
-            .collect()
+        self.lock().since(id, channels)
     }
 
     /// A live subscription: every event published from now on, in identifier
@@ -200,45 +273,92 @@ impl Ring {
         }
     }
 
-    /// The stream one subscriber is served: the snapshot for `channels` first,
-    /// then the events that follow it, with a heartbeat on an idle stream.
+    /// The stream one subscriber is served.
     ///
-    /// Every stream opens with the snapshot rather than with live traffic: a
-    /// selected channel holding an event contributes its head, and a selection
-    /// holding nothing contributes one empty snapshot message carrying the
-    /// daemon's latest identifier. The subscription is taken before the
-    /// snapshot, so an event published between the two is not lost; events at or
-    /// below the snapshot's head are then suppressed, so the stream carries
-    /// each event once. A non-zero `cursor` is a floor on the same terms, which
-    /// is the placeholder rule `stream-resume-and-expiry` replaces.
+    /// A stream opened without a cursor opens with the snapshot of `channels`:
+    /// a selected channel holding an event contributes its head, and a
+    /// selection holding nothing contributes one empty snapshot message
+    /// carrying the daemon's latest identifier. A stream opened with a cursor
+    /// is a resume: it carries what the ring still holds after that identifier,
+    /// in identifier order and typed `EVENT`, and no snapshot.
+    ///
+    /// Either way the subscription is taken before the window is read, so an
+    /// event published between the two is not lost; the floor is the highest
+    /// identifier the opening messages carried, so no identifier is carried
+    /// twice. Heartbeats fill an idle stretch.
     ///
     /// The item is a `Result` because that is the body a streaming handler
     /// answers with: nothing fails today, and the ring going away ends the
     /// stream cleanly, but a later drop policy can refuse in-stream without a
     /// signature change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CursorError::Expired`] when a non-zero `cursor` names
+    /// something the ring can no longer serve. The decision is made under the
+    /// same lock that reads the window and builds the opening messages, and it
+    /// is returned before the stream opens rather than as its first item.
     pub fn stream(
         &self,
         channels: &[&str],
         cursor: u64,
         heartbeat: Duration,
-    ) -> impl Stream<Item = Result<v1::Event, ConnectError>> + Send + 'static {
+    ) -> Result<impl Stream<Item = Result<v1::Event, ConnectError>> + Send + 'static, CursorError>
+    {
+        // Taken before the window is read, so an event published between the
+        // two is neither lost nor carried twice below.
         let subscription = self.subscribe();
-        let heads = self.snapshot(channels);
-        let floor = cursor.max(heads.iter().map(|event| event.id).max().unwrap_or(0));
-        let mut pending: VecDeque<Event> = heads.into();
-        if pending.is_empty() {
-            // Nothing to report, and the stream still opens with the snapshot:
-            // the empty one names no channel and carries no payload, and its
-            // identifier is the daemon's latest, so a stream opened before
-            // anything was published begins with the snapshot rather than with
-            // live traffic.
-            pending.push_back(Event {
-                id: self.latest_id(),
-                kind: EventKind::Snapshot,
-                channel: String::new(),
-                payload: String::new(),
-            });
-        }
+        // One lock decides the cursor and builds the opening messages from the
+        // window it decided against, so the decision and the stream cannot
+        // disagree.
+        let (pending, floor) = {
+            let state = self.lock();
+            let earliest = state.earliest_resumable();
+            let latest = state.latest_id();
+            if cursor != 0 && (cursor > latest || cursor.saturating_add(1) < earliest) {
+                return Err(CursorError::Expired {
+                    cursor,
+                    earliest_resumable: earliest,
+                    latest_id: latest,
+                });
+            }
+            if cursor == 0 {
+                let heads = state.heads(channels);
+                let floor = heads.iter().map(|event| event.id).max().unwrap_or(0);
+                let mut pending: VecDeque<(Event, EventKind)> = heads
+                    .into_iter()
+                    .map(|event| (event, EventKind::Snapshot))
+                    .collect();
+                if pending.is_empty() {
+                    // Nothing to report, and the stream still opens with the
+                    // snapshot: the empty one names no channel and carries no
+                    // payload, and its identifier is the daemon's latest, so a
+                    // stream opened before anything was published begins with
+                    // the snapshot rather than with live traffic.
+                    pending.push_back((
+                        Event {
+                            id: latest,
+                            kind: EventKind::Snapshot,
+                            channel: String::new(),
+                            payload: String::new(),
+                        },
+                        EventKind::Snapshot,
+                    ));
+                }
+                (pending, floor)
+            } else {
+                // The replay: what the window still holds after the cursor,
+                // typed as the ordinary events it is. The floor is the cursor
+                // at least, so a live copy of a replayed event is suppressed.
+                let replay = state.since(cursor, channels);
+                let floor = replay.iter().map(|event| event.id).max().unwrap_or(0);
+                let pending: VecDeque<(Event, EventKind)> = replay
+                    .into_iter()
+                    .map(|event| (event, EventKind::Event))
+                    .collect();
+                (pending, floor.max(cursor))
+            }
+        };
         let state = StreamState {
             pending,
             selected: channels
@@ -251,16 +371,16 @@ impl Ring {
             last: floor,
             ring: Arc::downgrade(&self.inner),
         };
-        stream::unfold(state, |mut state| async move {
+        Ok(stream::unfold(state, |mut state| async move {
             loop {
-                if let Some(event) = state.pending.pop_front() {
+                if let Some((event, kind)) = state.pending.pop_front() {
                     state.last = state.last.max(event.id);
-                    // The kind describes the message, not the event: a pending
-                    // message opens the stream, so it is the snapshot even
-                    // though the event it reports was published as an ordinary
-                    // event, and the empty marker is already one.
+                    // The kind describes the message, not the event: a message
+                    // the opening messages carry is the snapshot when the
+                    // stream has no cursor and an ordinary event when it has
+                    // one, whatever the stored event was published as.
                     let mut message = event.to_message();
-                    message.kind = EventKind::Snapshot.into();
+                    message.kind = kind.into();
                     return Some((Ok(message), state));
                 }
                 // The subscription is polled first, so a real event always wins
@@ -302,7 +422,7 @@ impl Ring {
                     }
                 }
             }
-        })
+        }))
     }
 
     /// Take the state, tolerating a lock poisoned by a panicking publisher: the
@@ -325,11 +445,12 @@ enum Next {
     Ended,
 }
 
-/// The serving stream's state: the snapshot not yet sent, the selection, the
+/// The serving stream's state: the messages not yet sent, the selection, the
 /// live subscription, the heartbeat clock, and the identifiers already carried.
 struct StreamState {
-    /// The snapshot, in identifier order, until it has all been sent.
-    pending: VecDeque<Event>,
+    /// The opening messages, in identifier order, until they have all been sent,
+    /// each with the kind the message carries.
+    pending: VecDeque<(Event, EventKind)>,
     /// The channels this stream carries, as strings, because the state outlives
     /// the request it was built from.
     selected: Vec<String>,
@@ -360,8 +481,7 @@ impl RingInner {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .next_id
-            .saturating_sub(1)
+            .latest_id()
     }
 }
 
@@ -390,7 +510,7 @@ impl Subscription {
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, Ring};
+    use super::{CursorError, Event, Ring};
     use crate::proto::metis::v1::EventKind;
     use connectrpc::ConnectError;
     use futures_util::StreamExt as _;
@@ -537,6 +657,38 @@ mod tests {
         assert_eq!(second.id, 2);
     }
 
+    /// A stream opened with a cursor replays exactly the held events that
+    /// follow it, in identifier order and typed `EVENT`. It carries no
+    /// snapshot: the caller that resumes already holds the state a snapshot
+    /// would restate, and an identifier the snapshot carried would arrive a
+    /// second time from the replay.
+    #[tokio::test]
+    async fn a_servable_cursor_replays_only_what_follows_it() -> Result<(), CursorError> {
+        let ring = Ring::new(8);
+        ring.publish("daemon", EventKind::Event, "1");
+        ring.publish("session:7", EventKind::Event, "2");
+        ring.publish("daemon", EventKind::Event, "3");
+
+        let mut stream = Box::pin(ring.stream(&["daemon"], 1, Duration::from_secs(60))?);
+
+        let first = stream.next().await.expect("a stream").expect("a message");
+        assert_eq!(
+            first.kind,
+            EventKind::Event,
+            "a resumed stream carries no snapshot"
+        );
+        assert_eq!(first.id, 3, "only what follows the cursor");
+        assert_eq!(first.payload, "3");
+
+        // The live subscription follows the replay, so the stream stays open
+        // and carries what is published next.
+        ring.publish("daemon", EventKind::Event, "4");
+        let next = stream.next().await.expect("a stream").expect("a message");
+        assert_eq!(next.kind, EventKind::Event);
+        assert_eq!(next.id, 4);
+        Ok(())
+    }
+
     /// The serving stream opens with the snapshot and then carries the events
     /// that follow it, with a heartbeat on an idle stream. The heartbeat
     /// carries the latest identifier, so identifiers never decrease.
@@ -546,7 +698,10 @@ mod tests {
         let ring = Ring::new(8);
         ring.publish("daemon", EventKind::Event, "before");
 
-        let mut stream = Box::pin(ring.stream(&["daemon"], 0, Duration::from_millis(10)));
+        let mut stream = Box::pin(
+            ring.stream(&["daemon"], 0, Duration::from_millis(10))
+                .expect("no cursor is never expired"),
+        );
 
         let snapshot = stream.next().await.expect("a stream")?;
         assert_eq!(snapshot.kind, EventKind::Snapshot);
@@ -572,7 +727,10 @@ mod tests {
     async fn the_serving_stream_opens_with_the_empty_snapshot_and_ends_with_the_ring()
     -> Result<(), ConnectError> {
         let ring = Ring::new(4);
-        let mut stream = Box::pin(ring.stream(&["daemon"], 0, Duration::from_secs(60)));
+        let mut stream = Box::pin(
+            ring.stream(&["daemon"], 0, Duration::from_secs(60))
+                .expect("no cursor is never expired"),
+        );
 
         let snapshot = stream.next().await.expect("the stream is live")?;
         assert_eq!(snapshot.kind, EventKind::Snapshot);

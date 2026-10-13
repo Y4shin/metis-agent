@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api_contracts::connect::metis::v1::{DaemonService, DaemonServiceExt};
-use api_contracts::events::Ring;
+use api_contracts::events::{CursorError, Ring};
 use api_contracts::identity::{self, IdentityError};
 use api_contracts::proto::metis::v1::{
     EchoRequest, EchoResponse, Event, PairRequest, PairResponse, StreamEventsRequest,
@@ -155,11 +155,11 @@ impl DaemonService for Service {
         // outlives, so they are collected into owned borrows on this frame
         // before the stream is built.
         let channels = request.channels.iter().copied().collect::<Vec<_>>();
-        Ok(Response::stream(self.ring.stream(
-            &channels,
-            request.last_event_id,
-            self.heartbeat,
-        )))
+        let stream = self
+            .ring
+            .stream(&channels, request.last_event_id, self.heartbeat)
+            .map_err(refuse_cursor)?;
+        Ok(Response::stream(stream))
     }
 }
 
@@ -188,6 +188,15 @@ pub fn service(
 fn refuse_identity(error: IdentityError) -> ConnectError {
     let headers = identity::refusal_headers(&error);
     ConnectError::new(ErrorCode::InvalidArgument, error.to_string()).with_headers(headers)
+}
+
+/// Refuse a cursor the ring can no longer serve.
+///
+/// The cursor's answer is a fresh, cursorless stream rather than a gap or a
+/// retry, so the refusal is raised before the stream opens and its kind travels
+/// as a response header instead of as message text.
+fn refuse_cursor(error: CursorError) -> ConnectError {
+    ConnectError::new(ErrorCode::FailedPrecondition, error.to_string())
 }
 
 /// Map a pairing refusal onto the wire.
