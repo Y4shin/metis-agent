@@ -2350,14 +2350,102 @@ Recorded residuals:
 
 ---
 
+## Pending ticket: `serve-tcp-service`
+
+Blocked by nothing. The TCP twin of the landed `serve_uds_service`, so a remote
+listener can mount the credential policy `pairing-and-tokens` added. Until this
+lands, a TCP listener mounted through the landed surface serves unauthenticated,
+because `serve_tcp` and `serve_tcp_listener` take a bare `Router` and
+`connectrpc` 0.9.1 keeps the interceptor chain on `ConnectRpcService` with no
+conversion back.
+
+### Exports
+
+- `crates/api-contracts/src/transport.rs`:
+  - `pub async fn serve_tcp_listener_service(listener: tokio::net::TcpListener,
+    service: ConnectRpcService<Router>) -> io::Result<()>`: the accept loop,
+    building one `Arc` for the router per accepted stream and delegating each to
+    the private `serve_connection` body that `serve_stream` and
+    `serve_uds_service` already share.
+  - `pub async fn serve_tcp_service(addr: SocketAddr, service:
+    ConnectRpcService<Router>) -> io::Result<()>`: bind plus delegate, mirroring
+    the landed `serve_tcp` and `serve_tcp_listener` split, so a caller that must
+    report a kernel-assigned port binds first and calls the listener-taking twin.
+  - The landed `serve_stream`, `serve_uds`, `serve_uds_service`, `serve_tcp` and
+    `serve_tcp_listener` keep their signatures and behaviour.
+    `ConnectRpcService<Router>` is exactly what
+    `daemon::service::service(store, preshared, policy)` returns.
+
+### Existing abstractions to use
+
+- The private `serve_connection` body, `serve_uds_service`'s service-taking
+  shape, and `serve_tcp_listener`'s accept loop: the two new functions are the
+  intersection of those and add no loop.
+- The landed `daemon::auth::AuthInterceptor` and
+  `daemon::service::service(...)` as the service the test mounts.
+- `crates/client/tests/remote.rs` for the loopback bind and `local_addr()`
+  pattern, and `crates/daemon/tests/auth.rs` for the policy fixture and its
+  refusal assertions.
+- `client::credential` and `Client::pair` for the paired-token half of the test.
+
+### Do NOT reimplement
+
+- Do not add a second accept loop or a second connection body.
+- Do not change `serve_tcp` or `serve_tcp_listener` to take a service: the Router
+  shape has callers, and both shapes are legitimate. The new functions are
+  additive.
+- Do not touch the contract, the generated trees, the ABI, or the plugin crates.
+- Do not re-test the credential logic or the interceptor: this ticket tests the
+  transport that mounts a policy, not the policy.
+
+### Seams
+
+1. **Mounting seam.** A `ConnectRpcService` carrying `AuthPolicy::TokenRequired`,
+   served over a real TCP listener, refuses a call with no credential with the
+   typed missing-credential error and serves a call carrying a paired token, with
+   the `Pair` procedure still exempt.
+2. **Parity seam.** The same service mounted through `serve_uds_service` and
+   through `serve_tcp_service` produces the same refusals and the same served
+   result for the same requests, so the TCP front-end is not a second, weaker
+   policy path.
+3. **Bind seam.** `serve_tcp_service(127.0.0.1:0, service)` serves, and the
+   listener-taking twin is the entry point a caller uses when it needs
+   `local_addr()` first, which is the reason the landed split exists.
+4. **Signature seam.** The landed transport front-ends keep their signatures and
+   the existing transport tests are unchanged, so nothing built on the Router
+   shape breaks.
+5. **Additivity seam.** No contract, generated tree, ABI layout, or plugin
+   change: the drift, lint, breaking and harness gates stay green.
+
+Test types: an integration test in `crates/daemon/tests/` reusing the auth fixture
+for seams 1 and 3, one parity assertion covering both front-ends for seam 2, and
+the existing transport tests plus the workspace gates for seams 4 and 5.
+
+### Interface contract
+
+- `remote-pairing`, which is blocked by this ticket, mounts
+  `AuthPolicy::TokenRequired` on its TCP listener through `serve_tcp_service`;
+  that is why it could not be wired before.
+- The daemon effort mounts the local service through `serve_uds_service` and the
+  remote one through `serve_tcp_service`. `reverse-proxy-mode` extends the same
+  module and inherits the service-taking shape for its own front-end.
+- Recorded residual: two parallel front-end families now exist over one shared
+  connection body, one Router-taking and one service-taking, so a future
+  front-end must choose deliberately. Keeping the body private and shared is what
+  stops them diverging in behaviour, and the parity seam is what asserts it
+  today.
+
+---
+
 ## Downstream interface contracts (outline)
 
 The tickets still pending in this effort are `serve-tcp-service`, `event-stream`,
 `reverse-proxy-mode`, `windows-named-pipe` and `remote-pairing`. Their sections
-are added when their chains reach the frontier. The tickets the bullets below
-also name (`stream-resume-and-expiry`, `cancellation-and-slow-consumers`) are not
-pending yet, and the commitments below are what the landed tickets must already
-support, including the surfaces `local-identity-and-acl`, `state-store` and
+are added when their chains reach the frontier, apart from `serve-tcp-service`,
+whose pending section is above. The tickets the bullets below also name
+(`stream-resume-and-expiry`, `cancellation-and-slow-consumers`) are not pending
+yet, and the commitments below are what the landed tickets must already support,
+including the surfaces `local-identity-and-acl`, `state-store` and
 `pairing-and-tokens` landed.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
