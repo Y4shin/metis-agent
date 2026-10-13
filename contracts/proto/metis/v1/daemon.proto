@@ -1,0 +1,29 @@
+// The daemon's wire contract, first version.
+//
+// One ordinary RPC for now. Later tickets append an event stream and its
+// messages to the same service and package. Changing or removing what is here
+// already breaks clients, and `buf breaking` in FILE mode is the gate that
+// catches it.
+
+syntax = "proto3";
+
+package metis.v1;
+
+// The daemon's first service version.
+service DaemonService {
+  // Echo a message back, with the time the daemon received it.
+  rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+message EchoRequest {
+  // The text to echo.
+  string message = 1;
+}
+
+message EchoResponse {
+  // The text that was echoed.
+  string message = 1;
+
+  // When the daemon received the request, as an RFC 3339 string.
+  string received_at = 2;
+}

@@ -1,0 +1,15 @@
+# Buf module for the Metis wire contract.
+#
+# `proto/` is the module root, so the package `metis.v1` lives at
+# `proto/metis/v1/`. Lint runs in STANDARD mode with no exception yet: the
+# `RPC_RESPONSE_STANDARD_NAME` exception the streaming `Event` message needs is
+# added with that message, not in advance.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE
