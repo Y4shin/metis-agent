@@ -219,6 +219,7 @@ fn main() -> ExitCode {
         "table.presence_is_size",
         "the presence predicate follows the reported size",
     );
+    check_guarded_tables(&mut checks, table_ptr);
 
     // --- the instance, the declaration, and the futures path ---------------
 
@@ -533,6 +534,239 @@ fn resolve_entry(
             })
         }
     }
+}
+
+/// A table whose bytes past the part this build may read sit in a page with no
+/// access at all.
+///
+/// This is the canary the prefix seam asks for. A reader that touches an entry
+/// past the size it was allowed does not get a wrong value out of a copy: it
+/// faults, and the harness stops with the fault, so "the reader touches only the
+/// entries its own size covers" is asserted by the memory rather than by a
+/// comment. Linux only, because the guard is `mmap` and a page: the platforms
+/// without it print a note and run the same checks without the guard.
+#[cfg(target_os = "linux")]
+struct GuardedTable {
+    base: *mut u8,
+    table: *mut u8,
+}
+
+#[cfg(target_os = "linux")]
+impl GuardedTable {
+    /// Places `readable` so that its last byte is the last byte of a readable
+    /// page. Every byte after it is in a page that cannot be read.
+    fn new(readable: &[u8]) -> GuardedTable {
+        // SAFETY: the two anonymous pages belong to this guard and are released
+        // on drop, and the copy covers only bytes inside the first page.
+        unsafe {
+            let base = mmap(
+                std::ptr::null_mut(),
+                2 * PAGE,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            assert!(base != MAP_FAILED, "mmap failed for the guarded table");
+            assert_eq!(
+                mprotect(base.cast::<u8>().add(PAGE).cast(), PAGE, PROT_NONE),
+                0,
+                "mprotect failed for the guarded table"
+            );
+            let table = base.cast::<u8>().add(PAGE - readable.len());
+            assert_eq!(
+                table as usize % mem::align_of::<usize>(),
+                0,
+                "the guarded table must be aligned like the real one"
+            );
+            std::ptr::copy_nonoverlapping(readable.as_ptr(), table, readable.len());
+            GuardedTable {
+                base: base.cast::<u8>(),
+                table,
+            }
+        }
+    }
+
+    fn ptr(&self) -> *const MetisPluginTableV1 {
+        self.table.cast::<MetisPluginTableV1>()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for GuardedTable {
+    fn drop(&mut self) {
+        // SAFETY: the region is the one this guard mapped.
+        unsafe {
+            munmap(self.base.cast(), 2 * PAGE);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn mmap(
+        addr: *mut c_void,
+        len: usize,
+        prot: i32,
+        flags: i32,
+        fd: i32,
+        offset: i64,
+    ) -> *mut c_void;
+    fn mprotect(addr: *mut c_void, len: usize, prot: i32) -> i32;
+    fn munmap(addr: *mut c_void, len: usize) -> i32;
+}
+
+/// One readable page and one page with no access. The kernel's page size on the
+/// targets this probe runs on.
+#[cfg(target_os = "linux")]
+const PAGE: usize = 4096;
+#[cfg(target_os = "linux")]
+const PROT_NONE: i32 = 0;
+#[cfg(target_os = "linux")]
+const PROT_READ: i32 = 1;
+#[cfg(target_os = "linux")]
+const PROT_WRITE: i32 = 2;
+#[cfg(target_os = "linux")]
+const MAP_PRIVATE: i32 = 2;
+#[cfg(target_os = "linux")]
+const MAP_ANONYMOUS: i32 = 0x20;
+/// `MAP_FAILED` is `(void *)-1`.
+#[cfg(target_os = "linux")]
+const MAP_FAILED: *mut c_void = std::ptr::without_provenance_mut(usize::MAX);
+
+/// The bytes of this build's table, copied from the library's real one, with the
+/// prefix patched to what another plugin would report and cut to `readable`
+/// bytes.
+///
+/// A newer plugin reports a longer table and a newer minor; the retired
+/// pre-release plugin reported the seven-entry size and minor 0.
+#[cfg(target_os = "linux")]
+fn patched_table_bytes(
+    table_ptr: *const MetisPluginTableV1,
+    size: usize,
+    minor: u32,
+    readable: usize,
+) -> Vec<u8> {
+    // SAFETY: the harness has already read this table, and only bytes inside the
+    // table's own layout are copied.
+    let mut bytes = unsafe {
+        slice::from_raw_parts(table_ptr.cast::<u8>(), mem::size_of::<MetisPluginTableV1>())
+    }
+    .to_vec();
+    bytes[..mem::size_of::<usize>()].copy_from_slice(&size.to_ne_bytes());
+    let minor_at = mem::size_of::<usize>() + mem::size_of::<u32>();
+    bytes[minor_at..minor_at + mem::size_of::<u32>()].copy_from_slice(&minor.to_ne_bytes());
+    bytes.truncate(readable);
+    bytes
+}
+
+/// The prefix seam, with the memory as the canary.
+///
+/// Three tables are placed so that the first byte the reader is not allowed to
+/// touch is in a page that cannot be read:
+///
+/// - a newer plugin's table, whose reported size covers an appended entry. The
+///   reader must answer with this build's entries and stop; reaching the
+///   appended entry faults.
+/// - a table whose reported size does not cover `service_complete`, which is the
+///   entry the reader must refuse by name without reading it.
+/// - the retired pre-release table, whose every entry is unreachable: the
+///   version gate must refuse it before anything in it is read.
+#[cfg(target_os = "linux")]
+fn check_guarded_tables(checks: &mut Checks, table_ptr: *const MetisPluginTableV1) {
+    let layout = mem::size_of::<MetisPluginTableV1>();
+    let slot = mem::size_of::<*const c_void>();
+    let prefix = mem::size_of::<MetisTablePrefix>();
+    // SAFETY: the harness read this table already; it is the library's live one.
+    let real = unsafe { &*table_ptr };
+
+    // A newer plugin: its table is this build's layout plus the entry appended
+    // after it, and the appended entry is in the page with no access.
+    let longer = layout + slot;
+    let guarded = GuardedTable::new(&patched_table_bytes(
+        table_ptr,
+        longer,
+        METIS_ABI_MINOR + 1,
+        layout,
+    ));
+    match unsafe { metis_read_table(guarded.ptr()) } {
+        Ok(read) => {
+            checks.check(
+                read.size == longer
+                    && read.abi_minor == METIS_ABI_MINOR + 1
+                    && std::ptr::fn_addr_eq(read.service_complete, real.service_complete),
+                "table.appended_entry_not_read",
+                format!(
+                    "the reader took this build's {layout} bytes of the {longer}-byte table it was shown and read no further"
+                ),
+            );
+        }
+        Err(err) => {
+            checks.check(false, "table.appended_entry_not_read", err.to_string());
+        }
+    }
+
+    // A table whose reported size stops before `service_complete`: the reader
+    // has to name the entry it cannot reach, and it cannot read it either.
+    let short = prefix + 7 * slot;
+    let guarded = GuardedTable::new(&patched_table_bytes(
+        table_ptr,
+        short,
+        METIS_ABI_MINOR,
+        short,
+    ));
+    match unsafe { metis_read_table(guarded.ptr()) } {
+        Err(MetisAbiError::EntryMissing { entry }) => {
+            checks.check(
+                entry == "service_complete",
+                "table.uncovered_entry_not_read",
+                format!("a {short}-byte table does not cover {entry}, and {entry} was never read"),
+            );
+        }
+        Ok(_) => {
+            checks.check(
+                false,
+                "table.uncovered_entry_not_read",
+                "a table that stops before service_complete was accepted",
+            );
+        }
+        Err(err) => {
+            checks.check(false, "table.uncovered_entry_not_read", err.to_string());
+        }
+    }
+
+    // The retired pre-release table: minor 0 with the superseded seven-entry
+    // size, and every entry in the page with no access. Only the version may
+    // refuse it, and the refusal has to come before any entry is read.
+    let stale = prefix + 7 * slot;
+    let guarded = GuardedTable::new(&patched_table_bytes(table_ptr, stale, 0, prefix));
+    match unsafe { metis_read_table(guarded.ptr()) } {
+        Err(MetisAbiError::MinorMismatch { known, found }) => {
+            checks.check(
+                known == METIS_ABI_MINOR && found == 0,
+                "table.stale_minor_entries_not_read",
+                "a table reporting minor 0 and the superseded size is refused on the version alone",
+            );
+        }
+        Ok(_) => {
+            checks.check(
+                false,
+                "table.stale_minor_entries_not_read",
+                "a table reporting minor 0 was accepted",
+            );
+        }
+        Err(err) => {
+            checks.check(false, "table.stale_minor_entries_not_read", err.to_string());
+        }
+    }
+}
+
+/// The platforms without a page mapping run no guarded probe.
+#[cfg(not(target_os = "linux"))]
+fn check_guarded_tables(_checks: &mut Checks, _table_ptr: *const MetisPluginTableV1) {
+    println!(
+        "[order] the guarded-table probes are skipped: this platform has no page mapping here"
+    );
 }
 
 /// The `metis_*` symbols the library defines dynamically (seam: entry symbol).

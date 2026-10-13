@@ -43,8 +43,10 @@ pub use registry::{Entry, Registry, RegistryError, RouteError};
 pub enum CallError {
     /// The library could not be loaded, or its entry symbol was missing.
     Load(String),
-    /// The table was refused: a different major, an unknown minor, or a table
-    /// too short for an entry this build needs.
+    /// The table was refused: a different major, a minor older than this
+    /// build's, or a table too short for an entry this build needs. A newer
+    /// minor inside the major is accepted, because its extra entries are
+    /// appended after the last entry this build reads.
     Version(MetisAbiError),
     /// The instance could not be created.
     Create(MetisStatus),
