@@ -21,6 +21,11 @@ workflow.workspace = true
 plugin-runtime.workspace = true
 api-contracts.workspace = true
 
+# The service and its authorization interceptor are built on the framework the
+# generated code targets, and the refusal carries headers.
+connectrpc.workspace = true
+http = "1"
+
 # The state store is one SQLite database, and the token surface needs the
 # operating system's random source and SHA-256.
 sqlx.workspace = true
@@ -36,3 +41,8 @@ tokio.workspace = true
 # connection, because what the migration left behind is what it asserts: the
 # token table and the ledger row that records the migration as applied.
 sqlx.workspace = true
+# The pairing and authorization seams are driven over a real socket by the
+# client harness, and the tests build a recording service on the framework
+# itself so a refusal can be shown to come from the interceptor.
+client.workspace = true
+connectrpc.workspace = true

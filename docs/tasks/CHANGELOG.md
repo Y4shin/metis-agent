@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Pairing, per-surface tokens, and client credential storage (pairing-and-tokens)
+
+`DaemonService` gained `Pair`, gated by a preshared key resolved from a literal, an environment reference, a keystore or a secret file, with a group- or world-readable secret file refused rather than warned about. A successful pairing mints one opaque per-surface token, stores only its SHA-256 in the state database, and returns the text once; the daemon authorizes unary and streaming calls through a `connectrpc::Interceptor` that reads `Authorization: Bearer` and answers `metis-auth-error` with missing, invalid or revoked, while the client keeps its token in the platform keychain through `secret-tool` or `security`, or in a 600 file, and reports which answered. Removing a token row and restarting revokes that surface alone. A listener mounts a `ConnectRpcService` rather than a `Router`, so `serve_uds_service` carries the policy on the Unix socket and the TCP equivalent is the new `serve-tcp-service` ticket.
+
 ## 2026-10-13, Daemon state store on SQLite (state-store)
 
 `crates/daemon` now has a library target, and `daemon::state::Store` opens and migrates one SQLite database through sqlx runtime queries: `METIS_STATE_DB` first, then `$XDG_DATA_HOME/metis/metis.db`, then `$HOME/.local/share/metis/metis.db`, with the directory at mode 700 and the file at 600 through the same private-path rule the socket uses. The `tokens` table holds a surface name, the 32-byte SHA-256 of the token's canonical lowercase hex text, and the pairing time, so per-surface revocation is a row delete and the token itself is never stored; `daemon::token` mints and parses it, with the digest pinned by a known-answer test. CI needs no database server, no `DATABASE_URL` and no `.sqlx` offline data, because the store uses runtime queries and embeds its migration.

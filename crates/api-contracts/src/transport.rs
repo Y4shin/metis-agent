@@ -54,7 +54,19 @@ pub async fn serve_stream<S>(stream: S, router: impl Into<Arc<Router>>) -> io::R
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let service = ConnectRpcService::from_arc(router.into());
+    serve_connection(stream, ConnectRpcService::from_arc(router.into())).await
+}
+
+/// Serve an already built Connect service over one connection.
+///
+/// This is the same body [`serve_stream`] uses. It exists for the caller that
+/// mounted an interceptor chain: `connectrpc` attaches interceptors to
+/// [`ConnectRpcService`], not to a [`Router`], so an authorization policy can
+/// only be served through the service it was installed on.
+async fn serve_connection<S>(stream: S, service: ConnectRpcService<Router>) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let builder = AutoBuilder::new(TokioExecutor::new());
     builder
         .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service))
@@ -73,6 +85,24 @@ where
 /// Returns the bind or accept error. Accepting runs until the task is dropped.
 #[cfg(unix)]
 pub async fn serve_uds(path: &std::path::Path, router: Router) -> io::Result<()> {
+    serve_uds_service(path, ConnectRpcService::from_arc(Arc::new(router))).await
+}
+
+/// Serve an already built Connect service over a Unix domain socket.
+///
+/// The access control is the same one [`serve_uds`] applies, because it is the
+/// same accept loop: a caller reaches this instead of `serve_uds` when it
+/// installed an interceptor chain, which lives on the service rather than on
+/// the router.
+///
+/// # Errors
+///
+/// Returns the bind or accept error. Accepting runs until the task is dropped.
+#[cfg(unix)]
+pub async fn serve_uds_service(
+    path: &std::path::Path,
+    service: ConnectRpcService<Router>,
+) -> io::Result<()> {
     // The access control is applied here rather than by the caller, so every
     // path that binds a local socket carries it. The socket's directory is
     // created to spec first, then the stale socket file is removed, then the
@@ -83,12 +113,12 @@ pub async fn serve_uds(path: &std::path::Path, router: Router) -> io::Result<()>
     let _ = std::fs::remove_file(path);
     let listener = tokio::net::UnixListener::bind(path)?;
     apply_acl(path, &acl).map_err(io::Error::other)?;
-    let router = Arc::new(router);
+    let service = Arc::new(service);
     loop {
         let (stream, _) = listener.accept().await?;
-        let router = Arc::clone(&router);
+        let service = Arc::clone(&service);
         tokio::spawn(async move {
-            if let Err(err) = serve_stream(stream, router).await {
+            if let Err(err) = serve_connection(stream, (*service).clone()).await {
                 eprintln!("local connection ended with error: {err}");
             }
         });

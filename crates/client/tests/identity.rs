@@ -96,7 +96,8 @@ async fn the_daemon_records_the_declared_identity() {
     let caller = Client::with_endpoint(socket.path())
         .await
         .expect("the local transport builds")
-        .with_surface(Surface::Cli);
+        .with_surface(Surface::Cli)
+        .expect("the stored credential is readable");
     let echoed = caller
         .echo("hello with a declaration")
         .await
@@ -129,7 +130,9 @@ async fn the_declared_surface_defaults_to_unspecified() {
 
     // The surface is replaced, not appended: a second declaration on the same
     // client is the one the daemon reads.
-    let caller = caller.with_surface(Surface::Ui);
+    let caller = caller
+        .with_surface(Surface::Ui)
+        .expect("the stored credential is readable");
     caller.echo("second").await.expect("the second call lands");
     let identity = recorder.last().expect("the second call was recorded");
     assert_eq!(identity.surface(), "ui");

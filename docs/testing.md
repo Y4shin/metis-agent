@@ -175,6 +175,35 @@ Daemon state, documented in `crates/daemon`:
   directory wider than that mode without chmodding it, and `restrict_file`
   narrows a file to the mode it is given.
 
+Pairing and credentials, documented in `crates/daemon`, `crates/client` and
+`crates/api-contracts`. Pairing is reachable on both transports; the local
+socket needs no credential, and a caller that presents one is checked against
+the store:
+
+- `cargo test -p daemon --test secret` resolves the four secret-reference forms
+  (`literal:`, `env:`, `keystore:`, `file:`, and a bare value as a literal) and
+  refuses an unset variable, a missing file, a keychain tool that is there but
+  refuses, and a secret file group or others can read. The keychain halves run
+  against a stub tool on a narrowed `PATH`, so the machine's real keychain is
+  never touched.
+- `cargo test -p daemon --test auth` serves the daemon's own service over a
+  real socket and drives it through the client harness: pairing mints one token
+  whose hash is the only thing the daemon keeps, a wrong preshared key and a
+  second pairing are refused, a call under `AuthPolicy::TokenRequired` is
+  refused as missing, invalid, or revoked (each distinguishable), a valid
+  credential is served, every paired surface reaches the same surface, and
+  removing one row and restarting revokes that surface alone. A recording
+  service proves a refused call never reached its handler.
+- `cargo test -p daemon` also covers the unit halves: the digest contract
+  between the token `Pair` returns and the row the store wrote, the refusal
+  headers, and the policy's exemption of the pairing procedure.
+- `cargo test -p client --test credential` covers the credential store: the
+  owner-only file at 600 in a directory at 700 when no keychain tool is on
+  `PATH`, the keychain when a stub tool is, the reported backend, an unsafe
+  surface name, and a data home that is not set.
+- `cargo test -p api-contracts --test keychain` covers the platform tool's three
+  operations against a stub that speaks both tools' command lines.
+
 ## CI
 
 `.github/workflows/ci.yml` runs the Rust commands above through the devenv

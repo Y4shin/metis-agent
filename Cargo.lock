@@ -353,7 +353,10 @@ version = "0.0.0"
 dependencies = [
  "agent-harness",
  "api-contracts",
+ "client",
+ "connectrpc",
  "getrandom 0.4.3",
+ "http",
  "plugin-runtime",
  "sha2 0.11.1",
  "sqlx",

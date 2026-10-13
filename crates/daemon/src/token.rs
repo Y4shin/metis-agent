@@ -22,8 +22,16 @@ const TOKEN_HEX_LEN: usize = TOKEN_BYTES * 2;
 /// the form it travels in and the form it is hashed in. Construct one with
 /// [`mint`] to issue a new token, or with [`Token::parse`] to read the text a
 /// caller presented.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Token(String);
+
+/// The token is never printed: `Debug` redacts the text, so an accidental
+/// `{:?}` cannot put the credential in a log line.
+impl fmt::Debug for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Token(<redacted>)")
+    }
+}
 
 impl Token {
     /// Read a token from the text a caller presented.

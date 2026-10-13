@@ -283,6 +283,18 @@ streaming assumptions before anything is built on top.
   stored. `api-contracts::transport` gained `ensure_private_dir` and
   `restrict_file`, the general form of the socket ACL rule, and CI needs no
   database server, no `DATABASE_URL` and no `.sqlx` offline data.
+- The credential lifecycle is real: `api-contracts::auth` owns the wire vocabulary
+  (`Authorization: Bearer`, the `metis-auth-error` refusal header with its missing,
+  invalid and revoked causes), `api-contracts::keychain` wraps `secret-tool` and
+  `security`, `daemon::secret` resolves the preshared key from a literal, an
+  environment reference, a keystore or a secret file and refuses a group- or
+  world-readable file, and `daemon::auth::AuthInterceptor` authorizes unary and
+  streaming calls. A listener mounts a `ConnectRpcService`, not a `Router`:
+  `serve_uds_service` mounts the policy on the Unix socket, and the TCP front-end
+  that would carry it is the `serve-tcp-service` ticket, which `remote-pairing`
+  is blocked by. The client keeps its token in the keychain or in a 600 file
+  under the data directory and attaches it as a default header, and
+  `Client::with_surface` is fallible because it loads that credential.
 - A listener mounts a `ConnectRpcService`, not a `Router`: `connectrpc` 0.9.1
   keeps the interceptor chain on the service, so the credential policy cannot
   travel through the landed `serve_tcp(addr, Router)`. `serve_uds_service` mounts

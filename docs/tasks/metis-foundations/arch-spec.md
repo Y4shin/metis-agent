@@ -1458,12 +1458,15 @@ harness and no new test protocol.
   the daemon does not terminate TLS, so no front-end of this module carries a
   certificate or a pin.
 - `local-identity-and-acl` and `pairing-and-tokens` add the credential path.
-  `local-identity-and-acl` has since landed the local socket's OS access control
-  and the identity declaration, which the TCP listener can carry as request
-  metadata but which authenticates nothing; the credential path and any TCP
-  access rule are still pending, so an enabled listener still serves an
-  unauthenticated surface, which is why the bind address is required and has no
-  default. The ordering risk is recorded, not hidden.
+  Both have since landed: `local-identity-and-acl` the local socket's OS access
+  control and the identity declaration, which the TCP listener can carry as
+  request metadata but which authenticates nothing, and `pairing-and-tokens` the
+  token, the `AuthInterceptor` and the policy the local socket mounts. The landed
+  TCP front-ends still take a bare `Router`, so they cannot mount the authorized
+  service, and an enabled listener still serves an unauthenticated surface,
+  which is why the bind address is required and has no default;
+  `serve-tcp-service` owns the service-taking front-end. The ordering risk is
+  recorded, not hidden.
 - The plaintext warning the map's constraints require belongs to the daemon's
   startup policy and to `reverse-proxy-mode`; this ticket records the residual
   instead of inventing a policy surface for it.
@@ -1476,10 +1479,11 @@ harness and no new test protocol.
 
 ### Residual, recorded rather than resolved
 
-- Plaintext and unauthenticated until `local-identity-and-acl` and
-  `pairing-and-tokens` land: an enabled listener serves the same surface the
-  local socket serves, and the required, defaultless bind address is the only
-  mitigation today.
+- Plaintext and unauthenticated: an enabled listener serves the served surface
+  with no credential check, because the landed TCP front-ends cannot mount the
+  authorized service `pairing-and-tokens` landed. The required, defaultless bind
+  address is the only mitigation until `serve-tcp-service` lands, and that
+  ticket exists on `main` (`97e0a91`), which `remote-pairing` is blocked by.
 - `serve_tcp` is exported and unexercised: no test drives it and no caller
   exists until the daemon effort wires the listener into `main`. The tested path
   is `serve_tcp_listener`. If the operator wants it covered before the daemon
@@ -1996,13 +2000,39 @@ workspace gates for the build seam, run with `DATABASE_URL` unset.
 
 ---
 
-## Pending ticket: `pairing-and-tokens`
+## Landed ticket: `pairing-and-tokens`
 
-Blocked by `local-identity-and-acl` and `state-store`, both landed. The
-credential lifecycle: a surface pairs once with a preshared key carried in the
-request body, receives its own token, keeps it in the platform keychain when it
-can, and is revoked on its own. First ticket to append to the wire contract since
-the skeleton.
+Landed on `task/pairing-and-tokens` as the merge commit `1c89660`, parents
+`97e0a91` (the landing branch, created at `main`'s tip, which already carried the
+`state-store` landing merge and the docs-only `serve-tcp-service` follow-up) and
+`7dc60b1` (the working branch `ticket/pairing-and-tokens`, nine `wip:` commits
+off `main` at `4f7c999`, deleted after the merge); the docs commit `3c91ea0`
+carries the ticket note and the committed deviation report. The merge was clean
+and the landing tree differs from `7dc60b1` only by the three docs files
+`97e0a91` added, so every source file landed byte for byte as verified. The gates
+were green on `7dc60b1` through `devenv shell --`: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, the workspace `cargo test` (140
+passed, 0 failed, 7 ignored), `buf lint`,
+`buf breaking --against '.git#branch=main' --against-config buf.yaml`,
+`bash scripts/regenerate-contracts.sh --check`, the ABI header drift check, the
+ABI harness (`[result] PASS (73 checks)`) and `cargo run -p client --example
+echo` PASS. The tdd step also ran one adversarial mutation on
+`AuthInterceptor::needs_credential`: pinning it to `false` failed exactly the
+four refusal and revocation tests, and the file was restored byte for byte.
+
+Builds the credential lifecycle, blocked by `local-identity-and-acl` and
+`state-store`, both landed: a surface pairs once with a preshared key carried in
+the request body, receives its own token, keeps it in the platform keychain when
+it can, and is revoked on its own. First ticket to append to the wire contract
+since the skeleton.
+
+The surfaces below are the measured ones. The divergences from the plan are
+folded in: the factory returns the interceptor-carrying service rather than a
+`Router`, which is the one that constrains every listener ticket, with the
+additive `transport::serve_uds_service`; `Client::with_surface` is fallible and
+`Client::pair` takes `&mut self`; the credential wire vocabulary lives in the new
+`api_contracts::auth`, with `daemon::auth` re-exporting both header names; `pair`
+takes four parameters; and `api_contracts::time` is a new public module.
 
 ### Exports
 
@@ -2011,61 +2041,150 @@ the skeleton.
   `PairRequest { string preshared_key = 1; }` and
   `PairResponse { string token = 1; }`, the token returned once and never again.
   Regenerated through `scripts/regenerate-contracts.sh`, which brings `buf lint`,
-  `buf breaking` and the drift check along.
+  `buf breaking` and the drift check along. Landed as planned, with the proto
+  file's top comment updated from `One ordinary RPC for now` to `Two ordinary
+  RPCs for now`; the regenerated buffa and connect trees are committed, the
+  drift check passes, and `buf breaking` reports nothing against `main`.
+- `crates/api-contracts/src/auth.rs`, the credential's wire vocabulary, and the
+  placement divergence that moved a planned daemon name into this crate: the
+  daemon refuses through the same header the client reads, so the channel is
+  spelled in one place. `AUTHORIZATION_HEADER = "authorization"`,
+  `BEARER_SCHEME = "Bearer"`, `AUTH_ERROR_HEADER = "metis-auth-error"`, and
+  `bearer(token) -> String` beside `bearer_token(value) -> Option<&str>`, where
+  the scheme is matched case-insensitively and a present header that is not a
+  bearer credential is not a missing one. The refusal vocabulary is
+  `CredentialRefusal::{Missing, Invalid, Revoked}`, non-exhaustive, with `as_str`,
+  `parse` and `Display`; its meaning crosses the wire as the header value and
+  never as message text. `daemon::auth` re-exports both header names.
 - `crates/api-contracts/src/keychain.rs`: the platform keychain through its
   command line tool, because the daemon reads a preshared key from one and the
   client writes its token to one, and `api-contracts` is the only crate both
-  depend on. `available() -> Option<KeychainTool>`, `lookup(account)`,
+  depend on. `available() -> Option<KeychainTool>`,
+  `lookup(account) -> Result<Option<String>, KeychainError>`,
   `store(account, secret)`, `remove(account)`, and a non-exhaustive
-  `KeychainError`. The tool is `secret-tool` on Linux and `security` on macOS,
-  probed on `PATH`; the service name is `metis-daemon` and the account is the
-  surface name.
+  `KeychainError` with `Spawn { tool, source }` and `Refused { tool, status,
+  message }`. The tool is `secret-tool` on Linux and `security` on macOS, probed
+  on `PATH` and named by the additive public `KeychainTool::{SecretTool,
+  Security}` with `command()`; the service name is the additive public
+  `SERVICE_NAME = "metis-daemon"` and the account is the surface name. The
+  measured rules those names carry: `available()` answers `None` when no tool is
+  on `PATH`, an entry that is not there is `Ok(None)` (both tools report that
+  with a silent non-zero exit), and a tool that runs and refuses is `Refused`,
+  never a silent fallback. `store` writes the secret on standard input for
+  `secret-tool` and as an argument for `security`.
 - `crates/daemon/src/secret.rs`: `SecretRef::{Literal, Env, Keystore, File}`
-  parsed from one string with explicit `literal:`, `env:`, `keystore:` and
-  `file:` prefixes, a bare value treated as a literal, and
+  parsed from one string by the infallible `SecretRef::parse` with explicit
+  `literal:`, `env:`, `keystore:` and `file:` prefixes, a bare value treated as
+  a literal (a value that merely contains a colon included), and
   `resolve() -> Result<Secret, SecretError>`; `SecretError::{Unresolved,
-  Unreadable, TooPermissive { path, mode }}`. A secret file readable by group or
-  others is refused, and `keystore:` goes through `api_contracts::keychain`.
+  Unreadable(UnreadableSource), TooPermissive { path, mode }}`, whose additive
+  `UnreadableSource::{Env, Keychain, File}` says what kind of source failed
+  without a caller matching on error text. A secret file readable by group or
+  others is refused, and `keystore:` goes through `api_contracts::keychain`. The
+  measured rules: `PRESHARED_KEY_ENV = "METIS_PRESHARED_KEY"` carries the
+  reference and `resolve_preshared_key() -> Result<Secret, SecretError>`
+  resolves it, treating an absent or empty variable as `Unresolved`; an empty
+  secret is `Unresolved` rather than a key an empty presentation could match;
+  and a keystore reference is `Unresolved` when no tool is on `PATH` and
+  `Unreadable(Keychain)` when the tool runs and refuses. `Secret` holds the
+  value privately, exposes it only through `expose()`, and redacts it in
+  `Debug`.
 - `crates/daemon/src/auth.rs`:
-  - `AUTH_ERROR_HEADER = "metis-auth-error"`;
+  - Both header names, `AUTHORIZATION_HEADER` and `AUTH_ERROR_HEADER`, are
+    re-exported from `api_contracts::auth` rather than declared here, so the
+    daemon's refusals and the client's mapping cannot name different headers.
     `AuthError::{MissingCredential, RejectedCredential { cause }}` with
-    `RejectionCause::{Invalid, Revoked}`, `Display`, and
-    `refusal_headers(&AuthError) -> HeaderMap` beside the identity module's
-    equivalent.
+    `RejectionCause::{Invalid, Revoked}`, both non-exhaustive, with `Display`
+    and `Error::source`, and `refusal_headers(&AuthError) -> HeaderMap` beside
+    the identity module's equivalent.
   - `authorize(store, &HeaderMap) -> Result<Granted, AuthError>`: reads the
     surface from the identity declaration, takes `Authorization: Bearer`, parses
     the token with `Token::parse`, hashes it with `Token::hash`, and maps the
     store's `Verify` (`UnknownSurface` to `Revoked`, `Mismatch` to `Invalid`).
-  - `enum AuthPolicy { LocalAcl, TokenRequired }` and `AuthInterceptor`,
-    implementing `connectrpc::Interceptor`: it exempts the `Pair` procedure path,
-    leaves `LocalAcl` a pass-through, and under `TokenRequired` calls `authorize`
-    in both `intercept_unary` and `intercept_streaming`, so authorization happens
-    for unary and streaming calls alike and a handler cannot forget it.
-  - `pair(store, preshared, &str) -> Result<Token, PairError>`: compares the body
-    key against the resolved secret in constant time, mints, inserts, and returns
-    the token text once. `PairError::{WrongPresharedKey, AlreadyPaired, Store}`.
-- `crates/daemon/src/service.rs`: `Service { store, preshared }` implementing the
-  generated `DaemonService` (`pair` mints, `echo` is the served example), and
-  `router(store, preshared, AuthPolicy) -> Router` which registers the service
-  with `AuthInterceptor` through `ConnectRpcService::with_interceptor`. Each
-  listener mounts its own: the local socket `LocalAcl`, the TCP listener
-  `TokenRequired`. That is how a local call needs no token while a remote call
-  does, with no peer-address sniffing.
-- `crates/client/src/credential.rs`: `Backend::{Keychain, File(PathBuf)}`;
-  `store(surface, token)`, `load(surface)`, `remove(surface)`, each returning or
-  reporting the backend that answered. The keychain is tried first through
-  `api_contracts::keychain`, and the fallback file is
-  `$XDG_DATA_HOME/metis/client/<surface>.token` at mode 600.
-- `crates/client/src/lib.rs`: `Client::pair(&self, preshared_key: &str) ->
-  Result<Backend, ClientError>` calls `Pair`, keeps the returned token through
-  the credential store, and reports the backend that took it; a stored token for
-  the declared surface is attached as a default `Authorization: Bearer` header at
-  construction, so remote calls carry it and no caller names a credential.
-  `ClientError::{CredentialMissing, CredentialRejected { cause }}` are populated
-  from the auth header, never from message text.
+    `Granted` names the declaration and answers `identity()` and `surface()`,
+    and carries no scope: one token grants the whole exposed surface. The
+    measured edge rules: a declaration the daemon cannot read is
+    `MissingCredential`; a header that is present but is not a bearer credential
+    is `Invalid` rather than missing; a malformed token is `Invalid`; and a
+    store fault fails closed as `Invalid`.
+  - `enum AuthPolicy { LocalAcl, TokenRequired }` and `AuthInterceptor::new(
+    store, policy)`, implementing `connectrpc::Interceptor`: a private
+    `needs_credential(path)` decides the exemption by the
+    `DAEMON_SERVICE_PAIR_SPEC.procedure` path, and one private `admit` is shared
+    by `intercept_unary` and `intercept_streaming`, so the two halves cannot
+    diverge and a handler cannot forget the check. Under `TokenRequired` a
+    declaration the identity channel cannot read is refused inside `admit` as
+    `InvalidArgument` carrying `identity::refusal_headers`, and a credential
+    refusal crosses as `Unauthenticated` carrying `AUTH_ERROR_HEADER`.
+  - `pair(store, &Secret, surface, presented) -> Result<Token, PairError>`:
+    four parameters, because the plan's form did not say how the target surface
+    and the presented key are both supplied. The key is compared with `subtle`
+    in constant time and before any write, so a wrong key pairs nothing and
+    learns nothing, and the token text is returned once while only its hash is
+    inserted. `PairError::{WrongPresharedKey, AlreadyPaired, Store(StateError)}`,
+    non-exhaustive, whose `Display` and `source` are implemented.
+- `crates/daemon/src/service.rs`: `Service::new(store, preshared)` implementing
+  the generated `DaemonService` under `#[allow(refining_impl_trait)]`, where
+  `echo` stamps `received_at` through `api_contracts::time::rfc3339_now` and
+  `pair` reads the declaration itself with `identity::from_headers`, because
+  pairing is the interceptor's exemption, and refuses an unreadable one as
+  `InvalidArgument` with the identity refusal headers. The factory is the
+  planned name with the measured return type:
+  `service(store, preshared, policy) -> ConnectRpcService<Router>`. connectrpc
+  0.9.1 keeps the interceptor chain on `ConnectRpcService` and offers no
+  conversion back to a `Router`, so the policy is welded to the service it was
+  installed on: `ConnectRpcService::new(router).with_interceptor(
+  AuthInterceptor::new(store.clone(), policy))`, and `Store` gained `Clone` so
+  the interceptor holds one store while the service holds another. A listener
+  therefore mounts a service, not a router: `transport::serve_uds_service` with
+  `AuthPolicy::LocalAcl` on the local socket, and `TokenRequired` on the remote
+  listener once a service-taking TCP front-end exists, which is
+  `serve-tcp-service`. That is how a local call needs no token while a remote
+  call does, with no peer-address sniffing. `PairError` maps to
+  `PermissionDenied`, `AlreadyPaired` to `AlreadyExists` and `Store` to
+  `Internal`.
+- `crates/client/src/credential.rs`: `Backend::{Keychain, File(PathBuf)}` with
+  `Display`; `store(surface, token) -> Result<Backend, CredentialError>`, which
+  answers with the backend that took the credential, and `load(surface) ->
+  Result<Option<Stored>, CredentialError>` beside `remove(surface)`, where
+  `Stored` carries the token and the backend, answers `token()` and `backend()`,
+  and redacts the token in `Debug`. `CredentialError` is non-exhaustive, with
+  `NoDataDir`, `InvalidSurface { surface }`, `Keychain(KeychainError)` and
+  `Io(io::Error)`. The keychain is tried first through
+  `api_contracts::keychain`, and the fallback file is `metis/client/<surface>.token`
+  under `$XDG_DATA_HOME`, else under `$HOME/.local/share`, at mode 600 inside a
+  700 directory through `transport::{ensure_private_dir, restrict_file}`, the
+  same private-path rule the socket and the state database use. Only one backend
+  is consulted, and a keychain that is present but refuses is an error rather
+  than a silent fallback; a surface name that is not one file name is
+  `InvalidSurface` rather than a path that steps out of the directory.
+- `crates/client/src/lib.rs`: `with_surface(self, Surface) -> Result<Self,
+  ClientError>`, fallible because declaring a surface loads that surface's stored
+  credential, and `pair(&mut self, preshared_key: &str) -> Result<Backend,
+  ClientError>`, taking `&mut self` because attaching the minted token replaces
+  the built configuration through `config_mut()`. The three landed constructors
+  `local`, `with_endpoint` and `with_remote_addr` keep their signatures, default
+  to `Surface::Unspecified`, and attach whatever credential that surface has
+  stored, so the landed in-tree caller moved to `?` with no assertion change.
+  `Client::surface()` reports the declaration. The credential is attached as a
+  default `Authorization: Bearer` header through `auth::AUTHORIZATION_HEADER` and
+  `auth::bearer`, on the call metadata path alone: no caller names a credential
+  and nothing lands in a URL. `ClientError` gains `Credential(CredentialError)`,
+  `CredentialMissing` and `CredentialRejected { cause: CredentialCause }` with
+  `CredentialCause::{Invalid, Revoked}`, all read from `AUTH_ERROR_HEADER` and
+  never from message text; a refusal value this build does not know stays
+  `ClientError::Call` rather than being guessed at.
+- `crates/api-contracts/src/time.rs`: `rfc3339_now() -> String` and
+  `rfc3339(seconds: u64) -> String`, the RFC 3339 UTC stamp
+  `EchoResponse.received_at` asks for, plus its unit tests. The module is
+  additive and new here: the two functions moved out of `client::skeleton` so the
+  daemon's own service can stamp a reply without depending on test support, and
+  the skeleton now delegates to them, so both services that answer the contract
+  share one calendar implementation.
 - Configuration and docs: `METIS_PRESHARED_KEY` (a `SecretRef`) recorded in
-  `docs/dev-env.md` with the token file and the keychain rule, and the run
-  commands in `docs/testing.md`.
+  `docs/dev-env.md` together with the token file's path and mode and the keychain
+  rule, and the run commands for the new suites in `docs/testing.md`. Both files
+  were extended beyond the single variable the plan named.
 
 ### Existing abstractions to use
 
@@ -2081,11 +2200,23 @@ the skeleton.
   refusal_headers}` and the `metis-supported-versions` header are the shape
   `metis-auth-error` copies; `PROTOCOL_SURFACE_HEADER` is where the surface comes
   from.
-- `transport::{serve_uds, ensure_private_dir, restrict_file}` for the tests'
-  socket, the token file's mode and its directory.
+- `transport::{serve_uds, serve_uds_service, ensure_private_dir, restrict_file}`
+  for the tests' socket, the token file's mode and its directory. `serve_uds` now
+  delegates to `serve_uds_service` through the private `serve_connection` body
+  `serve_stream` also uses, so the ACL the local listener applies covers the
+  service path as well and a test that needs the interceptor mounts the service
+  rather than the router.
 - `ConfigError` and the other non-exhaustive error enums; the RAII environment and
   temporary-directory helpers in the existing tests; `crates/client/tests/identity.rs`
   as the integration pattern over a real socket.
+- `client::skeleton` stays the second `DaemonService` implementation, and it now
+  answers `Pair` with `ErrorCode::Unimplemented` and the message `the skeleton
+  does not pair; the daemon's own service does`, so pairing is exercised only
+  through the daemon's service while the identity and transport tests keep the
+  skeleton.
+- `api_contracts::time` is the one calendar implementation the two services that
+  stamp `received_at` share; the skeleton delegates to it instead of keeping its
+  own.
 
 ### Do NOT reimplement
 
@@ -2104,72 +2235,130 @@ the skeleton.
   only when no tool is on `PATH`.
 - Do not hand-roll middleware when `connectrpc::Interceptor` exists, and do not
   enforce authorization inside handlers.
+- Do not mount an authorized service on the landed TCP front-ends (`serve_tcp`,
+  `serve_tcp_listener`): they take a bare `Router`, so the interceptor would not
+  travel with it and the listener would serve unauthenticated. A TCP front-end
+  that takes a `ConnectRpcService` is `serve-tcp-service`'s work, shaped like
+  `serve_uds_service`.
 
 ### Seams
 
 1. **Secret-reference seam.** Each of the four forms resolves; a file readable by
-   group or others is `TooPermissive`; an unset variable, a missing file and an
-   unreachable keystore are typed errors; a bare value is a literal.
-   Unit-tested with a temporary file and the RAII environment helper.
+   group or others is `TooPermissive { path, mode }`; an unset or empty variable,
+   an empty secret, a missing file and a keychain that is not there are typed
+   `Unresolved` errors while a keychain that refuses is `Unreadable(Keychain)`; a
+   bare value is a literal. Driven by `crates/daemon/tests/secret.rs` (12 tests)
+   with a temporary file and the RAII environment helper.
 2. **Pairing seam.** Over a real socket, `Pair` with the resolved key returns a
-   token once, and the store holds only its hash; the same call with a wrong key
+   token once and the store holds only its hash; the same call with a wrong key
    is `WrongPresharedKey`; pairing an already-paired surface is `AlreadyPaired`
-   and leaves the first row intact.
+   and leaves the first row intact. The socket is the authorized service mounted
+   with `transport::serve_uds_service` under `AuthPolicy::LocalAcl`, and the test
+   drives it through `client` as a dev-dependency (`crates/daemon/tests/auth.rs`,
+   10 tests).
 3. **Authorization seam.** Under `TokenRequired`, a call with no `Authorization`
    header is `CredentialMissing`, an unknown surface is `CredentialRejected {
    Revoked }`, a wrong token is `CredentialRejected { Invalid }`, and a valid
    token is served; each refusal is produced by the interceptor, so the handler
-   is proven not to have run. Under `LocalAcl`, the same call is served with no
-   credential at all.
+   is proven not to have run. Each refusal reaches the client as its typed error
+   through `AUTH_ERROR_HEADER`, never through message text. Under `LocalAcl`, the
+   same call is served with no credential at all. The unary half is wire-tested;
+   the streaming half is proven by construction through the shared `admit` and is
+   `event-stream`'s wire test.
 4. **Revocation seam.** With two surfaces paired, deleting one row and re-serving
-   leaves that surface rejected and the other working.
+   leaves that surface rejected and the other working. Moved by the same
+   mutation check as seam 3: pinning `needs_credential` to `false` fails exactly
+   the four refusal and revocation tests.
 5. **Credential-storage seam.** With no keychain tool on `PATH`, the file backend
-   is used, reports itself, and writes mode 600; with a stub tool earlier on
-   `PATH`, the keychain backend is used for store and load.
+   is used, reports itself, and writes mode 600 inside a 700 directory; with a
+   stub tool earlier on `PATH`, the keychain backend is used for store and load.
+   `crates/client/tests/credential.rs` (5 tests) drives the client half and
+   `crates/api-contracts/tests/keychain.rs` (5 tests) the keychain module.
 6. **Digest-contract seam.** The token `Pair` returns verifies against the row the
    store wrote, using the landed hash rule, so a change to that rule fails here
-   rather than at a client.
+   rather than at a client. The unit tests in `daemon/src/auth.rs` assert that the
+   returned text verifies against the stored row, so the cross-ticket digest
+   contract `state-store` pinned is asserted here rather than assumed.
 7. **Contract seam.** The proto edit regenerates cleanly, `buf lint` and
    `buf breaking` stay green, and the generated tree is committed.
 
-Test types: unit tests in `daemon` for seams 1 and 6 and in `client` for the
-credential store's file backend; integration tests in `crates/daemon/tests/` over
-a real socket, with `client` as a dev-dependency, for seams 2 to 5; the contract
-gates for seam 7.
+Test types: unit tests in `daemon` for seams 1 and 6, in `client` for the
+credential store's backends and in `api-contracts` for the keychain module and
+its time module; integration tests in `crates/daemon/tests/` over a real socket,
+with `client` as a dev-dependency, for seams 2 to 5; the contract gates for seam
+7. The measured suite sizes on the landing tree are `daemon/tests/secret.rs` 12,
+`daemon/tests/auth.rs` 10, `daemon/tests/token.rs` 4, `client/tests/credential.rs`
+5 and `api-contracts/tests/keychain.rs` 5, and the workspace total is 140 passed
+with 0 failed.
 
 ### Interface contract
 
+- A listener mounts a service, not a router. `service(store, preshared, policy)`
+  returns `ConnectRpcService<Router>`, and the interceptor chain lives on that
+  value; `transport::serve_uds_service(path, service)` is the Unix front-end that
+  takes it and applies the same ACL `serve_uds` applies. The landed TCP
+  front-ends (`serve_tcp`, `serve_tcp_listener`) still take a bare `Router`, so an
+  authorized service cannot be mounted on TCP yet: a TCP listener wired through
+  today's surface would serve unauthenticated. `serve-tcp-service` on `main`
+  (`97e0a91`) owns the service-taking front-end, and `remote-pairing` is blocked
+  by it. `windows-named-pipe` and `reverse-proxy-mode` have the same choice to
+  make and the same front-end shape to copy.
 - `remote-pairing` reuses `Pair`, the auth interceptor, the secret references and
   the client credential store over the remote transport; it adds no second
   credential path. It also owns whether a remote listener runs `TokenRequired`
-  from the start (this ticket's `router` takes the policy, so the daemon effort
-  or that ticket decides the wiring).
+  from the start, because the factory takes the policy, so the daemon effort or
+  that ticket decides the wiring, and it cannot do so over TCP until
+  `serve-tcp-service` lands.
 - `event-stream` inherits authorization through `intercept_streaming`, so its
   `StreamEvents` handler does not call the check itself; the obligation is the
   interceptor's, which is why this ticket removes that residual from
-  `local-identity-and-acl`.
-- `reverse-proxy-mode` and the daemon effort consume `SecretRef` for their own
-  settings; `api_contracts::keychain` is the one place the platform tool is
-  called.
-- Recorded residuals: the `Pair` exemption is by procedure path, so a future
-  pre-auth RPC must be added to that list deliberately; there is no token rotation
-  or expiry; `client::skeleton` remains a second `DaemonService` implementation
-  used by the identity and transport tests, and the daemon effort replaces it; the
-  daemon binary does not mount either service yet, so the two listeners exist only
-  in tests and in the daemon effort's future wiring.
+  `local-identity-and-acl`. The streaming half has no wire test yet, because the
+  contract declares no streaming RPC: it is proven by construction through the
+  one shared `admit`, and `event-stream` owns the wire test.
+- A dependent that maps a credential refusal reads `api_contracts::auth`
+  (`CredentialRefusal`, `AUTH_ERROR_HEADER`, `bearer_token`), not the daemon's
+  own spelling; `daemon::auth` re-exports both header names for its refusals.
+  `reverse-proxy-mode` and the daemon effort consume `SecretRef` for their own
+  settings, `api_contracts::keychain` is the one place the platform tool is
+  called, and `api_contracts::time` is the one calendar implementation.
+- `Client::with_surface` is now a fallible call on a landed surface and
+  `Client::pair` takes `&mut self`, so `terminal` and the app call the first as a
+  `Result`; the landed constructors are unchanged.
+
+Recorded residuals:
+
+- The streaming half of the interceptor has no wire test, because the contract
+  declares no streaming RPC yet; `event-stream` exercises it.
+- A store fault during verification fails closed as `CredentialRejected {
+  Invalid }`, because `AuthError` carries the two planned causes; the enum is
+  non-exhaustive, so a store-fault variant stays additive.
+- The secret file's access rule is Unix only, and keychain absence versus refusal
+  is inferred from the tool's exit status and standard error, so a silently
+  failing tool reads as absence. macOS compiles but is never run against the real
+  `security` tool.
+- A wrong preshared key reaches the client as `ClientError::Call` with
+  `PermissionDenied` rather than as a typed pairing error; the spec names none,
+  and the typed credential mapping covers the credential path only.
+- The `Pair` exemption is by procedure path, so a future pre-auth RPC must be
+  added to that list deliberately; there is no token rotation or expiry.
+- `client::skeleton` remains a second `DaemonService` implementation used by the
+  identity and transport tests and answers `Pair` with `Unimplemented`, and the
+  daemon effort replaces it; the daemon binary does not mount either service yet,
+  so the listeners exist only in tests and in the daemon effort's future wiring.
+- An authorized service cannot be mounted on the landed TCP front-ends until
+  `serve-tcp-service` lands.
 
 ---
 
 ## Downstream interface contracts (outline)
 
-The tickets still pending in this effort are `pairing-and-tokens` (unblocked by
-the landed `state-store`, whose store and token surfaces it consumes),
-`event-stream`, `reverse-proxy-mode`, `windows-named-pipe` and `remote-pairing`.
-Their sections are added when their chains reach the frontier. The tickets the
-bullets below also name (`stream-resume-and-expiry`,
-`cancellation-and-slow-consumers`) are not pending yet, and the commitments below
-are what the landed tickets must already support, including the surfaces
-`local-identity-and-acl` and `state-store` landed.
+The tickets still pending in this effort are `serve-tcp-service`, `event-stream`,
+`reverse-proxy-mode`, `windows-named-pipe` and `remote-pairing`. Their sections
+are added when their chains reach the frontier. The tickets the bullets below
+also name (`stream-resume-and-expiry`, `cancellation-and-slow-consumers`) are not
+pending yet, and the commitments below are what the landed tickets must already
+support, including the surfaces `local-identity-and-acl`, `state-store` and
+`pairing-and-tokens` landed.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
@@ -2196,32 +2385,40 @@ are what the landed tickets must already support, including the surfaces
   stream, because `serve_stream` takes `router: impl Into<Arc<Router>>`
   (`connectrpc::Router` is not `Clone` in 0.9.1). A front-end that must report a
   kernel-assigned port takes an already bound listener, as `serve_tcp_listener`
-  does, and a front-end that resolves a non-default authority names it through
-  a helper beside `local_authority` and `remote_authority`; new settings and
-  bind failures join the non-exhaustive `ConfigError`. Because `Client` builds
-  its own transport and exposes no injection point, each of these tickets
-  extends `client` with a constructor for its own transport instead of injecting
-  one from outside; on non-Unix there is no local constructor and no `serve_uds`
+  does; a front-end that must serve an interceptor-carrying service takes a
+  `ConnectRpcService<Router>` instead, the shape `serve_uds_service` landed, and
+  the landed TCP front-ends are the exception whose service-taking counterpart
+  `serve-tcp-service` owns. A front-end that resolves a non-default authority
+  names it through a helper beside `local_authority` and `remote_authority`; new
+  settings and bind failures join the non-exhaustive `ConfigError`. Because
+  `Client` builds its own transport and exposes no injection point, each of
+  these tickets extends `client` with a constructor for its own transport
+  instead of injecting one from outside; on non-Unix there is no local
+  constructor and no `serve_uds`
   ACL until `windows-named-pipe` lands, because the landed socket rule is
   Unix-only and a named pipe carries its own access rule rather than
   `METIS_SOCKET_GROUP`.
-- `pairing-and-tokens`, `remote-pairing`: add request metadata and RPCs under
-  `metis.v1`; credentials travel as `Authorization` metadata on every call,
-  including the stream, on the channel `local-identity-and-acl` landed (the three
-  identity headers plus the `metis-supported-versions` refusal header under
-  `api_contracts::identity`). Those two tickets own the `ClientError` credential
-  variants; `local-identity-and-acl` added no credential, and it settled the
-  endpoint default against its directory-ownership requirement on the
-  `$XDG_RUNTIME_DIR`, then `$TMPDIR`, rule. `pairing-and-tokens` builds its token
-  path on the landed `state-store`: it calls `Store::open`, `mint`,
-  `insert_token(surface, &TokenHash)`, `verify_token` and `revoke_token` with the
-  surface name as a `&str`, maps `Verify::UnknownSurface` and `Verify::Mismatch`
-  onto its two rejection causes, turns `TokenError::Malformed` from
-  `Token::parse` into a typed refusal, and hashes the presented credential
-  exactly as the store does: SHA-256 over the token's canonical lowercase hex
-  text, the rule the known-answer digest in the `state-store` section pins. A
-  client that hashed the decoded bytes would pair successfully and then fail
-  every later call, so the rule is named here as well as there.
+- `pairing-and-tokens` landed the credential path this bullet reserved, and
+  `remote-pairing` consumes it: request metadata and RPCs under `metis.v1`,
+  credentials as `Authorization` metadata on every call, including the stream, on
+  the channel `local-identity-and-acl` landed (the three identity headers plus the
+  `metis-supported-versions` refusal header under `api_contracts::identity`) and
+  now the credential vocabulary under `api_contracts::auth`
+  (`AUTHORIZATION_HEADER`, `AUTH_ERROR_HEADER`, `CredentialRefusal`, `bearer`,
+  `bearer_token`). It owns no second credential path, and its remaining
+  constraint is that an authorized service cannot be mounted on TCP until
+  `serve-tcp-service` lands, because `service(...)` returns the interceptor's own
+  `ConnectRpcService` and the landed TCP front-ends take a bare `Router`. The
+  token path the landed ticket built is the commitment it kept: `Store::open`,
+  `mint`, `insert_token(surface, &TokenHash)`, `verify_token` and `revoke_token`
+  with the surface name as a `&str`, `Verify::UnknownSurface` and
+  `Verify::Mismatch` mapped onto `RejectionCause::Revoked` and
+  `RejectionCause::Invalid`, `TokenError::Malformed` from `Token::parse` turned
+  into a typed refusal, and the presented credential hashed exactly as the store
+  does: SHA-256 over the token's canonical lowercase hex text, the rule the
+  known-answer digest in the `state-store` section pins. A client that hashed the
+  decoded bytes would pair successfully and then fail every later call, so the
+  rule is named here as well as there.
 
 ## Architecture notes
 
@@ -2314,6 +2511,21 @@ are what the landed tickets must already support, including the surfaces
   private-path rule into `transport::ensure_private_dir` and
   `transport::restrict_file`. The tickets still pending in the effort are
   `pairing-and-tokens` (unblocked by this landing), `event-stream`,
+  `reverse-proxy-mode`, `windows-named-pipe` and `remote-pairing`; the earlier
+  notes in this section carry the pending set at their own landing moment, and
+  this note carries the current set.
+- `pairing-and-tokens` landed as the merge commit `1c89660` on
+  `task/pairing-and-tokens`, with the ticket note and the committed deviation
+  report in the docs commit `3c91ea0`. It is the first ticket to append to the
+  wire contract since the skeleton and the first to carry a credential, and it
+  settles the listener question for the remaining transport tickets: because
+  connectrpc 0.9.1 keeps an interceptor chain on `ConnectRpcService` and offers
+  no conversion back to a `Router`, a listener mounts a service rather than a
+  router, so the Unix front-end is `transport::serve_uds_service` and the landed
+  TCP front-ends, which take a bare `Router`, cannot carry the policy. That gap
+  is the `serve-tcp-service` ticket on `main` (`97e0a91`), which `remote-pairing`
+  is blocked by; the deviation report named it before the landing. The tickets
+  still pending in the effort are `serve-tcp-service`, `event-stream`,
   `reverse-proxy-mode`, `windows-named-pipe` and `remote-pairing`; the earlier
   notes in this section carry the pending set at their own landing moment, and
   this note carries the current set.
