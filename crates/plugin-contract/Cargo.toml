@@ -18,9 +18,11 @@ cc.workspace = true
 # dependency list is empty, which is what keeps an async runtime out of the
 # boundary.
 [features]
-authoring = ["dep:serde", "dep:serde_json", "dep:schemars"]
+authoring = ["dep:schemars"]
 
 [dependencies]
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+# The capability declaration is a JSON payload both sides read, so the serde
+# pair is always on. `schemars` is not: only an author derives schemas.
+serde = { workspace = true }
+serde_json = { workspace = true }
 schemars = { workspace = true, optional = true }

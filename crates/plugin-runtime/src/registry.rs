@@ -21,51 +21,21 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use plugin_contract::abi::MetisStatus;
+use plugin_contract::capability::{CapabilityDescriptor, CapabilityList};
 use serde_json::Value;
 
 use crate::Instance;
 
-/// One capability as the plugin published it.
-#[derive(Debug, Clone)]
-pub struct Capability {
-    /// The tool-level name the plugin declared.
-    pub name: String,
-    /// `tool` or `provider`.
-    pub kind: String,
-    /// The capability's own version, which the gate reads.
-    pub version: u32,
-    /// The JSON Schema of this capability's request body.
-    pub request_schema: Value,
-    /// The JSON Schema of this capability's response body.
-    pub response_schema: Value,
-}
-
-/// The shape of the JSON the plugin sends as its capability list.
-///
-/// It is deliberately this crate's own type rather than the authoring module's:
-/// the wire is the JSON, the host depends on the primitives and the envelope
-/// alone, and the two declarations are checked against each other by the tests
-/// that drive a real fixture.
-#[derive(Debug, serde::Deserialize)]
-struct CapabilityList {
-    capabilities: Vec<DeclaredCapability>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct DeclaredCapability {
-    name: String,
-    kind: String,
-    version: u32,
-    request_schema: Value,
-    response_schema: Value,
-}
-
 /// Parses the capability list payload body.
 ///
-/// A declaration that is not JSON, or that carries no schemas, is refused here
+/// The declaration is the shared `plugin_contract::capability` type, so the
+/// bytes a plugin publishes and the values this registry routes with are the
+/// same shape by construction rather than by two types kept in step by a test.
+///
+/// A declaration that is not JSON, or that declares nothing, is refused here
 /// rather than at the first call: an instance whose declaration cannot be
 /// understood cannot be routed.
-pub fn parse_capabilities(body: &[u8]) -> Result<Vec<Capability>, crate::CallError> {
+pub fn parse_capabilities(body: &[u8]) -> Result<Vec<CapabilityDescriptor>, crate::CallError> {
     let list: CapabilityList = serde_json::from_slice(body).map_err(|err| {
         crate::CallError::Payload(format!(
             "the capability list is not the declared JSON: {err}"
@@ -76,17 +46,7 @@ pub fn parse_capabilities(body: &[u8]) -> Result<Vec<Capability>, crate::CallErr
             "the plugin declares no capabilities".to_string(),
         ));
     }
-    Ok(list
-        .capabilities
-        .into_iter()
-        .map(|declared| Capability {
-            name: declared.name,
-            kind: declared.kind,
-            version: declared.version,
-            request_schema: declared.request_schema,
-            response_schema: declared.response_schema,
-        })
-        .collect())
+    Ok(list.capabilities)
 }
 
 /// Whether a real JSON body satisfies a published schema.
@@ -97,6 +57,23 @@ pub fn validate_request(schema: &Value, body: &[u8]) -> Result<(), RouteError> {
 /// Whether a plugin's response satisfies the schema the plugin published for it.
 pub fn validate_response(schema: &Value, body: &[u8]) -> Result<(), RouteError> {
     validate(schema, body, Direction::Response)
+}
+
+/// Refuses a capability whose kind this build does not know.
+///
+/// One capability at a time, for the same reason the version gate is per
+/// capability: an unknown kind is that one capability's problem, not the
+/// plugin's, so the rest of the declaration keeps working. The declaration's
+/// `kind` is a string precisely so a newer plugin's kind parses at all and
+/// lands here instead of failing the whole list.
+fn kind_gate(qualified: &str, capability: &CapabilityDescriptor) -> Result<(), RouteError> {
+    if capability.known_kind().is_none() {
+        return Err(RouteError::UnknownKind {
+            name: qualified.to_string(),
+            kind: capability.kind.clone(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -152,6 +129,14 @@ pub enum RouteError {
         required: u32,
         declared: u32,
     },
+    /// The declaration names a kind this build does not know, so this one
+    /// capability cannot be served while the rest of the plugin stays usable.
+    UnknownKind {
+        /// The qualified capability name.
+        name: String,
+        /// The kind the plugin declared.
+        kind: String,
+    },
     /// The request body did not match the capability's published schema.
     InvalidArgument(String),
     /// The response body did not match the plugin's published schema.
@@ -172,6 +157,10 @@ impl std::fmt::Display for RouteError {
             } => write!(
                 f,
                 "{name} declares version {declared} and version {required} was required"
+            ),
+            RouteError::UnknownKind { name, kind } => write!(
+                f,
+                "{name} declares kind {kind}, which this build does not know"
             ),
             RouteError::InvalidArgument(detail) => write!(f, "invalid argument: {detail}"),
             RouteError::InvalidResponse(detail) => {
@@ -200,6 +189,7 @@ impl RouteError {
             RouteError::Unknown(_) => MetisStatus::NotFound,
             RouteError::Disabled(_) => MetisStatus::PermissionDenied,
             RouteError::Version { .. } => MetisStatus::Unsupported,
+            RouteError::UnknownKind { .. } => MetisStatus::Unsupported,
             RouteError::InvalidArgument(_) => MetisStatus::InvalidArgument,
             RouteError::InvalidResponse(_) => MetisStatus::Internal,
             RouteError::Call(crate::CallError::Status(status)) => *status,
@@ -335,7 +325,12 @@ impl Registry {
     }
 
     /// Resolves a qualified capability name to its entry and declaration.
-    pub fn route(&self, qualified: &str) -> Result<(&Entry, &Capability), RouteError> {
+    ///
+    /// A capability whose kind this build does not know is refused here, one
+    /// capability at a time, for the same reason the version gate is per
+    /// capability: an unknown kind is this capability's problem, not the
+    /// plugin's, so the rest of the declaration keeps working.
+    pub fn route(&self, qualified: &str) -> Result<(&Entry, &CapabilityDescriptor), RouteError> {
         let owner = self
             .routes
             .get(qualified)
@@ -357,6 +352,7 @@ impl Registry {
             .iter()
             .find(|capability| capability.name == tool)
             .ok_or_else(|| RouteError::Unknown(qualified.to_string()))?;
+        kind_gate(qualified, capability)?;
         Ok((entry, capability))
     }
 
@@ -406,5 +402,46 @@ impl Registry {
         let response = call.await?;
         validate_response(&capability.response_schema, &response)?;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn descriptor(kind: &str) -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            name: "tool.probe".to_string(),
+            kind: kind.to_string(),
+            version: 1,
+            request_schema: json!({"type": "object"}),
+            response_schema: json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn a_kind_this_build_knows_passes_the_gate() {
+        for kind in ["tool", "provider"] {
+            assert_eq!(
+                kind_gate("inst.tool.probe", &descriptor(kind)),
+                Ok(()),
+                "{kind} is a kind this build knows"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kind_this_build_does_not_know_is_refused_with_unsupported() {
+        let error = kind_gate("inst.tool.probe", &descriptor("widget"))
+            .expect_err("an unknown kind is refused");
+        assert_eq!(
+            error,
+            RouteError::UnknownKind {
+                name: "inst.tool.probe".to_string(),
+                kind: "widget".to_string(),
+            }
+        );
+        assert_eq!(error.status(), MetisStatus::Unsupported);
     }
 }

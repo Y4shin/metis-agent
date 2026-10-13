@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-13, Unify the capability declaration (plugin-contract-v1, amendment)
+
+The declaration both sides of the plugin wire read is now one ungated type in `plugin-contract::capability`, with `serde_json::Value` schemas and a lenient `kind`; `schemars` stays optional behind `authoring`, and the host deleted its own duplicate type and the test that kept the two in step. A capability whose kind this build does not know is refused on its own with `Unsupported` instead of failing the declaration. The wire is byte-identical.
+
 ## 2026-10-13, Plugin contract v1: futures-only ABI (plugin-contract-v1)
 
 Futures are now the only way the daemon calls a plugin: `invoke` and the `complete` callback are deleted, `invoke_future`, `service_complete` and `service_request` are the table, and the authoring surface is one capability-name-routed `call` instead of four role-named arms, which removes the four-capability ceiling. The plugin owns no executor and no thread, `async-ffi` is dropped because a destructor panic inside a plugin future aborts the process even for a plugin that returned `Ok`, and unload is quarantine plus one reclaim on a late poll return. `plugin-runtime` gained the loader, the registry, both-direction schema validation and the unload ledger, and a hand-written 482-line C plugin compiles under gcc and clang and is driven end to end by the harness.

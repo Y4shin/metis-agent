@@ -406,7 +406,14 @@ untyped `kind` also has a use: a strict shared enum would fail the whole
 declaration on a future kind, where the host wants to refuse one capability.
 Recommendation: keep the duplication and the tie test. Either way it is a
 decision for the operator, and `metis-plugin-sdk` meets the same question when it
-re-exports an author-facing descriptor.
+re-exports an author-facing descriptor. **Settled:** the operator chose to unify,
+gating the impls rather than the data, and it landed as an amendment to
+`plugin-contract-v1` rather than as a ticket (see that ticket's amendment
+section). One ungated `plugin-contract::capability` declaration with `Value`
+schemas and a lenient `kind`, `schema_of` behind `authoring`, the host's own type
+deleted, and an unknown kind refused per capability. The wire is byte-identical,
+and `metis-plugin-sdk` re-exports the shared type rather than meeting the
+question again.
 
 ## Next round (not started)
 

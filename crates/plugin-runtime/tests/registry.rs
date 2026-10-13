@@ -25,7 +25,7 @@ fn the_loader_reads_the_declaration_and_the_version() {
     assert_eq!(
         declared,
         CAPABILITIES.to_vec(),
-        "the host's own declaration type parses what the plugin publishes"
+        "the shared declaration parses what the plugin publishes"
     );
     assert!(
         instance

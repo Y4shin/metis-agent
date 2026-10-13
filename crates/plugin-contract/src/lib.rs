@@ -9,8 +9,10 @@
 //! inside `MetisBuffer`, whose constants are part of the header.
 //!
 //! This crate carries no async runtime and no serde in its C ABI surface: a
-//! plugin boundary is a byte boundary, and everything above it (serialisation
-//! shapes, the authoring trait) lives behind the `authoring` feature.
+//! plugin boundary is a byte boundary. The capability declaration rides as a
+//! JSON payload and is ungated, because a plugin publishes it and a host reads
+//! the same bytes; only the authoring trait and schema derivation sit behind
+//! the `authoring` feature.
 //!
 //! The revision this crate carries is the approved plugin contract: a future is
 //! the only call path (`invoke` and the host `complete` callback are gone), the
@@ -37,15 +39,20 @@
 //! - nothing else crosses: no host ever calls `free` into plugin memory, and no
 //!   plugin ever frees a buffer it did not allocate.
 //!
-//! # The authoring surface
+//! # The declaration and the authoring surface
 //!
-//! The Rust authoring surface (the routed trait and the future adapter) is
-//! behind the `authoring` feature, off by default, so the plugin runtime
-//! depends on the primitives and the payload envelope alone.
+//! The capability declaration (`crate::capability`) is ungated: a plugin
+//! publishes it, and a host parses the same bytes, so one type serves both and
+//! the two sides cannot drift. The Rust authoring surface (the routed trait and
+//! the future adapter) is behind the `authoring` feature, off by default, so the
+//! plugin runtime depends on the primitives, the payload envelope and the
+//! declaration alone.
 
 pub mod abi;
 
 #[cfg(feature = "authoring")]
 pub mod authoring;
+
+pub mod capability;
 
 pub mod payload;

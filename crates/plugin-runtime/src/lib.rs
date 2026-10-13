@@ -35,7 +35,8 @@ use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
 
 pub mod registry;
 
-pub use registry::{Capability, Entry, Registry, RegistryError, RouteError};
+pub use plugin_contract::capability::{CapabilityDescriptor, CapabilityKind, CapabilityList};
+pub use registry::{Entry, Registry, RegistryError, RouteError};
 
 /// What can go wrong on the host side of one call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,7 +195,7 @@ impl Loaded {
 fn read_capabilities(
     table: &MetisPluginTableV1,
     instance: *mut c_void,
-) -> Result<Vec<Capability>, CallError> {
+) -> Result<Vec<CapabilityDescriptor>, CallError> {
     let mut payload = MetisBuffer::empty();
     // SAFETY: the instance is live and the out parameter is a local.
     let status = unsafe { (table.list_capabilities)(instance, &mut payload) };
@@ -401,7 +402,7 @@ pub struct Instance {
     loaded: Arc<Loaded>,
     handle: *mut c_void,
     host: Host,
-    capabilities: Vec<Capability>,
+    capabilities: Vec<CapabilityDescriptor>,
     quarantined: AtomicBool,
     /// The request ids this instance still holds a future for. Nothing may be
     /// unloaded while this is non-empty.
@@ -418,7 +419,7 @@ unsafe impl Sync for Instance {}
 
 impl Instance {
     /// The capability declaration this instance published.
-    pub fn capabilities(&self) -> &[Capability] {
+    pub fn capabilities(&self) -> &[CapabilityDescriptor] {
         &self.capabilities
     }
 

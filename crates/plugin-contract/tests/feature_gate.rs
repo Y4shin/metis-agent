@@ -5,9 +5,10 @@
 //! feature on:
 //!
 //! - the feature is off by default, so `plugin-runtime` depends on the
-//!   primitives and the payload envelope alone (D3);
-//! - with it off the crate's ordinary dependency list is empty, which is what
-//!   keeps an async runtime and serde out of the boundary;
+//!   primitives, the payload envelope and the capability declaration alone (D3);
+//! - with it off the ordinary dependency closure is the serde pair the ungated
+//!   declaration needs and nothing above the boundary, so no async runtime, no
+//!   `schemars` and no `jsonschema` reaches the primitives crate;
 //! - the trait module names no ABI type, which is the whole point of the
 //!   authoring surface.
 //!
@@ -47,31 +48,39 @@ fn manifest_value(manifest: &str, section: &str, key: &str) -> Option<String> {
 }
 
 #[test]
-fn the_authoring_feature_is_off_by_default_and_its_dependencies_are_optional() {
+fn the_authoring_feature_is_off_by_default_and_only_schemars_is_optional() {
     let manifest = crate_file("Cargo.toml");
 
     let authoring = manifest_value(&manifest, "features", "authoring")
         .expect("the manifest declares an `authoring` feature");
     assert!(
-        authoring.contains("dep:serde") && authoring.contains("dep:serde_json"),
-        "the feature turns on the serde pair: {authoring}"
+        authoring.contains("dep:schemars"),
+        "the feature turns on schema derivation: {authoring}"
     );
     assert!(
         manifest_value(&manifest, "features", "default").is_none(),
         "no default feature turns `authoring` on"
     );
+    // The declaration rides as a JSON payload both sides read, so the serde pair
+    // is deliberately ungated. Only derivation is an author's business.
     for dependency in ["serde", "serde_json"] {
         let declared = manifest_value(&manifest, "dependencies", dependency)
             .unwrap_or_else(|| panic!("the manifest declares {dependency}"));
         assert!(
-            declared.contains("optional = true"),
-            "{dependency} is optional, so the feature is what pulls it in: {declared}"
+            !declared.contains("optional = true"),
+            "{dependency} backs the ungated declaration, so it is not optional: {declared}"
         );
     }
+    let schemars = manifest_value(&manifest, "dependencies", "schemars")
+        .expect("the manifest declares schemars");
+    assert!(
+        schemars.contains("optional = true"),
+        "schemars is optional, so only the feature pulls it in: {schemars}"
+    );
 }
 
 #[test]
-fn the_crate_has_no_ordinary_dependencies_with_the_feature_off() {
+fn the_feature_off_dependency_closure_carries_nothing_above_the_boundary() {
     let output = Command::new(env!("CARGO"))
         .args([
             "tree",
@@ -88,17 +97,29 @@ fn the_crate_has_no_ordinary_dependencies_with_the_feature_off() {
         "cargo tree failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let tree = String::from_utf8_lossy(&output.stdout);
-    let roots: Vec<&str> = tree.lines().filter(|line| !line.is_empty()).collect();
-    assert_eq!(
-        roots.len(),
-        1,
-        "the crate stands alone with the feature off, but the tree is:\n{tree}"
-    );
-    assert!(
-        roots[0].starts_with("plugin-contract "),
-        "the one node is the crate itself: {tree}"
-    );
+    let tree = String::from_utf8_lossy(&output.stdout).to_string();
+    for absent in [
+        "schemars",
+        "jsonschema",
+        "tokio",
+        "async-std",
+        "smol",
+        "futures",
+        "async-ffi",
+    ] {
+        assert!(
+            !tree.contains(absent),
+            "{absent} must not reach the boundary with the feature off:\n{tree}"
+        );
+    }
+    // The one cost the ungated declaration is allowed: the serde pair it is
+    // serialised with, which the host already depends on.
+    for present in ["serde", "serde_json"] {
+        assert!(
+            tree.contains(present),
+            "the declaration is serialised with {present}, which is in the closure:\n{tree}"
+        );
+    }
 }
 
 #[test]

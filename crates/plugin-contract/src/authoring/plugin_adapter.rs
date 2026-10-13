@@ -26,9 +26,9 @@ use crate::abi::{
 };
 use crate::authoring::alloc::{plugin_alloc, release_buffer, violation};
 use crate::authoring::call::{Call, CancellationToken, Host, LogLevel, resolve_service};
-use crate::authoring::capability::CapabilityList;
 use crate::authoring::future::{ErasedFuture, new_handle};
 use crate::authoring::traits::{Plugin, PluginError, Request};
+use crate::capability::CapabilityList;
 use crate::payload::{metis_encode_payload, metis_payload_body};
 
 /// One live instance.

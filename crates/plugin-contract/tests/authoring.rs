@@ -26,8 +26,8 @@ use plugin_contract::abi::{
     MetisStatus, MetisWaker, metis_read_table,
 };
 use plugin_contract::authoring::{
-    Call, CapabilityDescriptor, CapabilityKind, Host, LogLevel, Plugin, PluginError, Request,
-    Response, accounting, schemars, table,
+    Call, CapabilityDescriptor, Host, LogLevel, Plugin, PluginError, Request, Response, accounting,
+    schema_of, table,
 };
 use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
 
@@ -44,13 +44,7 @@ fn serial() -> MutexGuard<'static, ()> {
 }
 
 fn descriptor(name: &str) -> CapabilityDescriptor {
-    CapabilityDescriptor {
-        name: name.to_string(),
-        kind: CapabilityKind::Tool,
-        version: 1,
-        request_schema: schemars::schema_for!(Body),
-        response_schema: schemars::schema_for!(Body),
-    }
+    CapabilityDescriptor::tool(name, 1, schema_of::<Body>(), schema_of::<Body>())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]

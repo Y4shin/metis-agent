@@ -22,7 +22,7 @@ use plugin_contract::abi::{
     MetisStatus, MetisWaker,
 };
 use plugin_contract::authoring::{
-    Call, CapabilityDescriptor, CapabilityKind, Plugin, PluginError, Request, Response, table,
+    Call, CapabilityDescriptor, Plugin, PluginError, Request, Response, schema_of, table,
 };
 use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
 
@@ -32,13 +32,12 @@ struct Probe;
 
 impl Plugin for Probe {
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
-        vec![CapabilityDescriptor {
-            name: "tool.probe".to_string(),
-            kind: CapabilityKind::Tool,
-            version: 1,
-            request_schema: plugin_contract::authoring::schemars::schema_for!(Body),
-            response_schema: plugin_contract::authoring::schemars::schema_for!(Body),
-        }]
+        vec![CapabilityDescriptor::tool(
+            "tool.probe",
+            1,
+            schema_of::<Body>(),
+            schema_of::<Body>(),
+        )]
     }
 
     async fn call(&self, _call: Call, request: Request<'_>) -> Result<Response, PluginError> {

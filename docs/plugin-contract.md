@@ -38,7 +38,7 @@ through `service_complete`.
 | --- | --- |
 | instance | One loaded, configured occurrence of a plugin. A plugin may have several. |
 | capability | A named callable, declared by the plugin. |
-| descriptor | Name, version, and the JSON Schema for one capability's request and response. |
+| descriptor | Name, kind, version, and the JSON Schema for one capability's request and response. V1 knows the kinds `tool` and `provider`; a kind this build does not know refuses that one capability and leaves the rest of the plugin usable. |
 | call | One invocation: a capability, a request id, request bytes, and a per-call context. |
 | request_id | A `u64` the host chooses. Unique among in-flight calls, and the key for cancel, progress and services. |
 | host table | The daemon's callback table, passed to the plugin. |

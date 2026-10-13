@@ -261,3 +261,30 @@ artifact is `deviation-reports/plugin-contract-v1.md`. The remaining cosmetic
 item in that report is a stale rustdoc link to `Call::service` in
 `crates/plugin-contract/src/authoring/traits.rs`; the method is
 `Call::service_request`, and no deny is configured for broken links.
+
+## Amendment: one capability declaration (no ticket, at the operator's direction)
+
+The capability declaration was unified after this ticket landed. It is one
+ungated type in `crates/plugin-contract/src/capability.rs`
+(`CapabilityDescriptor`, `CapabilityKind`, `CapabilityList`) with
+`serde_json::Value` schemas and a `kind: String`; `authoring` re-exports it and
+adds `schema_of::<T>()` behind the feature, so only derivation needs `schemars`.
+`plugin-runtime` deleted its own `Capability`, `DeclaredCapability` and
+`CapabilityList` and parses the shared type, which retires the drift test, and
+routing refuses a capability whose kind this build does not know with
+`RouteError::UnknownKind` and the `Unsupported` status.
+
+Why: two identical types either side of a wire is a packaging accident, not a
+boundary, and the operator's framing was to gate the impls rather than the data.
+The host already depended on `serde`, `serde_json` and `jsonschema`, so the only
+cost is `plugin-contract`'s zero-dependency default build. The wire is
+byte-identical, so nothing about compatibility changes. The gate assertions in
+`tests/feature_gate.rs` were restated to the new invariant, not deleted: the
+serde pair is ungated because the declaration needs it, `schemars` is optional,
+and no schema tooling or async runtime reaches the feature-off closure.
+
+Verified here rather than by a chain: `cargo fmt --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, the whole workspace test suite,
+`cargo check -p plugin-contract --no-default-features`, the 62-check ABI harness,
+and the header drift check, all green. The amendment adds unit tests for the
+declaration constructors, the lenient unknown kind, and the kind gate.

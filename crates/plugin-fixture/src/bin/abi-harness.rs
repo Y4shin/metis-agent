@@ -510,7 +510,7 @@ fn list_capabilities(
         ),
     );
     let inline = list.capabilities.iter().all(|descriptor| {
-        descriptor.kind == CapabilityKind::Tool
+        descriptor.kind == CapabilityKind::Tool.as_str()
             && descriptor.version == 1
             && descriptor.request_schema.as_object().is_some()
             && descriptor.response_schema.as_object().is_some()

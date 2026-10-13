@@ -1321,12 +1321,22 @@ build mechanism) are reconciled at their entries below.
     violations, and returns `Internal` for a panic rather than reaching
     `process::abort`.
   - `capability.rs`: `CapabilityDescriptor` carries `request_schema` and
-    `response_schema` inline, both `schemars::Schema` values rather than schema
-    text, so a host needs no second call to learn what a capability accepts and
-    an author derives them through the re-export below. The envelope is
-    unchanged, because a `Schema` and the schema JSON text it serialises to are
-    the same JSON object; the difference is visible only to a Rust consumer of
-    the descriptor, which names `schemars::Schema`.
+    `response_schema` inline, so a host needs no second call to learn what a
+    capability accepts and an author derives them through the re-export below.
+    The envelope is unchanged, because a schema and the JSON text it serialises
+    to are the same JSON object.
+
+    **Amended after landing.** The declaration was then unified into one ungated
+    type in `crates/plugin-contract/src/capability.rs`, with
+    `serde_json::Value` schemas and a `kind: String` plus the `CapabilityKind`
+    helper. `authoring` re-exports it and adds `schema_of::<T>()`, so `schemars`
+    stays optional. `plugin-runtime` deleted its own `Capability`,
+    `DeclaredCapability` and `CapabilityList` and parses the shared type, so the
+    drift test is gone and the two sides cannot drift. A kind this build does
+    not know is refused per capability through `RouteError::UnknownKind` with
+    the `Unsupported` status, which is why `kind` is a string rather than an
+    enum: a strict enum would fail the whole declaration. The wire is
+    byte-identical.
   - `call.rs` adds the service route: `Call::service_request` builds the
     plugin-owned request buffer, registers a slot, calls the host's
     `service_request`, and returns a `ServiceAnswer<R>` future the author
@@ -1359,13 +1369,12 @@ build mechanism) are reconciled at their entries below.
     `Version(MetisAbiError)` with a `From<MetisAbiError>`, so the runtime
     inherits the crate's version error rather than inventing its own, which is
     the inheritance the `plugin-compatibility` section planned for it.
-  - `registry.rs`: `Capability`, `Entry`, `Registry`, `RegistryError`,
-    `RouteError`, `parse_capabilities`, `validate_request`, `validate_response`,
-    and the `call` launch-and-await method. A test asserts `registry::Capability`
-    and the author surface's `CapabilityDescriptor` agree against the real
-    fixture, because the host parses the declaration into its own type rather
-    than turning the `authoring` feature on; `metis-plugin-sdk` meets the same
-    question when it re-exports an author-facing descriptor. Routing is by
+  - `registry.rs`: `Entry`, `Registry`, `RegistryError`, `RouteError`,
+    `parse_capabilities`, `validate_request`, `validate_response`, and the
+    `call` launch-and-await method. The declaration it parses and routes with is
+    the shared `plugin_contract::capability::CapabilityDescriptor` (see the
+    amendment above), so the host holds no second declaration type and no test
+    is needed to keep two of them in step. Routing is by
     instance-qualified name
     (`<instance>.<tool>`), duplicate names are refused, `enable` and `disable`
     toggle an entry, `unregister` removes it and its routes, `gate` is the

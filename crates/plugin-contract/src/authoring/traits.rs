@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::authoring::call::{Call, Host};
-use crate::authoring::capability::CapabilityDescriptor;
+use crate::capability::CapabilityDescriptor;
 
 /// One call's request, addressed by capability name.
 ///

@@ -2,10 +2,11 @@
 //! that translates between it and the C ABI.
 //!
 //! This module is behind the `authoring` feature, off by default, so
-//! `plugin-runtime` can depend on the primitives and the payload envelope
-//! alone. Turning it on adds the serde pair a plugin's request and response
-//! bodies are serialised with, and `schemars` for the inline capability
-//! schemas.
+//! `plugin-runtime` can depend on the primitives, the payload envelope and the
+//! capability declaration alone. Turning it on adds `schemars`, which derives
+//! the inline capability schemas an author's payload types imply. The
+//! declaration those schemas fill in lives in `crate::capability`, ungated,
+//! because both sides of the wire read the same shape.
 //!
 //! The shape of the translation:
 //!
@@ -25,15 +26,17 @@
 
 mod alloc;
 mod call;
-mod capability;
 mod future;
 mod plugin_adapter;
+mod schema;
 mod traits;
 
 pub use alloc::{Accounting, accounting};
 pub use call::{Call, CancellationToken, Cancelled, Host, LogLevel, ServiceAnswer};
-pub use capability::{CapabilityDescriptor, CapabilityKind, CapabilityList};
+// The declaration is not feature-gated: both sides of the wire read it.
+pub use crate::capability::{CapabilityDescriptor, CapabilityKind, CapabilityList};
 pub use plugin_adapter::table;
+pub use schema::schema_of;
 pub use traits::{Plugin, PluginError, Request, Response};
 
 /// The schema derive an author reaches for when it publishes inline capability

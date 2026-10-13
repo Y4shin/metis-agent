@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use plugin_contract::abi::MetisPluginTableV1;
 use plugin_contract::authoring::{
-    Call, CapabilityDescriptor, CapabilityKind, Host, LogLevel, Plugin, PluginError, Request,
-    Response, accounting, schemars, table,
+    Call, CapabilityDescriptor, Host, LogLevel, Plugin, PluginError, Request, Response, accounting,
+    schema_of, table,
 };
 
 use crate::payload::{EchoRequest, EchoResponse, Progress, TimerAnswer, TimerRequest};
@@ -52,13 +52,12 @@ pub struct Fixture;
 
 /// One capability descriptor, with the inline schemas its bodies imply.
 fn descriptor(name: &str) -> CapabilityDescriptor {
-    CapabilityDescriptor {
-        name: name.to_string(),
-        kind: CapabilityKind::Tool,
-        version: 1,
-        request_schema: schemars::schema_for!(EchoRequest),
-        response_schema: schemars::schema_for!(EchoResponse),
-    }
+    CapabilityDescriptor::tool(
+        name,
+        1,
+        schema_of::<EchoRequest>(),
+        schema_of::<EchoResponse>(),
+    )
 }
 
 /// The capability names, in the order the plugin declares them.
