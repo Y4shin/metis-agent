@@ -332,29 +332,51 @@ fn a_keystore_without_a_tool_is_unresolved() {
     assert!(matches!(error, SecretError::Unresolved), "got {error}");
 }
 
-/// The daemon's own configuration is the same one string, and an unset
-/// `METIS_PRESHARED_KEY` means pairing is closed, which is a typed refusal
-/// rather than an empty key.
+/// The daemon's own configuration is the same one string. An unset or empty
+/// `METIS_PRESHARED_KEY` means pairing is not configured, which is `Ok(None)`
+/// rather than an error: pairing is optional. A configured reference that cannot
+/// be resolved stays a typed error, so a typo is loud instead of quietly closing
+/// pairing.
 #[test]
 fn the_configured_preshared_key_is_a_secret_reference() {
     let tools = TempDir::new();
     let env = SecretEnv::new(tools.path());
 
-    let error = resolve_preshared_key().expect_err("nothing is configured");
-    assert!(matches!(error, SecretError::Unresolved), "got {error}");
-    assert!(
-        error.to_string().contains(PRESHARED_KEY_ENV),
-        "the refusal names the variable: {error}"
+    assert_eq!(
+        resolve_preshared_key().expect("an absent key is not an error"),
+        None,
+        "nothing is configured, so pairing is closed rather than broken"
+    );
+    env.set(PRESHARED_KEY_ENV, "");
+    assert_eq!(
+        resolve_preshared_key().expect("an empty key is not an error"),
+        None,
+        "an empty variable is not a configuration either"
     );
 
     env.set(PRESHARED_KEY_ENV, "literal:hunter2");
-    let secret = resolve_preshared_key().expect("the literal resolves");
+    let secret = resolve_preshared_key()
+        .expect("the literal resolves")
+        .expect("the key is configured");
     assert_eq!(secret.expose(), "hunter2");
 
     // The variable carries a reference, not necessarily a literal, so a
     // configured file is read through the same rule.
     let file = secret_file(&tools, "key", 0o600, "from-the-file");
     env.set(PRESHARED_KEY_ENV, &format!("file:{}", file.display()));
-    let secret = resolve_preshared_key().expect("the file resolves");
+    let secret = resolve_preshared_key()
+        .expect("the file resolves")
+        .expect("the key is configured");
     assert_eq!(secret.expose(), "from-the-file");
+
+    // A configured reference whose source is not there is a typo, and a typo is
+    // loud: it stays a typed error rather than silencing pairing.
+    let missing = tools.join("absent");
+    env.set(PRESHARED_KEY_ENV, &format!("file:{}", missing.display()));
+    let error = resolve_preshared_key().expect_err("the configured file is not there");
+    assert!(matches!(error, SecretError::Unreadable(_)), "got {error}");
+
+    env.set(PRESHARED_KEY_ENV, "env:METIS_TEST_KEY");
+    let error = resolve_preshared_key().expect_err("the named variable is not set");
+    assert!(matches!(error, SecretError::Unresolved), "got {error}");
 }

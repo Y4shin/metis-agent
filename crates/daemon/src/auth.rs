@@ -29,7 +29,7 @@ use connectrpc::{ConnectError, ErrorCode, Interceptor, PayloadStream, RequestCon
 use http::{HeaderMap, HeaderValue};
 use subtle::ConstantTimeEq as _;
 
-use crate::secret::Secret;
+use crate::secret::{PRESHARED_KEY_ENV, Secret};
 use crate::state::{StateError, Store, Verify};
 use crate::token::{Token, mint};
 
@@ -144,6 +144,7 @@ pub fn refusal_headers(error: &AuthError) -> HeaderMap {
 #[must_use]
 pub fn pair_refusal_headers(error: &PairError) -> Option<HeaderMap> {
     let refusal = match error {
+        PairError::PairingDisabled => PairRefusal::Disabled,
         PairError::WrongPresharedKey => PairRefusal::WrongKey,
         PairError::AlreadyPaired => PairRefusal::AlreadyPaired,
         PairError::Store(_) => return None,
@@ -315,6 +316,10 @@ impl Interceptor for AuthInterceptor {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum PairError {
+    /// The daemon has no preshared key configured, so pairing is closed. It is
+    /// not a misconfiguration: pairing is optional, and a daemon without a key
+    /// still serves every paired surface.
+    PairingDisabled,
     /// The preshared key in the request body is not the configured one.
     WrongPresharedKey,
     /// The surface already has a token. Its first token stays the surface's
@@ -327,6 +332,10 @@ pub enum PairError {
 impl fmt::Display for PairError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::PairingDisabled => write!(
+                f,
+                "pairing is closed: {PRESHARED_KEY_ENV} names no key to pair with"
+            ),
             Self::WrongPresharedKey => write!(f, "the preshared key does not match"),
             Self::AlreadyPaired => write!(
                 f,
@@ -341,7 +350,7 @@ impl std::error::Error for PairError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(source) => Some(source),
-            Self::WrongPresharedKey | Self::AlreadyPaired => None,
+            Self::PairingDisabled | Self::WrongPresharedKey | Self::AlreadyPaired => None,
         }
     }
 }

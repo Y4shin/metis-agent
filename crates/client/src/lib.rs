@@ -431,6 +431,9 @@ fn pair_refusal(err: &ConnectError) -> Option<ClientError> {
     let header = err.response_headers().get(auth::PAIR_ERROR_HEADER)?;
     let refusal = PairRefusal::parse(header.to_str().ok()?)?;
     Some(match refusal {
+        PairRefusal::Disabled => ClientError::Pairing {
+            cause: PairingCause::Disabled,
+        },
         PairRefusal::WrongKey => ClientError::Pairing {
             cause: PairingCause::WrongKey,
         },
@@ -445,11 +448,14 @@ fn pair_refusal(err: &ConnectError) -> Option<ClientError> {
 
 /// Why the daemon refused a pairing call.
 ///
-/// The distinction is the one a caller acts on: the wrong key is the operator's
-/// to correct, and a surface that already paired has to be revoked before it can
-/// pair again.
+/// The distinction is the one a caller acts on: a closed pairing is the
+/// operator's configuration rather than the caller's mistake, the wrong key is
+/// the operator's to correct, and a surface that already paired has to be
+/// revoked before it can pair again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PairingCause {
+    /// The daemon has no preshared key configured, so pairing is closed.
+    Disabled,
     /// The preshared key presented is not the one the daemon was configured
     /// with.
     WrongKey,
@@ -533,6 +539,10 @@ impl fmt::Display for ClientError {
             },
             Self::Credential(err) => write!(f, "the credential could not be kept: {err}"),
             Self::Pairing { cause } => match cause {
+                PairingCause::Disabled => write!(
+                    f,
+                    "the daemon refused to pair this surface: it has no preshared key configured, so pairing is closed"
+                ),
                 PairingCause::WrongKey => write!(
                     f,
                     "the daemon refused to pair this surface: that is not its preshared key"

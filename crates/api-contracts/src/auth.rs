@@ -87,6 +87,9 @@ impl fmt::Display for CredentialRefusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PairRefusal {
+    /// The daemon has no preshared key configured, so it has nothing to compare a
+    /// presented key with and pairing is closed.
+    Disabled,
     /// The preshared key in the request body is not the configured one.
     WrongKey,
     /// The surface already has a token. The token it was answered with stays
@@ -99,6 +102,7 @@ impl PairRefusal {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Disabled => "disabled",
             Self::WrongKey => "wrong-key",
             Self::AlreadyPaired => "already-paired",
         }
@@ -108,6 +112,7 @@ impl PairRefusal {
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
+            "disabled" => Some(Self::Disabled),
             "wrong-key" => Some(Self::WrongKey),
             "already-paired" => Some(Self::AlreadyPaired),
             _ => None,

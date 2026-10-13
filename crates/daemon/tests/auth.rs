@@ -136,6 +136,13 @@ impl AuthEnv {
         // SAFETY: the guard holds `ENV_LOCK` for its whole lifetime.
         unsafe { std::env::set_var(name, value) };
     }
+
+    /// Remove one of the variables this guard holds, which is how an operator
+    /// takes a setting away before a restart.
+    fn unset(&self, name: &str) {
+        // SAFETY: the guard holds `ENV_LOCK` for its whole lifetime.
+        unsafe { std::env::remove_var(name) };
+    }
 }
 
 impl Drop for AuthEnv {
@@ -209,21 +216,34 @@ impl Fixture {
 
     /// Serve the daemon's own service with `policy`.
     async fn serve_daemon(&self, path: &Path, policy: AuthPolicy) {
-        let service = service(self.store.clone(), self.secret.clone(), policy);
+        let service = service(self.store.clone(), Some(self.secret.clone()), policy);
         serve(path, service).await;
     }
 
     /// Serve the daemon's own service with the key its configuration names,
-    /// resolved the way the daemon resolves it at startup.
+    /// resolved the way the daemon resolves it at startup. An absent key is not
+    /// an error: it is a daemon with pairing closed.
     async fn serve_configured_daemon(&self, path: &Path, policy: AuthPolicy) {
-        let secret =
+        let preshared =
             daemon::secret::resolve_preshared_key().expect("the configured preshared key resolves");
-        serve(path, service(self.store.clone(), secret, policy)).await;
+        serve(path, service(self.store.clone(), preshared, policy)).await;
+    }
+
+    /// The same, over TCP, the way a remote listener serves it.
+    async fn serve_configured_daemon_over_tcp(&self, policy: AuthPolicy) -> SocketAddr {
+        let preshared =
+            daemon::secret::resolve_preshared_key().expect("the configured preshared key resolves");
+        serve_over_tcp(service(self.store.clone(), preshared, policy)).await
     }
 
     /// Set one of the daemon's or the client's configuration variables.
     fn set_var(&self, name: &str, value: &str) {
         self._env.set(name, value);
+    }
+
+    /// Take one of them away, as an operator does before a restart.
+    fn unset_var(&self, name: &str) {
+        self._env.unset(name);
     }
 
     /// Every byte the daemon keeps for this database: the file and, when a
@@ -246,7 +266,7 @@ impl Fixture {
     fn recording_service(&self, policy: AuthPolicy, served: &Served) -> ConnectRpcService<Router> {
         let router = Arc::new(RecordingDaemon {
             served: served.clone(),
-            inner: Service::new(self.store.clone(), self.secret.clone()),
+            inner: Service::new(self.store.clone(), Some(self.secret.clone())),
         })
         .register(Router::new());
         ConnectRpcService::new(router)
@@ -272,7 +292,12 @@ impl Fixture {
     /// Serve the daemon's own service with `policy` over TCP, the way a remote
     /// listener serves it.
     async fn serve_daemon_over_tcp(&self, policy: AuthPolicy) -> SocketAddr {
-        serve_over_tcp(service(self.store.clone(), self.secret.clone(), policy)).await
+        serve_over_tcp(service(
+            self.store.clone(),
+            Some(self.secret.clone()),
+            policy,
+        ))
+        .await
     }
 
     /// A client that reaches `addr` over TCP and declares `surface`, which
@@ -815,7 +840,7 @@ async fn removing_one_row_and_restarting_revokes_only_that_surface() {
         &second_socket,
         service(
             restarted.clone(),
-            fixture.secret.clone(),
+            Some(fixture.secret.clone()),
             AuthPolicy::TokenRequired,
         ),
     )
@@ -1149,5 +1174,125 @@ async fn pairing_over_the_remote_listener_is_gated_by_the_preshared_key() {
             DAEMON_SERVICE_ECHO_SPEC.procedure.to_owned(),
         ],
         "both pairing calls and the call after them reached the handler"
+    );
+}
+
+/// Removing the preshared key and restarting closes pairing on both transports,
+/// and revokes nothing: the surfaces that paired before the key was removed keep
+/// serving, because revocation stays the token-row delete.
+///
+/// Pairing is optional, so an absent key is not a broken configuration: the
+/// daemon starts, every call keeps working, and the one surface that has no
+/// credential left is answered with a typed refusal that says pairing is closed.
+#[tokio::test]
+async fn removing_the_preshared_key_closes_pairing_on_both_transports() {
+    let fixture = Fixture::new("closed-pairing").await;
+    fixture.set_var(
+        daemon::secret::PRESHARED_KEY_ENV,
+        &format!("literal:{PRESHARED_KEY}"),
+    );
+
+    let socket = fixture.socket("closed-pairing");
+    fixture
+        .serve_configured_daemon(&socket, AuthPolicy::TokenRequired)
+        .await;
+    let addr = fixture
+        .serve_configured_daemon_over_tcp(AuthPolicy::TokenRequired)
+        .await;
+
+    // One surface pairs on each transport while the key is configured, and both
+    // are served.
+    let mut local = fixture.client(&socket, Surface::Ui).await;
+    local
+        .pair(PRESHARED_KEY)
+        .await
+        .expect("the key pairs the surface on the local transport");
+    let mut remote = fixture.remote_client(addr, Surface::Cli).await;
+    remote
+        .pair(PRESHARED_KEY)
+        .await
+        .expect("the key pairs the surface on the remote transport");
+    for (transport, caller) in [("local", &local), ("remote", &remote)] {
+        assert_eq!(
+            caller
+                .echo("paired before the key was removed")
+                .await
+                .expect("a paired surface is served"),
+            "paired before the key was removed",
+            "the {transport} transport serves the surface it paired"
+        );
+    }
+
+    // The operator removes the key and restarts: a fresh store on the same file
+    // and fresh listeners on both transports, built from the configuration the
+    // way the daemon reads it at startup. An unset key resolves to no key rather
+    // than to an error.
+    fixture.unset_var(daemon::secret::PRESHARED_KEY_ENV);
+    let restarted = Store::open(fixture.database())
+        .await
+        .expect("the restarted daemon opens the same database");
+    let second_socket = fixture.socket("closed-pairing-again");
+    serve(
+        &second_socket,
+        service(
+            restarted.clone(),
+            daemon::secret::resolve_preshared_key().expect("an unset key is not an error"),
+            AuthPolicy::TokenRequired,
+        ),
+    )
+    .await;
+    let second_addr = serve_over_tcp(service(
+        restarted.clone(),
+        daemon::secret::resolve_preshared_key().expect("an unset key is not an error"),
+        AuthPolicy::TokenRequired,
+    ))
+    .await;
+
+    // Pairing is closed on both transports, and the refusal reaches the client
+    // as the typed state it is rather than as a transport failure.
+    for (transport, mut caller) in [
+        ("local", fixture.client(&second_socket, Surface::Test).await),
+        (
+            "remote",
+            fixture.remote_client(second_addr, Surface::Test).await,
+        ),
+    ] {
+        let error = caller
+            .pair(PRESHARED_KEY)
+            .await
+            .expect_err("there is no key to pair with any more");
+        assert!(
+            matches!(
+                error,
+                ClientError::Pairing {
+                    cause: PairingCause::Disabled
+                }
+            ),
+            "the {transport} transport: expected the disabled-pairing refusal, got {error}"
+        );
+    }
+    assert_eq!(
+        restarted.surfaces().await.expect("the rows read"),
+        vec!["cli".to_owned(), "ui".to_owned()],
+        "a closed pairing writes nothing"
+    );
+
+    // Nothing was revoked: the tokens minted before the restart are still what
+    // the calls carry, on both transports.
+    let local = fixture.client(&second_socket, Surface::Ui).await;
+    let remote = fixture.remote_client(second_addr, Surface::Cli).await;
+    assert_eq!(
+        local
+            .echo("still served")
+            .await
+            .expect("closing pairing revokes nothing on the local transport"),
+        "still served"
+    );
+    assert_eq!(
+        remote
+            .echo("still served")
+            .await
+            .expect("closing pairing revokes nothing on the remote transport"),
+        "still served"
     );
 }

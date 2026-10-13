@@ -21,16 +21,17 @@ use crate::secret::Secret;
 use crate::state::Store;
 
 /// The daemon's service: the store it pairs against and the preshared key that
-/// gates pairing.
+/// gates pairing. The key is optional, because pairing is: a daemon with no key
+/// serves every paired surface and refuses the pairing call itself.
 pub struct Service {
     store: Store,
-    preshared: Secret,
+    preshared: Option<Secret>,
 }
 
 impl Service {
-    /// The service over `store`, gated by `preshared`.
+    /// The service over `store`, gated by `preshared` when it is configured.
     #[must_use]
-    pub fn new(store: Store, preshared: Secret) -> Self {
+    pub fn new(store: Store, preshared: Option<Secret>) -> Self {
         Self { store, preshared }
     }
 }
@@ -61,11 +62,17 @@ impl DaemonService for Service {
         request: ServiceRequest<'_, PairRequest>,
     ) -> Result<connectrpc::Response<PairResponse>, ConnectError> {
         let declared = identity::from_headers(ctx.headers()).map_err(refuse_identity)?;
+        // A daemon with no configured key has nothing to compare a presented key
+        // with, so pairing is closed rather than open to any key. The rest of the
+        // surface still serves: closing pairing is not revocation.
+        let Some(preshared) = self.preshared.as_ref() else {
+            return Err(refuse_pair(PairError::PairingDisabled));
+        };
         // The body is copied out before the await: the request borrows the
         // connection's buffer, and the pairing work outlives that borrow's
         // usefulness rather than its validity.
         let presented = request.preshared_key.to_owned();
-        let token = auth::pair(&self.store, &self.preshared, declared.surface(), &presented)
+        let token = auth::pair(&self.store, preshared, declared.surface(), &presented)
             .await
             .map_err(refuse_pair)?;
         connectrpc::Response::ok(PairResponse {
@@ -77,13 +84,21 @@ impl DaemonService for Service {
 
 /// The service a listener serves, with the policy it enforces.
 ///
+/// A caller passes the preshared key its configuration resolved, which is `None`
+/// when no key is configured: pairing is optional, and a daemon without one still
+/// serves its paired surfaces.
+///
 /// `connectrpc` builds the interceptor chain on the service, so this returns
 /// the service rather than the bare router: a caller mounts
 /// [`AuthPolicy::LocalAcl`] on the local socket, where the operating system has
 /// already authenticated the caller, and [`AuthPolicy::TokenRequired`] on the
 /// remote listener, where nothing about the connection says who is calling.
 #[must_use]
-pub fn service(store: Store, preshared: Secret, policy: AuthPolicy) -> ConnectRpcService<Router> {
+pub fn service(
+    store: Store,
+    preshared: Option<Secret>,
+    policy: AuthPolicy,
+) -> ConnectRpcService<Router> {
     let interceptor = AuthInterceptor::new(store.clone(), policy);
     let router = Arc::new(Service::new(store, preshared)).register(Router::new());
     ConnectRpcService::new(router).with_interceptor(interceptor)
@@ -108,6 +123,7 @@ fn refuse_identity(error: IdentityError) -> ConnectError {
 fn refuse_pair(error: PairError) -> ConnectError {
     let headers = auth::pair_refusal_headers(&error);
     let code = match &error {
+        PairError::PairingDisabled => ErrorCode::FailedPrecondition,
         PairError::WrongPresharedKey => ErrorCode::PermissionDenied,
         PairError::AlreadyPaired => ErrorCode::AlreadyExists,
         PairError::Store(_) => ErrorCode::Internal,
