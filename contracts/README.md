@@ -66,12 +66,16 @@ repository root:
 ## Caveats
 
 - Both gates that generate or compare resolve the two plugins from the BSR over
-  the network on every run. CI pins `BUF_TOKEN` from `secrets.BUF_TOKEN` on the
-  step that resolves them (`Contract regeneration check`), so anonymous rate
-  limiting cannot fail a run for a reason that has nothing to do with the change
-  under review. An absent secret arrives in CI as the empty string, and buf
-  treats an empty `BUF_TOKEN` exactly like an unset one (measured), so the gate
-  keeps working without authentication.
+  the network on every run. CI supplies `BUF_TOKEN` from `secrets.BUF_TOKEN` on
+  the step that resolves them (`Contract regeneration check`), so anonymous
+  rate limiting cannot fail a run for a reason that has nothing to do with the
+  change under review. An absent secret arrives in CI as the empty string, and
+  measured on buf 1.73.0 an empty `BUF_TOKEN` reads as anonymous, whereas a
+  non-empty token the BSR cannot verify is refused before any plugin resolves.
+  The step does not rely on that distinction: it unsets the variable when the
+  secret carries nothing, so buf is either given a real token or no variable at
+  all, and the gate keeps working without authentication. `buf lint` and
+  `buf breaking` resolve no plugins, so neither takes a token.
 
 ## Toolchain
 
