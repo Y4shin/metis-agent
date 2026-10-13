@@ -1,8 +1,9 @@
 //! The daemon's state store, exercised through its public interface.
 //!
-//! The store operations run against `sqlite::memory:`; the creation and
-//! migration seams run against a temporary file, because those are properties
-//! of the file the daemon keeps rather than of a query.
+//! The operations whose subject is the data run against `sqlite::memory:`. The
+//! creation, migration and row-content seams run against a temporary file,
+//! because those are properties of the file the daemon keeps rather than of a
+//! query.
 
 use std::path::PathBuf;
 
