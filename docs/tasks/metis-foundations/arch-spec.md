@@ -804,9 +804,14 @@ the existing all-targets gates.
 
 ---
 
-## Pending ticket: `plugin-authoring-trait`
+## Landed ticket: `plugin-authoring-trait` (superseded in part)
 
-Blocked by `plugin-abi-core`; not landed yet. It builds the Rust author surface
+Superseded in part by `plugin-contract-v1`: the four-arm vocabulary, the four
+associated `Shape` types and the executor described below no longer describe the
+code, and one capability-name-routed `call` replaces them. The section is kept as
+the record of how the surface was first built.
+
+It builds the Rust author surface
 on top of the landed primitives: the trait, both adapters, the
 cancelled-completion rule, the lifecycle and event routes, and the
 descriptor/dispatch check, with the fixture rewritten through the trait and
@@ -988,14 +993,15 @@ ownership checks keep running unchanged.
 
 ## Pending ticket: `plugin-compatibility`
 
-Blocked by `plugin-abi-core`; not landed yet. Version tolerance on top of the
-unchanged layout: prefix-only reading, per-capability version gating, unknown
-payload fields, and a typed error for a differing major.
+Blocked by `plugin-abi-core` and `plugin-contract-v1`; not landed yet. Version
+tolerance on top of the revised v1 layout: additive change inside the major,
+per-capability version gating, unknown payload fields, and a typed error for a
+plugin built against the retired pre-release table.
 
 ### Exports
 
-- `crates/plugin-contract/src/abi`, next to `metis_read_prefix`: the size-based
-  presence predicate. It answers whether the table's reported `size` covers a
+- The size-based presence predicate landed by `plugin-contract-v1`, next to
+  `metis_read_prefix`, is consumed here rather than exported. It answers whether the table's reported `size` covers a
   given entry (`size >= offset + size_of::<*const c_void>()`, written through
   `offset_of!` and `size_of::<usize>()` so it holds per target), and presence is
   decided by it and never by a null-pointer test (D8). It serves both the plugin
@@ -1190,3 +1196,154 @@ landed and pending tickets must already support.
   `ConnectRpcService::from_arc`. The landed section above records that and the
   three other measured divergences (two additive public functions, no transport
   injection point, the fixed endpoint literals).
+
+---
+
+## Pending ticket: `plugin-contract-v1`
+
+Implements `docs/plugin-contract.md`: the revised v1 ABI where futures are the
+only call path, one capability-name-routed authoring method, and the host driver
+and registry. It supersedes the `invoke`/`complete` half of `plugin-abi-core` and
+the four-arm authoring surface of `plugin-authoring-trait`, both landed, and it
+takes over the presence predicate the `plugin-compatibility` section used to own.
+
+### Exports
+
+**`crates/plugin-contract/src/abi/mod.rs`, the revised tables.**
+
+- Plugin table: `size`, `abi_major`, `abi_minor`, `create_instance`,
+  `destroy_instance`, `list_capabilities`, `invoke_future`, `cancel`,
+  `release_buffer`, `shutdown`, `service_complete`. `invoke` and `MetisInvokeFn`
+  are deleted. The type stays `MetisPluginTableV1`, the symbol stays
+  `metis_plugin_entry_v1`, `METIS_ABI_MAJOR` stays 1, and `METIS_ABI_MINOR`
+  becomes 1, because this revision lands before the first release and the entry
+  order still changed underneath the same symbol.
+- Host table: `size`, `user_data`, `progress`, `emit_event`, `log`,
+  `service_request`. `complete` and `MetisCompleteFn` are deleted.
+- New seam types: `MetisFutureHandle { ctx, vtable }`, `MetisFutureVtable { poll,
+  drop }` with `MetisFuturePollFn` and `MetisFutureDropFn`, and `MetisWaker
+  { data, vtable }` with `MetisWakerVtable { clone, wake, wake_by_ref, drop }`
+  and its four aliases. All `repr(C)`, and neither vtable carries a `size` field.
+- A typed error for a table whose `abi_major` differs, and one for an `abi_minor`
+  this build does not know, which refuses a stale pre-release plugin instead of
+  reading its entries through the new order. The refusal is deliberately narrow
+  so `plugin-compatibility` can relax it to additive tolerance.
+
+**`crates/plugin-contract/src/abi/layout.rs` and the generated header.**
+
+- Layout asserts for every new type, mirrored in `c/layout_static_asserts.c`.
+- `crates/plugin-contract/include/metis_plugin_abi.h` is regenerated and never
+  hand-edited. The new types, the payload envelope constants, and the size-based
+  presence predicates for both tables belong in the cbindgen `[export] include`
+  list, and the crate's public constants must be moved out of the `exclude` list
+  where they now belong in the header.
+
+**`crates/plugin-contract/src/authoring/`, under the `authoring` feature.**
+
+- `Plugin` becomes `capabilities`, `call`, `cancel`, `started`, `stopped`, with
+  `Request<'a> { capability, body }` and `Response { body }`. The four arms, their
+  four capability-name consts and their four associated `Shape` types are
+  deleted, which is what removes the four-capability ceiling.
+- A boxed-future helper wrapping any `Future<Output = Result<Response,
+  PluginError>> + Send`, polling it through the host waker bridge with a panic
+  contained in both poll and drop.
+- `table::<P>()` and the plugin-side adapter keep building the exported table, now
+  emitting `invoke_future`.
+- Deleted: `authoring/executor.rs` with its bounded pool and thread-per-call
+  fallback, and the host-side pending-slot machinery in
+  `authoring/host_adapter.rs`.
+- New dependency: `schemars`, behind this feature, for deriving the inline
+  capability schemas an author's request and response types imply.
+
+**`crates/plugin-runtime/src/lib.rs`, empty today.**
+
+- The host driver and registry: cdylib loading, routing by capability name,
+  size-based presence, per-capability version gating, duplicate-name refusal,
+  enable and disable, unregister, both-direction schema validation, and a
+  launch-and-await API over the seam.
+- Quarantine and the unload rule, with the observable ordering ledger and the
+  reclaim counters.
+- New dependency: `jsonschema` with `default-features = false`, because the
+  defaults pull in reqwest and rustls, which this crate does not need.
+
+**`crates/plugin-fixture`.** The fixture rewritten through the routed trait, the
+harness extended for the futures path and the hazard checks, and a C implementer
+of the table compiled in CI and driven end to end.
+
+**Docs.** An ADR under `docs/adr/` for the contract-level decision, and this
+spec reconciled to the landed code.
+
+### Existing abstractions to use
+
+- `crates/plugin-contract/src/payload.rs` for the envelope in both directions.
+- `metis_read_prefix`, and the size-based predicate pattern the
+  `plugin-compatibility` section already describes, landed here because the table
+  changes underneath it.
+- `authoring/call.rs` for `Call`, `CancellationToken`, `Host` and the log levels.
+  Extend it for `service_request` rather than adding a second route type.
+- `authoring/alloc.rs` (`Accounting`, `accounting`) for the ledger the C
+  implementer has to match.
+- `capability.rs` for `CapabilityKind`, `CapabilityList` and the descriptor,
+  changing `schema` from a reference string to inline request and response
+  schemas.
+- `crates/plugin-fixture/src/payload.rs` for the harness's JSON, instead of
+  restating it.
+- `crates/plugin-fixture/src/bin/abi-harness.rs` conventions: one PASS or FAIL
+  line per check, flushed per line, non-zero exit on failure, the cdylib built
+  before the harness runs, and the stale-library refusal.
+- `scripts/regenerate-abi-header.sh` for the header drift check, `libloading` for
+  loading, and the `devenv` shell for cargo, cbindgen, gcc and clang.
+
+### Do NOT reimplement
+
+- The payload envelope, and no second codec layer.
+- The harness's check printing, stdout flushing, or stale-library guard.
+- The allocation accounting.
+- The Protobuf and ConnectRPC contract pipeline; it is unrelated to this ticket.
+- No `async-ffi`, no plugin-side executor, and no new async runtime inside
+  `plugin-contract`.
+
+### Seams
+
+The boundaries under test. The tdd-worker tests only here.
+
+1. The C ABI through the real fixture cdylib: launch, poll, ready, release, drop,
+   and one timer round trip through `service_request` and `service_complete`.
+2. Layout and presence: the Rust asserts, the C translation unit, and
+   `regenerate-abi-header.sh --check`.
+3. The routed trait: a fixture with more than four capabilities dispatches every
+   one by name.
+4. The registry: routing, version gating, duplicate refusal, enable and disable,
+   unregister, and both-direction schema validation.
+5. Quarantine, reclaim and unload: the ordering ledger, the reclaim counters, and
+   the refusal of a minor this build does not know.
+6. The C implementer: compiled in CI, driven end to end, ledger at zero after
+   unload.
+7. Panic containment at poll, drop and host callbacks, including a panicking
+   destructor.
+8. The hazard set: a blocking poll, a double drop, a drop after unload, a wake
+   after drop, a cancel resolving as `Cancelled`, and a missed cancel deadline.
+
+### Interface contract
+
+- `plugin-compatibility` consumes the `abi_major` and `abi_minor` fields, the
+  refusal of an unknown minor, which it relaxes to additive tolerance, the two
+  presence predicates, the typed errors, and the per-capability descriptor gate.
+  It must not need any change to the table shape.
+- `metis-plugins` consumes `plugin-runtime`'s loader, registry and quarantine.
+  `metis-plugin-sdk` re-exports the routed trait and adds typed facades.
+  `metis-daemon` owns the real poll loop and the reaper thread.
+
+### Provisional decisions
+
+- **Inline capability schemas as two explicit descriptor fields**,
+  `request_schema` and `response_schema`, over a by-id fetch. Chosen because the
+  prototype measured inline smaller in total bytes (6,014 against 7,915 for a
+  listing plus a fetch) and simpler (no second entry point, no cache, no
+  fetch-failure path). The operator's position on 2026-10-13 was that this cannot
+  be judged before it is used: go with it and revisit if it causes problems. Only
+  the descriptor payload shape and the `schemars` dependency depend on the choice,
+  so changing it later is cheap.
+- **Second shape used deliberately:** the descriptor is a JSON payload returned
+  in a `MetisBuffer`, not a C struct, so none of this moves the C ABI, the layout
+  asserts, or the generated header.
