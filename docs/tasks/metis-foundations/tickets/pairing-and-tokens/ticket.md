@@ -4,7 +4,7 @@ subtype: feature
 title: Pairing, per-surface tokens, and client credential storage
 status: stable
 workflow_state: ready
-blocked_by: [local-identity-and-acl]
+blocked_by: [local-identity-and-acl, state-store]
 size: m
 ---
 
@@ -39,3 +39,7 @@ other surfaces.
 
 - `local-identity-and-acl`, because pairing is an authenticated call on the local
   transport and needs the identity handshake.
+- `state-store`, because the daemon keeps token hashes in the SQLite store that
+  ticket lands, and this ticket adds no file format of its own. The preshared key
+  travels in the pairing request body, and the token is kept by the client, never
+  in the store.

@@ -766,7 +766,7 @@ the existing all-targets gates.
 
 - The transport module is the only place that knows how to serve and connect a
   local stream. `client` calls it, and `windows-named-pipe`, `tcp-listener`,
-  `tls-and-client-trust`, and `reverse-proxy-mode` extend it with new bind and
+  and `reverse-proxy-mode` extend it with new bind and
   connector front-ends over the same `serve_stream` and no second service
   implementation. `serve_stream` takes the router through `Into<Arc<Router>>`,
   so each of those front-ends builds the router once and clones the `Arc` per
@@ -1393,8 +1393,9 @@ so the narrowing changed no seam.
 
 - Do not add a second serve loop, a second service, or a per-connection router
   build: each accepted stream gets a clone of the one `Arc<Router>`.
-- Do not wire TLS, a proxy header, or a trust rule. `tls-and-client-trust` and
-  `reverse-proxy-mode` own those; this listener is plaintext.
+- Do not wire TLS, a proxy header, or a trust rule. `reverse-proxy-mode` owns
+  the proxy rule; this listener is plaintext, and ADR 0004 removed the native
+  TLS work (`tls-and-client-trust` is deprecated).
 - Do not add an `enabled` flag beside the address. Naming the address is the
   enablement; a separate flag would add an "enabled but unconfigured" state with
   nothing behind it.
@@ -1445,13 +1446,15 @@ harness and no new test protocol.
 
 ### Interface contract
 
-- `tls-and-client-trust` and `reverse-proxy-mode` add their own bind and
-  connector front-ends against `serve_stream`, `serve_tcp_listener`'s shape (the
+- `reverse-proxy-mode` adds its own bind and
+  connector front-end against `serve_stream`, `serve_tcp_listener`'s shape (the
   one accept loop; `serve_tcp` is a bind plus a delegate), and
-  `resolve_remote_addr()`'s rule. They name their authority through a helper
-  beside `local_authority` and `remote_authority` and add their own error
-  variants to the non-exhaustive `ConfigError`, and they still do not add an
-  injection point to `Client`.
+  `resolve_remote_addr()`'s rule. It names its authority through a helper
+  beside `local_authority` and `remote_authority` and adds its own error
+  variants to the non-exhaustive `ConfigError`, and it still does not add an
+  injection point to `Client`. `tls-and-client-trust` is deprecated by ADR 0004:
+  the daemon does not terminate TLS, so no front-end of this module carries a
+  certificate or a pin.
 - `local-identity-and-acl` and `pairing-and-tokens` add the credential path.
   `local-identity-and-acl` has since landed the local socket's OS access control
   and the identity declaration, which the TCP listener can carry as request
@@ -1708,7 +1711,7 @@ existing contract and ABI gates for seam 5.
   `Authorization: Bearer` and owns the `ClientError` credential variants. The
   downstream outline sentence that placed those variants in this ticket is
   superseded, because this ticket adds no credential.
-- `tls-and-client-trust` and `remote-pairing` carry the same three headers plus
+- `remote-pairing` carries the same three headers plus
   the credential over TCP. `event-stream` carries them on the stream request, and
   its `StreamEvents` handler must call `identity::from_headers` too, because the
   recording is per handler and the landed `RecordingDaemon` implements only the
@@ -1787,9 +1790,11 @@ already support, including the surfaces `local-identity-and-acl` landed.
   call `identity::from_headers`, because the recording
   `local-identity-and-acl` landed is per handler: a `StreamEvents` handler that
   skips the call is unrecorded rather than refused.
-- `windows-named-pipe`, `tls-and-client-trust`, `reverse-proxy-mode`: extend
+- `windows-named-pipe`, `reverse-proxy-mode`: extend
   the same `transport` module with their own bind and connector front-ends; no
-  second service implementation. `serve_stream` stays the only connection path
+  second service implementation. `tls-and-client-trust` is deprecated (ADR
+  0004), so no `transport` front-end terminates TLS.
+  `serve_stream` stays the only connection path
   and the landed `serve_tcp_listener` is the shape a new accept loop copies:
   build the router once, wrap it in an `Arc`, and clone the `Arc` per accepted
   stream, because `serve_stream` takes `router: impl Into<Arc<Router>>`

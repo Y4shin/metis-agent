@@ -17,7 +17,8 @@ generated Protobuf messages and the generated Connect client and server stubs,
 and it is the one message set both sides use. The `client` crate speaks Connect
 to the daemon over Unix domain sockets on Linux and macOS and duplex byte-mode
 named pipes on Windows, with the same service reachable over an explicitly
-enabled TCP/TLS listener. Realtime is a server-streaming RPC with a resumable
+enabled TCP listener whose TLS, if any, is terminated by a reverse proxy rather
+than by the daemon (ADR 0004). Realtime is a server-streaming RPC with a resumable
 cursor. A thin end-to-end skeleton runs: the terminal calls the echo RPC and
 drains the event stream over the local IPC transport, proving the transport and
 streaming assumptions before anything is built on top.
@@ -33,7 +34,7 @@ streaming assumptions before anything is built on top.
 - Network DTOs are boundary types, not the internal model of the harness,
   persistence, or plugin system. Convert at application boundaries.
 - The `client` crate stays UI-independent: no Tauri, no terminal UI library.
-- Local IPC is the default desktop transport. The TCP/TLS listener is off
+- Local IPC is the default desktop transport. The TCP listener is off
   unless explicitly enabled.
 - Unix socket directories and sockets are restricted to the intended users.
   Windows pipes are local-only with security descriptors for the intended
@@ -120,26 +121,33 @@ streaming assumptions before anything is built on top.
   being required for construction, no route for `emit_event`, no consistency
   check between descriptor names and dispatch names, and an error variant that
   carries control flow.
-- The remote transport uses rustls on both sides with static linking preferred
-  and no dynamically linked system libraries on the daemon. Plaintext TCP is
-  allowed with a warning unless reverse-proxy mode names trusted proxies. The
-  bind address has no default. TLS material and configuration are read at
-  startup, and changing either requires a restart. Clients check the OS trust
-  store first and fall back to a fingerprint pin from pairing; no client
-  certificates and no CA-file configuration.
+- The daemon does not terminate TLS (ADR 0004). A reverse proxy does when the
+  remote listener is exposed, and the listener itself is plaintext with no
+  default bind address, so exposure without a proxy is an operator error the
+  daemon cannot detect. Plaintext is allowed with a warning unless
+  `reverse-proxy-mode` names trusted proxies, and that ticket owns the warning
+  and the trusted-proxy rule. The daemon grows no certificate, key or
+  trusted-CA setting, and client trust is deferred past the first efforts.
+- The daemon's state lives in one SQLite database through sqlx (ADR 0003), at
+  `METIS_STATE_DB`, defaulting to `$XDG_DATA_HOME/metis/metis.db`, with the file
+  at mode 600 and its directory at mode 700. Schema changes go through committed
+  migrations applied on open, and the store is an internal module of
+  `crates/daemon` rather than a new crate. Token hashes live there, and so will
+  sessions, messages and workflow state.
 - Local IPC authenticates with the host ACL: the daemon owns the socket as a
   configured `uid:gid` with mode 700 or 770 on Unix, and a security descriptor
   on Windows. Remote clients hold a per-surface opaque token minted at pairing
-  and stored by the daemon only as a hash; revocation removes it and restarts.
+  and stored by the daemon only as a SHA-256 hash in the SQLite state store
+  (ADR 0003); revocation removes its row and restarts.
   A token grants the full exposed surface with no per-client permissions, and
   every paired client can reach every agent. It travels as
   `Authorization: Bearer` on every request, including the stream RPC. Clients
-  keep it in the platform keychain when possible, else in an owner-only file,
-  and pin
-  the server's public key fingerprint (SPKI). Pairing is reachable on both local
-  IPC and the remote listener, gated by the preshared key, and closes by
-  removing that key and restarting. Connection handshakes carry the protocol
-  version, surface name, and client version.
+  keep it in the platform keychain when its command line tool is available, else
+  in an owner-only file, and report which answered. Pairing is reachable on both
+  local IPC and the remote listener, gated by the preshared key, which travels in
+  the pairing request body, and closes by removing that key and restarting.
+  Connection handshakes carry the protocol version, surface name, and client
+  version.
 - Windows local IPC uses tokio named pipes in both the listener and the
   connector, with a target-gated `windows-sys` for the security descriptor and
   token queries and no `interprocess` dependency. The pipe descriptor is
@@ -271,12 +279,19 @@ streaming assumptions before anything is built on top.
 
 - None recorded yet. New fog is added here when a task surfaces a question that
   is in scope but not yet sharp enough to be a task.
+- Client trust for a remote daemon is deferred past the first efforts and needs
+  rethinking from the ground up (ADR 0004): with TLS terminated by a reverse
+  proxy, there is no certificate for the daemon to present and no fingerprint for
+  it to pin, so the question is what a client should verify about a proxied
+  endpoint beyond the proxy's own certificate validation.
 - Windows pipe verification, from the `windows-pipe-security` findings: the exact
   error a remote client observes, whether a low-integrity same-user process is
   denied, and the Windows runner needed for the descriptor and pipe-mode
   assertions.
-- TLS over Connect with rustls is unverified. The spike proved a static musl
-  build without TLS, not a TLS handshake.
+- Closed by ADR 0004: the daemon does not terminate TLS, so the unverified
+  rustls-over-Connect handshake no longer blocks anything. The spike's static musl
+  build without TLS is the daemon's shape, and what a client should verify about
+  a proxied endpoint is the deferred question above.
 - Pinning and churn policy for the pre-1.0 dependencies: `connectrpc` 0.9.1 and
   `buffa` 0.9.2 move together, and `buffa` has had breaking releases. Exact
   pinning, the regeneration cost of a minor bump, and when to take one.

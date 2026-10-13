@@ -2,11 +2,21 @@
 type: ticket
 subtype: feature
 title: TLS on the remote listener and client trust
-status: stable
-workflow_state: ready
-blocked_by: [tcp-listener]
+status: deprecated
+workflow_state: done
+blocked_by:
+- tcp-listener
 size: m
 ---
+
+**Superseded, not built.** The operator decided on 2026-10-13 that the daemon
+does not terminate TLS at all: a reverse proxy does when the remote listener is
+exposed, and client trust is deferred past the first efforts because it needs
+rethinking from the ground up. ADR 0004 records the decision and its
+consequences. The acceptance criteria below are kept as the record of what was
+charted, not as work: no certificate setting, no pin, and no "client
+certificates" check enters the daemon. `reverse-proxy-mode` owns the
+trusted-proxy rule and the plaintext warning.
 
 ## What to build
 
