@@ -1,0 +1,17 @@
+# Throwaway spike workspace for the ConnectRPC prototype.
+#
+# Deliberately NOT a member of the repository root workspace: it has its own
+# `[workspace]` table, its own lockfile and its own target directory. It is
+# never wired into CI. See docs/tasks/metis-foundations/tasks/
+# connectrpc-spike/task.md.
+[workspace]
+resolver = "3"
+members = ["crates/wire"]
+
+# Mirrors the root workspace lint posture so the clippy answer is measured
+# under the same rule set the repository actually uses.
+[workspace.lints.clippy]
+all = "warn"
+
+[workspace.lints.cargo]
+unused_dependencies = "allow"

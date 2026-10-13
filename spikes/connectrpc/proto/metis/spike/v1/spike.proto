@@ -1,0 +1,41 @@
+// Contract for the ConnectRPC spike. Mirrors the OpenAPI spike's schema:
+// one ordinary request (echo) and one server-streaming request (events with a
+// resumable cursor), so the handwritten line counts are comparable.
+syntax = "proto3";
+
+package metis.spike.v1;
+
+service SpikeService {
+  // Ordinary request: echo a message back with a server timestamp.
+  rpc Echo(EchoRequest) returns (EchoResponse);
+
+  // Server streaming: a stream of events the client can resume with a cursor.
+  rpc StreamEvents(StreamEventsRequest) returns (stream Event);
+}
+
+message EchoRequest {
+  string message = 1;
+}
+
+message EchoResponse {
+  string message = 1;
+  // RFC 3339 timestamp, mirroring the OpenAPI `receivedAt` date-time string.
+  string received_at = 2;
+}
+
+message StreamEventsRequest {
+  // Cursor of the last event the client saw, for resume. Empty starts at 0.
+  string last_event_id = 1;
+}
+
+message Event {
+  string id = 1;
+  EventKind kind = 2;
+  string payload = 3;
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_HEARTBEAT = 1;
+  EVENT_KIND_MESSAGE = 2;
+}

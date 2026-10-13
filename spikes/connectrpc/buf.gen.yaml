@@ -1,0 +1,20 @@
+# Code generation for the ConnectRPC spike.
+#
+# Both plugins run from the Buf Schema Registry, so no local plugin binary is
+# installed. `file_per_package=true` makes each plugin emit one
+# `<dotted.package>.rs` per package; that removes the need for the local-only
+# `protoc-gen-buffa-packaging` plugin and lets the wire crate write the small
+# `pub mod` tree itself.
+version: v2
+plugins:
+  - remote: buf.build/anthropics/buffa:v0.9.2
+    out: generated/buffa
+    opt:
+      - views=true
+      - json=true
+      - file_per_package=true
+  - remote: buf.build/connectrpc/rust:v0.9.0
+    out: generated/connect
+    opt:
+      - buffa_module=crate::proto
+      - file_per_package

@@ -1,0 +1,13 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # The streaming response message is named `Event` to mirror the OpenAPI
+    # spike's `Event` schema, so the standard name check does not apply.
+    - RPC_RESPONSE_STANDARD_NAME
+breaking:
+  use:
+    - FILE

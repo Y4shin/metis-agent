@@ -1,0 +1,38 @@
+[package]
+name = "spike-wire"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pinned to the versions named in docs/tasks/metis-foundations/tasks/
+# protobuf-connect-research/findings.md. `json` is on because the generated
+# buffa types carry JSON impls; `zstd` and `gzip` are off to keep the static
+# musl check free of extra C dependencies.
+connectrpc = { version = "=0.9.1", default-features = false, features = [
+    "client",
+    "server",
+    "json",
+] }
+buffa = "=0.9.2"
+serde = "1"
+
+# Generated client bounds mention these directly.
+http = "1"
+http-body = "1"
+
+# Async runtime and stream plumbing.
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Transport: custom connectors plus a raw hyper accept loop.
+tower = { version = "0.5", features = ["util"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
+
+[[bin]]
+name = "spike"
+path = "src/bin/spike.rs"
