@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use connectrpc::ConnectError;
 use futures_util::stream::{self, Stream};
+use http::{HeaderMap, HeaderValue};
 use tokio::sync::broadcast;
 
 use crate::proto::metis::v1::{self, EventKind};
@@ -64,6 +65,67 @@ impl fmt::Display for CursorError {
             }
         }
     }
+}
+
+/// The response header a cursor refusal carries.
+///
+/// A refusal's meaning crosses the wire as this header rather than as message
+/// text, so a client maps it to a typed error instead of parsing prose. A
+/// cursor is refused before the stream opens, so the header travels on the
+/// response the stream was established with, exactly as the credential and
+/// version refusals do.
+pub const CURSOR_ERROR_HEADER: &str = "metis-cursor-error";
+
+/// How a cursor was refused, as it crosses the wire.
+///
+/// The enum is non-exhaustive: a later way to refuse a cursor adds itself
+/// without breaking a caller that matches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CursorRefusal {
+    /// The cursor is outside what the ring can still serve.
+    Expired,
+}
+
+impl CursorRefusal {
+    /// The header value this refusal crosses the wire as.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Expired => "expired",
+        }
+    }
+
+    /// Read a refusal from the header value it crossed the wire as.
+    ///
+    /// `None` means the value is not a refusal this build knows, which leaves
+    /// the caller with the transport error rather than a guess.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "expired" => Some(Self::Expired),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for CursorRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The response headers a cursor refusal carries.
+#[must_use]
+pub fn cursor_refusal_headers(error: &CursorError) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    match error {
+        CursorError::Expired { .. } => headers.insert(
+            CURSOR_ERROR_HEADER,
+            HeaderValue::from_static(CursorRefusal::Expired.as_str()),
+        ),
+    };
+    headers
 }
 
 impl std::error::Error for CursorError {}
@@ -510,10 +572,13 @@ impl Subscription {
 
 #[cfg(test)]
 mod tests {
-    use super::{CursorError, Event, Ring};
+    use super::{
+        CURSOR_ERROR_HEADER, CursorError, CursorRefusal, Event, Ring, cursor_refusal_headers,
+    };
     use crate::proto::metis::v1::EventKind;
     use connectrpc::ConnectError;
     use futures_util::StreamExt as _;
+    use http::HeaderValue;
     use std::time::Duration;
 
     /// Every event published carries the next daemon-wide identifier, whatever
@@ -655,6 +720,39 @@ mod tests {
         assert_eq!(first.channel, "daemon");
         let second = live.recv().await.expect("the subscription is live");
         assert_eq!(second.id, 2);
+    }
+
+    /// The cursor refusal crosses the wire as one header value, and a value
+    /// this build does not know parses to nothing rather than to a guess.
+    #[test]
+    fn the_cursor_refusal_round_trips_as_a_header() {
+        let error = CursorError::Expired {
+            cursor: 1,
+            earliest_resumable: 3,
+            latest_id: 4,
+        };
+        let headers = cursor_refusal_headers(&error);
+        assert_eq!(
+            headers.get(CURSOR_ERROR_HEADER),
+            Some(&HeaderValue::from_static("expired")),
+            "the meaning crosses the wire as the header, not as message text"
+        );
+
+        assert_eq!(CursorRefusal::Expired.as_str(), "expired");
+        assert_eq!(CursorRefusal::Expired.to_string(), "expired");
+        assert_eq!(
+            CursorRefusal::parse("expired"),
+            Some(CursorRefusal::Expired)
+        );
+        assert_eq!(
+            CursorRefusal::parse(" expired "),
+            Some(CursorRefusal::Expired)
+        );
+        assert_eq!(
+            CursorRefusal::parse("something-else"),
+            None,
+            "a refusal this build does not know is left as the transport error"
+        );
     }
 
     /// A cursor the window has moved past, and a cursor beyond the newest

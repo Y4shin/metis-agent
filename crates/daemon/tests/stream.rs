@@ -250,6 +250,25 @@ async fn next(stream: &mut EventStream) -> Event {
         .expect("the stream has not ended")
 }
 
+/// Publish into `ring` until its window has moved past identifier `1`, so a
+/// cursor of `1` is older than the ring can serve.
+///
+/// A cursor of `earliest_resumable() - 1` is still servable, because the event
+/// that opened the window is exactly what follows it, so the window has to begin
+/// at `3` or beyond before `1` is expired. The daemon's capacity is private, and
+/// the ring's own bounds are the source of truth, so the test moves the window
+/// rather than restating the capacity.
+fn expire_cursor_one(ring: &Ring) {
+    ring.publish("daemon", EventKind::Event, "{}");
+    while ring.earliest_resumable() <= 2 {
+        ring.publish("daemon", EventKind::Event, "{}");
+        assert!(
+            ring.latest_id() < 10_000,
+            "the ring's window must advance past identifier 1"
+        );
+    }
+}
+
 /// The stream opens with the snapshot of the selected channel, carries the
 /// event published while it was open with a greater identifier, skips the
 /// channel it did not select, and never decreases an identifier.
@@ -370,6 +389,46 @@ async fn an_idle_stream_carries_heartbeats_and_then_the_event_that_follows() {
     assert_eq!(event.kind, EventKind::Event);
     assert_eq!(event.id, published);
     assert_eq!(event.payload, "{\"late\":true}");
+}
+
+/// A stream opened with a cursor older than the ring is refused before any
+/// message is served, and the client reads the refusal as the typed expired
+/// cursor. The answer is the resync, which is the cursorless form of the same
+/// call: a fresh stream whose first message is the snapshot.
+#[tokio::test]
+async fn an_expired_cursor_is_refused_and_the_resync_opens_with_the_snapshot() {
+    let fixture = Fixture::new("expired").await;
+    let socket = fixture.socket("expired");
+    let service = fixture.service();
+    let ring = service.ring();
+    serve(&socket, Arc::clone(&service).mount(AuthPolicy::LocalAcl)).await;
+
+    expire_cursor_one(&ring);
+    assert!(
+        ring.earliest_resumable() > 2,
+        "cursor 1 is older than the ring"
+    );
+
+    let client = fixture.client(&socket, Surface::Test).await;
+    let refused = client
+        .stream_events(&["daemon"], 1)
+        .await
+        .expect_err("a cursor older than the window is refused");
+    assert!(
+        matches!(refused, ClientError::CursorExpired),
+        "expected the typed expired-cursor refusal, got {refused}"
+    );
+
+    // The resync: the cursorless form of the same call, which begins with the
+    // snapshot of the selected channel's head.
+    let mut resync = client
+        .stream_events(&["daemon"], 0)
+        .await
+        .expect("a cursorless stream is served");
+    let snapshot = next(&mut resync).await;
+    assert_eq!(snapshot.kind, EventKind::Snapshot);
+    assert_eq!(snapshot.id, ring.latest_id());
+    assert_eq!(snapshot.channel, "daemon");
 }
 
 /// The credential check runs at stream establishment: a stream without a

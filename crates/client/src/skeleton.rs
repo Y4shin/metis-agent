@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use api_contracts::connect::metis::v1::{DaemonService, DaemonServiceExt};
-use api_contracts::events::{CursorError, Ring};
+use api_contracts::events::{self, CursorError, Ring};
 use api_contracts::identity::{self, ClientIdentity, IdentityError};
 use api_contracts::proto::metis::v1::{
     EchoRequest, EchoResponse, Event, PairRequest, PairResponse, StreamEventsRequest,
@@ -250,7 +250,8 @@ pub fn router_recording(recorder: &IdentityRecorder) -> Router {
 /// Refuse a cursor the ring can no longer serve, in the shape the daemon's own
 /// handler uses, so the skeleton and the daemon refuse a cursor identically.
 fn refuse_cursor(error: CursorError) -> ConnectError {
-    ConnectError::new(ErrorCode::FailedPrecondition, error.to_string())
+    let headers = events::cursor_refusal_headers(&error);
+    ConnectError::new(ErrorCode::FailedPrecondition, error.to_string()).with_headers(headers)
 }
 
 /// Refuse a declaration this daemon cannot act on.
