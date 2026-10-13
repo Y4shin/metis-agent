@@ -3,8 +3,10 @@ type: ticket
 subtype: feature
 title: Pairing, per-surface tokens, and client credential storage
 status: stable
-workflow_state: ready
-blocked_by: [local-identity-and-acl, state-store]
+workflow_state: done
+blocked_by:
+- local-identity-and-acl
+- state-store
 size: m
 ---
 
@@ -129,3 +131,14 @@ Residual risks carried into the daemon effort:
 - A wrong preshared key reaches the client as `ClientError::Call` carrying
   `PermissionDenied` rather than as a typed pairing error; the spec names none,
   and the typed credential mapping covers the credential path only.
+
+Knowledge harvested at finalize: the effort map gained the decision bullet for
+the credential lifecycle and for the fact that a listener mounts a
+`ConnectRpcService` rather than a `Router`. `docs/dev-env.md` and
+`docs/testing.md` already carried the secret reference forms, the access rule,
+the token file, the keychain rule, which transport needs a credential and the run
+commands, so they needed no further change. Chain history worth knowing: the
+first run of this ticket was green in tdd and verify but its deviation step wrote
+the report to the workflow artifact instead of the ticket's `deviation-reports`
+path, so the chain's file gate failed; the retry re-verified the unchanged tree,
+let the reporter write the file, and landed.
