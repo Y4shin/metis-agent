@@ -178,6 +178,11 @@ Techniques that worked, to reuse in later rounds:
 12. **One question per lane.** A lane briefed with four unrelated items ran out of
     its tool budget without measuring any of them. Prefer fewer, sharper items per
     lane, each with a single measurable outcome.
+13. **Guard the round authoring itself.** Build each lane's task text as an array
+    spread followed by `.join("\n")`, and assert it is a string before dispatch.
+    Writing `shared.concat(lines.join("\n"))` silently yields an array, and the
+    child then fails with an opaque `input.task?.trim is not a function` that names
+    neither the lane nor the line. That mistake cost two dispatch cycles here.
 
 ## Answered
 
