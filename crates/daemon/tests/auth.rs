@@ -23,7 +23,9 @@ use api_contracts::connect::metis::v1::{
     DAEMON_SERVICE_ECHO_SPEC, DaemonService, DaemonServiceExt,
 };
 use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse, PairRequest, PairResponse};
-use api_contracts::transport::{serve_tcp_listener_service, serve_uds_service};
+use api_contracts::transport::{
+    serve_tcp_listener_service, serve_tcp_service, serve_uds_service,
+};
 use client::credential::{self, Backend};
 use client::{Client, ClientError, CredentialCause, Surface};
 use connectrpc::{
@@ -291,6 +293,26 @@ async fn serve_over_tcp(service: ConnectRpcService<Router>) -> SocketAddr {
         }
     });
     addr
+}
+
+/// Reserve a loopback port by binding and releasing it, so a test can require a
+/// bind on that exact address afterwards.
+fn reserve_loopback_port() -> SocketAddr {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve a loopback port");
+    let addr = listener.local_addr().expect("read the reserved address");
+    drop(listener);
+    addr
+}
+
+/// Wait, bounded, for a TCP listener to accept a connection at `addr`.
+async fn wait_for_tcp(addr: SocketAddr) -> bool {
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
 }
 
 /// Serve `service` on `path`, and return once the socket is bound.
@@ -831,5 +853,53 @@ async fn the_tcp_service_front_end_refuses_a_call_with_no_credential() {
         served.paths().is_empty(),
         "the handler never ran: {served:?}",
         served = served.paths()
+    );
+}
+
+/// The bind-and-delegate front-end binds the address it is given and mounts the
+/// service there, so a remote listener reaches its policy through one call.
+///
+/// This is the entry point for a caller that cannot read `local_addr()` first:
+/// it names the address, and the front-end binds it. The port is reserved by
+/// binding and releasing it before the call, because this front-end reports no
+/// address; the port the kernel chooses is reported by
+/// `serve_tcp_listener_service`, which `serve_over_tcp` uses.
+#[tokio::test]
+async fn the_bind_and_delegate_front_end_serves_the_mounted_service() {
+    let fixture = Fixture::new("tcp-bind").await;
+    let reserved = reserve_loopback_port();
+    let served = Served::default();
+    let service = fixture.recording_service(AuthPolicy::TokenRequired, &served);
+    tokio::spawn(async move {
+        if let Err(err) = serve_tcp_service(reserved, service).await {
+            eprintln!("remote service listener error: {err}");
+        }
+    });
+    assert!(
+        wait_for_tcp(reserved).await,
+        "the front-end binds the reserved address"
+    );
+
+    // A credential the store knows is served through the socket this front-end
+    // bound, so the service and its policy travelled with the bind.
+    fixture
+        .store
+        .insert_token("cli", &landed_hash(TOKEN_A).hash())
+        .await
+        .expect("the row is written");
+    plant("cli", TOKEN_A);
+
+    let caller = fixture.remote_client(reserved, Surface::Cli).await;
+    assert_eq!(
+        caller
+            .echo("bound and served")
+            .await
+            .expect("the token is this surface's"),
+        "bound and served"
+    );
+    assert_eq!(
+        served.paths(),
+        vec![DAEMON_SERVICE_ECHO_SPEC.procedure.to_owned()],
+        "the mounted handler served the call"
     );
 }
