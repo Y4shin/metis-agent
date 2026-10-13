@@ -138,9 +138,15 @@ impl DaemonService for Service {
         })
     }
 
-    /// Stream the daemon's events: the snapshot for the selected channels first
-    /// (one empty snapshot message when they hold nothing), then the events that
-    /// follow, with heartbeats as ordinary messages.
+    /// Stream the daemon's events. A stream opened without a cursor begins with
+    /// the snapshot of the selected channels (one empty snapshot message when
+    /// they hold nothing); a stream opened with a cursor begins with the events
+    /// that follow it, in identifier order, and carries no snapshot. Either way
+    /// the live events follow, with heartbeats as ordinary messages.
+    ///
+    /// A cursor the ring can no longer serve is refused before the stream opens,
+    /// through the `metis-cursor-error` header: the caller's answer is a
+    /// cursorless stream, which is the resync.
     ///
     /// The declaration is checked here because the recording is per handler: a
     /// streaming handler that skipped the call would leave a stream unrecorded

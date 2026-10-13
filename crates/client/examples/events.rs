@@ -11,7 +11,10 @@
 //! override, else the private base) over a ring holding one event, opens the
 //! stream through the wrapper, prints the snapshot the stream opens with, then
 //! publishes a second event into the ring and prints the event that arrives.
-//! Anything that fails exits non-zero.
+//! Both steps are the cursorless stream. The third step is the resume: it opens
+//! a second stream carrying that event's identifier as its cursor, publishes a
+//! third event, and prints the event the resumed stream carries. Anything that
+//! fails exits non-zero.
 
 use std::time::Duration;
 
@@ -27,6 +30,11 @@ const SNAPSHOT_PAYLOAD: &str = "{\"seeded\":true}";
 
 /// The event published while the stream is open.
 const EVENT_PAYLOAD: &str = "{\"next\":true}";
+
+/// The event published for the resume step: the second stream carries the
+/// identifier of the event just seen as its cursor, so it opens with this event
+/// and no snapshot.
+const RESUME_PAYLOAD: &str = "{\"resumed\":true}";
 
 /// How many events the walkthrough's ring holds.
 const CAPACITY: usize = 64;
@@ -96,6 +104,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     if event.kind != EventKind::Event || event.id != event_id || event.payload != EVENT_PAYLOAD {
         eprintln!("[result] FAIL: unexpected event {event:?}");
+        std::process::exit(1);
+    }
+
+    // The resume: a second stream opened with the identifier of the event just
+    // seen as its cursor. It replays nothing (the cursor is the newest
+    // identifier), carries no snapshot, and begins with what is published next.
+    let mut resumed = caller.stream_events(&[CHANNEL], event.id).await?;
+    let resumed_id = ring.publish(CHANNEL, EventKind::Event, RESUME_PAYLOAD);
+    let Some(resumed_event) = tokio::time::timeout(Duration::from_secs(15), resumed.message())
+        .await
+        .expect("the resumed stream carries the published event")?
+    else {
+        eprintln!("[result] FAIL: the resumed stream ended before its event");
+        std::process::exit(1);
+    };
+    println!(
+        "[resume] cursor={} id={} kind={:?} payload={:?}",
+        event.id, resumed_event.id, resumed_event.kind, resumed_event.payload
+    );
+    if resumed_event.kind != EventKind::Event
+        || resumed_event.id != resumed_id
+        || resumed_event.payload != RESUME_PAYLOAD
+    {
+        eprintln!("[result] FAIL: unexpected resumed event {resumed_event:?}");
         std::process::exit(1);
     }
 

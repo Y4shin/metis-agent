@@ -7,11 +7,12 @@
 pub enum EventKind {
     /// Not set. A receiver treats it as a message it cannot act on.
     EVENT_KIND_UNSPECIFIED = 0i32,
-    /// The opening message of every stream. A selected channel that holds an
-    /// event contributes its head, and when no selected channel holds anything the
-    /// snapshot is one empty message: no channel, no payload, and the daemon's
-    /// latest identifier. A receiver therefore always sees the snapshot before any
-    /// live traffic.
+    /// The opening message of a stream that carries no cursor. A selected channel
+    /// that holds an event contributes its head, and when no selected channel
+    /// holds anything the snapshot is one empty message: no channel, no payload,
+    /// and the daemon's latest identifier. A resumed stream carries no snapshot at
+    /// all: it opens with the events that follow its cursor instead, because its
+    /// caller already holds the state a snapshot would restate.
     EVENT_KIND_SNAPSHOT = 1i32,
     /// A liveness message on an otherwise idle stream. It carries the id of the
     /// most recent event the daemon assigned and no channel, so identifiers never
@@ -690,10 +691,12 @@ pub struct StreamEventsRequest {
     )]
     pub channels: ::buffa::alloc::vec::Vec<::buffa::alloc::string::String>,
     /// The event to resume after. `0` means no cursor, and identifiers start
-    /// at `1`, so the field needs no `optional`. The placeholder rule this
-    /// version implements is that a non-zero cursor suppresses live events at
-    /// or below it; `stream-resume-and-expiry` replaces it with real resume
-    /// and expiry semantics.
+    /// at `1`, so the field needs no `optional`. A non-zero cursor resumes after
+    /// that identifier: the ring replays what it still holds after it, in
+    /// identifier order, and the stream carries no snapshot. A cursor the ring
+    /// can no longer serve is refused before the stream opens, through the
+    /// `metis-cursor-error: expired` response header, and the caller answers by
+    /// opening a cursorless stream, which begins with the snapshot.
     ///
     /// Field 2: `last_event_id`
     #[serde(
@@ -829,8 +832,8 @@ pub const __STREAM_EVENTS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry
         from_json: ::buffa::type_registry::any_from_json::<StreamEventsRequest>,
         is_wkt: false,
     };
-/// One message on an event stream: the snapshot that opens it, a later event,
-/// or a heartbeat.
+/// One message on an event stream: the snapshot that opens a stream with no
+/// cursor, an event a stream replays or carries live, or a heartbeat.
 #[derive(Clone, PartialEq, Default, ::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct Event {
@@ -2105,10 +2108,12 @@ pub mod __buffa {
             /// Field 1: `channels`
             pub channels: ::buffa::RepeatedView<'a, &'a str>,
             /// The event to resume after. `0` means no cursor, and identifiers start
-            /// at `1`, so the field needs no `optional`. The placeholder rule this
-            /// version implements is that a non-zero cursor suppresses live events at
-            /// or below it; `stream-resume-and-expiry` replaces it with real resume
-            /// and expiry semantics.
+            /// at `1`, so the field needs no `optional`. A non-zero cursor resumes after
+            /// that identifier: the ring replays what it still holds after it, in
+            /// identifier order, and the stream carries no snapshot. A cursor the ring
+            /// can no longer serve is refused before the stream opens, through the
+            /// `metis-cursor-error: expired` response header, and the caller answers by
+            /// opening a cursorless stream, which begins with the snapshot.
             ///
             /// Field 2: `last_event_id`
             pub last_event_id: u64,
@@ -2357,10 +2362,12 @@ pub mod __buffa {
                 &self.0.reborrow().channels
             }
             /// The event to resume after. `0` means no cursor, and identifiers start
-            /// at `1`, so the field needs no `optional`. The placeholder rule this
-            /// version implements is that a non-zero cursor suppresses live events at
-            /// or below it; `stream-resume-and-expiry` replaces it with real resume
-            /// and expiry semantics.
+            /// at `1`, so the field needs no `optional`. A non-zero cursor resumes after
+            /// that identifier: the ring replays what it still holds after it, in
+            /// identifier order, and the stream carries no snapshot. A cursor the ring
+            /// can no longer serve is refused before the stream opens, through the
+            /// `metis-cursor-error: expired` response header, and the caller answers by
+            /// opening a cursorless stream, which begins with the snapshot.
             ///
             /// Field 2: `last_event_id`
             #[must_use]
@@ -2401,8 +2408,8 @@ pub mod __buffa {
                 ::serde::Serialize::serialize(&self.0, __s)
             }
         }
-        /// One message on an event stream: the snapshot that opens it, a later event,
-        /// or a heartbeat.
+        /// One message on an event stream: the snapshot that opens a stream with no
+        /// cursor, an event a stream replays or carries live, or a heartbeat.
         #[derive(Clone, Debug, Default)]
         pub struct EventView<'a> {
             /// The event's identifier, monotonic across every channel of the daemon and
