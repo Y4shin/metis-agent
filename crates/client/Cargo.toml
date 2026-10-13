@@ -10,3 +10,15 @@ workspace = true
 
 [dependencies]
 api-contracts.workspace = true
+connectrpc.workspace = true
+
+# The skeleton's socket wait names tokio directly; the transport itself lives in
+# `api-contracts`.
+tokio.workspace = true
+
+[dev-dependencies]
+# The loop-seam test drives a duplex stream through the generated client, so it
+# needs the connector shape itself.
+http = "1"
+hyper-util.workspace = true
+tower.workspace = true
