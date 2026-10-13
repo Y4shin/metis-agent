@@ -283,6 +283,12 @@ streaming assumptions before anything is built on top.
   stored. `api-contracts::transport` gained `ensure_private_dir` and
   `restrict_file`, the general form of the socket ACL rule, and CI needs no
   database server, no `DATABASE_URL` and no `.sqlx` offline data.
+- A listener mounts a `ConnectRpcService`, not a `Router`: `connectrpc` 0.9.1
+  keeps the interceptor chain on the service, so the credential policy cannot
+  travel through the landed `serve_tcp(addr, Router)`. `serve_uds_service` mounts
+  a policy on the Unix socket, and the TCP twin is the follow-up ticket
+  `serve-tcp-service`, which `remote-pairing` is blocked by. Until it lands, a
+  TCP listener mounted through the landed surface serves unauthenticated.
 
 ## Fog
 
