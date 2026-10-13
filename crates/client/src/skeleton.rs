@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api_contracts::connect::metis::v1::{DaemonService, DaemonServiceExt};
 use api_contracts::identity::{self, ClientIdentity, IdentityError};
-use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse};
+use api_contracts::proto::metis::v1::{EchoRequest, EchoResponse, PairRequest, PairResponse};
 use api_contracts::transport::{self, ConfigError};
 use connectrpc::{ConnectError, ErrorCode, RequestContext, Response, Router, ServiceRequest};
 
@@ -36,6 +36,17 @@ impl DaemonService for SkeletonDaemon {
         request: ServiceRequest<'_, EchoRequest>,
     ) -> Result<Response<EchoResponse>, ConnectError> {
         Response::ok(echo_body(request.message))
+    }
+
+    /// The skeleton does not pair: pairing belongs to the daemon's own service,
+    /// which is the one this ticket lands. A call that reaches here is answered
+    /// as unimplemented rather than with a token nothing issued.
+    async fn pair(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, PairRequest>,
+    ) -> Result<Response<PairResponse>, ConnectError> {
+        Err(unpaired())
     }
 }
 
@@ -96,6 +107,24 @@ impl DaemonService for RecordingDaemon {
         self.recorder.record(declared);
         Response::ok(echo_body(request.message))
     }
+
+    /// Pairing is the daemon's own service; the recording skeleton answers as
+    /// unimplemented, so a test cannot read a token out of it.
+    async fn pair(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, PairRequest>,
+    ) -> Result<Response<PairResponse>, ConnectError> {
+        Err(unpaired())
+    }
+}
+
+/// The refusal both skeleton services answer a pairing call with.
+fn unpaired() -> ConnectError {
+    ConnectError::new(
+        ErrorCode::Unimplemented,
+        "the skeleton does not pair; the daemon's own service does",
+    )
 }
 
 /// The router the recording service registers on. The transport loop serves it.

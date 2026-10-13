@@ -16,6 +16,7 @@
 //! example drive, and the start paths for it. The daemon effort replaces it;
 //! the transport and the wrapper stay.
 
+pub mod credential;
 pub mod skeleton;
 
 use std::fmt;
