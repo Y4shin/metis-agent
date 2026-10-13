@@ -6,6 +6,12 @@
 //! than by a handler (a recording service proves its handler never ran), and
 //! that the whole credential lifecycle survives a daemon restart.
 //!
+//! Both service-taking front-ends are mounted here. The local one is the Unix
+//! socket; the remote one is TCP, through `serve_tcp_listener_service` (or
+//! `serve_tcp_service`, which binds first), because the interceptor chain lives
+//! on the service and the `Router`-taking TCP front-ends cannot carry it. One
+//! test mounts one service on both and requires the same answer.
+//!
 //! The keychain machinery is held out of the way: `PATH` names one empty
 //! directory, so the client's owner-only file answers and the token round trips
 //! through a path the test owns.
