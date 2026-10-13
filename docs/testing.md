@@ -51,6 +51,31 @@ Local transport skeleton, documented in `crates/client`:
   the wrapper, prints `[echo]` and `[result] PASS`, and exits non-zero on
   failure.
 
+Event stream, documented in `crates/api-contracts/src/events.rs`,
+`crates/daemon` and `crates/client`:
+
+- `cargo test -p api-contracts --lib` -- the ring's unit tests: identifiers are
+  daemon-wide and start at one, the window drops its oldest event past
+  capacity, `earliest_resumable` follows the oldest event still held, the
+  snapshot is the head of each selected channel, `since` returns what follows a
+  cursor, a subscription delivers what is published after it, and the serving
+  stream opens with the snapshot and then follows the ring.
+- `cargo test -p daemon --test stream` -- over a temporary socket, the daemon's
+  own service is served with its ring: the stream's first message is the
+  snapshot, an event published while the stream is open arrives with a greater
+  identifier, an unselected channel contributes nothing, an idle stream carries
+  heartbeats as ordinary messages, and the identifiers never decrease. The same
+  test file asserts the stream's authorization: with `AuthPolicy::TokenRequired`
+  mounted, a stream without a credential is refused and the same call with a
+  paired token is served.
+- `cargo test -p client --test stream` -- the wrapper's half over the
+  skeleton's own socket: the stream is opened and drained through `Client`
+  without naming a transport or a generated stub.
+- `cargo run -p client --example events` -- serves the skeleton over a ring
+  holding one event, opens the stream through the wrapper, prints `[snapshot]`
+  for the message the stream opens with, publishes a second event into the ring,
+  prints `[event]` for the event that arrives, and exits non-zero on failure.
+
 Remote transport, off unless `METIS_TCP_ADDR` names an `IP:port` literal. There
 is no default bind address, so remote access cannot be enabled by accident:
 

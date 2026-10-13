@@ -7,11 +7,14 @@
 pub enum EventKind {
     /// Not set. A receiver treats it as a message it cannot act on.
     EVENT_KIND_UNSPECIFIED = 0i32,
-    /// The first message of every stream: the current head of each selected
-    /// channel.
+    /// The current head of a selected channel, sent before any event that
+    /// follows. A selected channel with nothing in the window contributes no
+    /// message, so a stream opened before anything was published begins with the
+    /// first event or heartbeat that comes after it.
     EVENT_KIND_SNAPSHOT = 1i32,
     /// A liveness message on an otherwise idle stream. It carries the id of the
-    /// most recent event the daemon assigned, so identifiers never decrease.
+    /// most recent event the daemon assigned and no channel, so identifiers never
+    /// decrease across a stream's whole life.
     EVENT_KIND_HEARTBEAT = 2i32,
     /// A published event.
     EVENT_KIND_EVENT = 3i32,
@@ -850,7 +853,8 @@ pub struct Event {
     )]
     pub kind: ::buffa::EnumValue<EventKind>,
     /// The channel the event belongs to, in the `StreamEventsRequest.channels`
-    /// vocabulary.
+    /// vocabulary. A heartbeat carries no channel: it belongs to the stream, not
+    /// to a channel.
     ///
     /// Field 3: `channel`
     #[serde(
@@ -2410,7 +2414,8 @@ pub mod __buffa {
             /// Field 2: `kind`
             pub kind: ::buffa::EnumValue<super::super::EventKind>,
             /// The channel the event belongs to, in the `StreamEventsRequest.channels`
-            /// vocabulary.
+            /// vocabulary. A heartbeat carries no channel: it belongs to the stream, not
+            /// to a channel.
             ///
             /// Field 3: `channel`
             pub channel: &'a str,
@@ -2701,7 +2706,8 @@ pub mod __buffa {
                 self.0.reborrow().kind
             }
             /// The channel the event belongs to, in the `StreamEventsRequest.channels`
-            /// vocabulary.
+            /// vocabulary. A heartbeat carries no channel: it belongs to the stream, not
+            /// to a channel.
             ///
             /// Field 3: `channel`
             #[must_use]

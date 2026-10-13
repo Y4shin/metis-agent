@@ -30,8 +30,9 @@ use connectrpc::{
 };
 
 /// How long the skeleton's streams may carry nothing before they carry a
-/// heartbeat. The daemon's own default is the same interval.
-const HEARTBEAT_DEFAULT: Duration = Duration::from_secs(15);
+/// heartbeat. The daemon's own default is the same interval, and it is public
+/// for the walkthrough example and for a test that serves its own ring.
+pub const HEARTBEAT_DEFAULT: Duration = Duration::from_secs(15);
 
 /// How many events the skeleton's ring holds before the oldest is dropped.
 ///
