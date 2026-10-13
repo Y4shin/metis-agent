@@ -229,8 +229,9 @@ impl Ring {
         if pending.is_empty() {
             // Nothing to report, and the stream still opens with the snapshot:
             // the empty one names no channel and carries no payload, and its
-            // identifier is the daemon's latest, so a receiver always knows the
-            // snapshot has been taken before live traffic reaches it.
+            // identifier is the daemon's latest, so a stream opened before
+            // anything was published begins with the snapshot rather than with
+            // live traffic.
             pending.push_back(Event {
                 id: self.latest_id(),
                 kind: EventKind::Snapshot,
@@ -254,9 +255,10 @@ impl Ring {
             loop {
                 if let Some(event) = state.pending.pop_front() {
                     state.last = state.last.max(event.id);
-                    // The kind describes the message, not the event: this one
-                    // opens the stream, so it is the snapshot even though the
-                    // event it reports was published as an ordinary event.
+                    // The kind describes the message, not the event: a pending
+                    // message opens the stream, so it is the snapshot even
+                    // though the event it reports was published as an ordinary
+                    // event, and the empty marker is already one.
                     let mut message = event.to_message();
                     message.kind = EventKind::Snapshot.into();
                     return Some((Ok(message), state));
