@@ -319,6 +319,63 @@ the store:
 - `cargo test -p api-contracts --test keychain` covers the platform tool's three
   operations against a stub that speaks both tools' command lines.
 
+Windows local transport, documented in `crates/api-contracts/src/transport.rs`
+and `crates/api-contracts/tests/pipe.rs`. The name rule, the resolver and the
+assembled security descriptor are platform-independent and run on every host;
+the pipe itself is compiled for the Windows target and executed nowhere in this
+effort:
+
+- `cargo test -p api-contracts` runs the platform-independent rules on any
+  host. The default name is `\\.\pipe\metis-daemon`; an override is accepted
+  only under the local pipe prefix `\\.\pipe\` (compared case-insensitively,
+  because Windows pipe names are not case sensitive), and a remote path
+  (`\\server\pipe\name`), a bare name, a Unix socket path, a name past the 256
+  characters `CreateNamedPipeW` documents, and a name carrying an interior NUL
+  are each the typed `ConfigError::InvalidPipeName` naming `METIS_ENDPOINT` and
+  the value. An absent or empty variable is the platform default.
+  `pipe_descriptor_sddl` assembles
+  `D:P(D;;GA;;;NU)(A;;GA;;;<daemon-user-SID>)(A;;GA;;;SY)` for the SID it is
+  given.
+- `cargo test -p api-contracts --test pipe` on Linux runs the explicit skip test
+  and passes, printing `[skip]` and naming the Windows invocation below, so a
+  local run reports the missing pipe coverage instead of looking complete.
+- `cargo test -p api-contracts --test pipe` on a Windows host would run the
+  serve-and-connect test: it serves the test service over `serve_pipe`, reaches
+  it through `pipe_transport`, requires one echo request to round-trip, and
+  requires a second first-instance server to be refused. No runner in this
+  effort executes it.
+- The `windows` CI job runs on `windows-latest` and compiles for the Windows
+  target with `cargo +nightly check -p api-contracts -p daemon --all-targets`.
+  That compiles the pipe front-end, the connector, the descriptor and token
+  calls, and the pipe test binary, and runs nothing.
+
+Gaps, each with the check that would close it. Nothing below was executed on
+Windows in this effort, so the pipe is proven by construction, by compilation
+for the Windows target, and by the platform-independent rules tested on Linux:
+
+- The serve-and-connect test has never been run. A run of
+  `cargo test -p api-contracts --test pipe` on a Windows host closes it.
+- The descriptor has never been read back. `GetSecurityInfo` for
+  `SE_KERNEL_OBJECT` on the pipe handle, asserting the DACL holds exactly the
+  intended ACEs and none for `WD`, `AN`, or `BA`, closes it.
+- The pipe mode has never been inspected. `GetNamedPipeInfo` on the server
+  handle, asserting the reported mode includes `PIPE_REJECT_REMOTE_CLIENTS`,
+  closes it, which is the assertion Microsoft's own HLK test makes.
+- A rejected connection from another account has never been observed. A client
+  running as a different local user closes it, and the exact error that client
+  sees should be recorded, so it is not mistaken for "daemon not running".
+- No low-integrity same-user process has been probed. An integrity-level check
+  (`GetTokenInformation(TokenIntegrityLevel)` after
+  `ImpersonateNamedPipeClient`) closes it, since setting a mandatory label needs
+  `SeSecurityPrivilege`.
+- No remote attempt has been recorded. A `\\HOSTNAME\pipe\name` attempt on the
+  same machine, or a client on a second host, closes it, and the error it
+  observes replaces the current inference.
+- No client reaches the pipe yet. `Client::local` and `Client::with_endpoint`
+  are Unix-only and the credential store is Unix-only, so the wrapper has no
+  Windows constructor: `pipe_transport` is the connector a follow-up ticket
+  wraps, and a Windows credential path closes this gap.
+
 ## CI
 
 `.github/workflows/ci.yml` runs the Rust commands above through the devenv
@@ -327,6 +384,13 @@ commands and the four plugin ABI commands (the C plugin build, the
 authoring-feature-off check, the harness, and the header drift check). The
 frontend commands are not in CI yet; add them when the frontend
 has behaviour worth gating.
+
+A second job, `windows`, runs on `windows-latest` and compiles the Windows local
+transport for the Windows target with
+`cargo +nightly check -p api-contracts -p daemon --all-targets`. It executes
+nothing, so it proves the Windows path compiles rather than proving a pipe
+works; the gaps it leaves are listed in the Windows local transport block above,
+together with the check that would close each one.
 
 ## Mock conventions
 

@@ -30,6 +30,12 @@ hyper-util.workspace = true
 futures-util.workspace = true
 
 # The ACL on a Unix socket path: the group is set with `chown`, which `std`
-# does not expose. The Windows front-end arrives with its own ticket.
+# does not expose.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# The named pipe's access control is a Windows object descriptor, built from
+# the daemon's own token. It is target-gated, so the Linux dependency tree does
+# not carry it.
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
