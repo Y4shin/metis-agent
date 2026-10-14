@@ -33,6 +33,7 @@ use std::task::{Context, Poll, Waker};
 use plugin_contract::abi::*;
 use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
 
+pub mod bundle;
 pub mod registry;
 
 pub use plugin_contract::capability::{CapabilityDescriptor, CapabilityKind, CapabilityList};

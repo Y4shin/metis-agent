@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 use plugin_fixture::payload::{EchoRequest, EchoResponse};
 use plugin_runtime::{Host, Loaded};
 
+pub mod signer;
+
 /// How long a case may spin before it is called stuck.
 pub const BUDGET: Duration = Duration::from_secs(5);
 

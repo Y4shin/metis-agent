@@ -286,6 +286,16 @@ Plugin host, documented in `crates/plugin-runtime`:
   belongs to, and the fixture's `tool.deferred` and `tool.wake_deferred`
   capabilities are what provoke that late wake. The runtime starts no runtime of
   its own: it hands back a `Future` and the test's small loop polls it.
+- `cargo test -p plugin-runtime --test bundle_verification` -- the bundle verifier
+  at `verify_bundle`, over real bytes. The committed vectors under
+  `crates/plugin-runtime/tests/vectors/` are rebuilt from the test signer and
+  compared byte for byte on every run, so a changed offset or a changed domain
+  tag fails the suite rather than passing quietly. The same run asserts the
+  altered copy of the vector, every container refusal, every trust refusal, the
+  chain profile, the recomputed key id, and that the compiled-in root set trusts
+  nothing. The vectors are regenerated with `cargo test -p plugin-runtime --test
+  bundle_verification -- --ignored`, which rewrites them from the signer after a
+  deliberate format change; no other test writes a committed file.
 
 Daemon state, documented in `crates/daemon`:
 

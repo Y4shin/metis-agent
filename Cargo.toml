@@ -83,10 +83,22 @@ sqlx = { version = "0.9", default-features = false, features = [
 
 # The per-surface credential: `getrandom` supplies the 32 random bytes a token
 # is made of, `sha2` hashes it, and `subtle` compares a stored hash with a
-# presented one in constant time rather than with a short-circuiting `==`.
+# presented one in constant time rather than with a short-circuiting `==`. The
+# bundle verifier reuses `sha2` for a key id, which is the same digest over a
+# public key.
 getrandom = "0.4"
 sha2 = "0.11"
 subtle = "2"
+
+# The bundle verifier's trusted parse path. `ed25519-dalek` verifies the
+# payload signature over the key the chain carries, `x509-cert` reads the
+# certificate chain through `der`'s strict decoder, and `sha2` computes a key
+# id. All of them are pure Rust with no build script and no C toolchain, so the
+# path that reads untrusted bytes adds no build step. `x509-cert` is taken
+# without its default `pem` feature, because a bundle's certificates are DER.
+ed25519-dalek = { version = "3", default-features = false }
+x509-cert = { version = "0.3", default-features = false, features = ["std"] }
+der = { version = "0.8", default-features = false, features = ["oid"] }
 
 # The local transport's async runtime and HTTP stack. These follow their major
 # line; only the protocol pair above is pinned exactly. The tokio features are
