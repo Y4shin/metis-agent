@@ -22,9 +22,23 @@ libloading.workspace = true
 serde_json.workspace = true
 serde = { workspace = true, features = ["derive"] }
 jsonschema.workspace = true
+# The bundle verifier: the payload signature, the certificate chain, and the
+# key id. `x509-cert` and `der` are the strict DER readers, and
+# `ed25519-dalek` is here for verification alone, so no signing key is in a
+# shipped path.
+ed25519-dalek.workspace = true
+x509-cert.workspace = true
+der.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 # The integration test drives a real cdylib. It builds the fixture itself and
 # reuses its payload shapes, which is why the fixture is a dev dependency here
 # and not a normal one: the runtime never names a fixture type.
 plugin-fixture.workspace = true
+# The test signer issues certificates and signs payloads with fixed seeds, so a
+# committed vector is reproducible. `x509-cert`'s certificate builder and the
+# `alloc` and `pkcs8` features that let an `ed25519-dalek` key sign are dev-only
+# additions: neither is compiled into a shipped build.
+ed25519-dalek = { workspace = true, features = ["alloc", "pkcs8"] }
+x509-cert = { workspace = true, features = ["builder"] }
