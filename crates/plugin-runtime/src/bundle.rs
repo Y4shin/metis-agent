@@ -539,9 +539,12 @@ pub fn verify_bundle<'a>(
     check_validity(&chain, clock_seconds())?;
     let leaf_common_name = check_profile(&chain)?;
     check_links(&chain, &keys)?;
+    // The chain holds at least one link, or `EmptyChain` was refused above.
     check_payload_signature(&keys[0], &offsets, bytes)?;
     Ok(VerifiedBundle {
         header,
+        // The span check above proved the archive ends exactly at the file's
+        // end, so the range is inside the file and this cannot fail.
         archive: bytes
             .get(offsets.archive())
             .expect("the span covers the archive"),

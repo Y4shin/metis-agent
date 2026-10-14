@@ -320,3 +320,170 @@ Two `metis-foundations` fog items are also answered here: the four-arm authoring
 vocabulary question (answered by section 12, the runtime dispatch method
 alternative) and the note that the inline `invoke` result has no in-tree
 exerciser (answered by deleting `invoke`).
+
+## 17. The bundle container
+
+A bundle is one file that holds a plugin's archive, the certificate chain that
+authorises it, and the signature over both. `plugin-runtime`'s `verify_bundle`
+turns such a file into a borrowed view of it (the parsed header, the
+leaf-authorising certificate's common name, and the archive bytes; nothing is
+copied and nothing is extracted) or into a typed refusal. This section fixes the
+bytes, so that a second implementation can be written from this text alone.
+
+### 17.1 The container
+
+The file begins with a 40-byte header, then the chain region, then the signature,
+then the archive. Every field is big-endian, and the header is fixed width
+because the signature's location is computed from it.
+
+| offset | size | field |
+| --- | --- | --- |
+| 0 | 8 | magic, the ASCII bytes `METISBND` |
+| 8 | 2 | container format version, `u16`, which must equal this build's exactly, currently 1 |
+| 10 | 2 | signing suite, `u16`, currently 1 for X.509 over Ed25519 |
+| 12 | 2 | header length, `u16`, which must equal 40 |
+| 14 | 2 | reserved, `u16`, which must be zero |
+| 16 | 4 | chain length, `u32` |
+| 20 | 8 | signature offset, `u64`, which must equal the header length plus the chain length |
+| 28 | 4 | signature length, `u32` |
+| 32 | 8 | ZIP length, `u64` |
+
+The file's length must equal the signature offset, plus the signature length,
+plus the ZIP length. Nothing else can be hidden in the file: the header, the
+chain and the archive are all signed, so the only bytes outside the signature's
+range are the signature's own, and an appended or prepended byte is a refusal
+rather than something a lenient reader forgives.
+
+The magic and the container version are the only fields pinned across versions,
+because the version decides the rest of the header's shape and therefore where
+the signature is. The version is one integer that must match this build's
+exactly, and the manifest does not repeat it.
+
+### 17.2 The signed message and the signature
+
+The signed message is, in order: the domain tag, the header's 40 bytes, the chain
+region's bytes, then the archive's bytes. The signature's own bytes are deleted
+from the message rather than zero-filled, so a signature never covers itself. The
+domain tag is the 27 ASCII bytes `METIS-PLUGIN-BUNDLE-PAYLOAD`, and it carries no
+container version, so a version bump does not change what a signature covers.
+
+The signature is raw Ed25519 (RFC 8032), 64 octets, made by the key of the
+leaf-authorising certificate (17.4). Verification is strict: a key or signature
+encoding that is not the canonical one, and a small-order key, are refused, so
+the non-canonical and weak-key cases RFC 8032 names cannot be used to make one
+signature verify under two keys.
+
+### 17.3 The chain region
+
+The chain region is a concatenation of whole DER X.509 version 3 certificates,
+the leaf-authorising certificate first and the anchor last. Certificates are
+self-delimiting, so the region must be consumed exactly: bytes after the last
+whole certificate are a refusal, not padding. A region holds at most eight links,
+and the count is derived from the region rather than carried.
+
+The region is read by a strict DER decoder, which refuses anything that is not in
+DER's canonical form before the value is interpreted. That is what makes the link
+check sound: a child's signed body is re-encoded rather than kept, and
+re-encoding is only faithful for input that was canonical to begin with.
+
+A link other than the anchor is verified against the link above it. The child's
+issuer name must equal the parent's subject name, and the child's own signature
+must verify under the parent's key.
+
+### 17.4 The anchor, the profile and validity
+
+The last link is the anchor, and it is trusted by its key rather than by who
+signed it. A certificate that carries a root key's public key says nothing an
+attacker could not also say, and what such a certificate cannot do without the
+root's private key is sign the link below it. The anchor's key id must be one the
+trust store holds.
+
+The profile this project owns, applied to every link:
+
+- a certificate that authorises another key carries `basicConstraints` with
+  `CA:TRUE`. In a chain longer than one link, that is every link but the
+  leaf-authorising one;
+- the leaf-authorising certificate is an end entity: it does not carry `CA:TRUE`;
+- `basicConstraints` (OID 2.5.29.19) is the only extension this build
+  understands, so any other critical extension refuses the chain and any other
+  non-critical extension is ignored. A producer may therefore carry its own key
+  identifier, and this build will not trust it (17.5);
+- the leaf-authorising certificate's common name is the plugin's name, and it is
+  what the caller compares against the manifest. An absent or empty common name
+  is a refusal.
+
+Validity is each certificate's own `notBefore` and `notAfter`, at second
+granularity, against the host's clock, with 60 seconds of skew tolerated at each
+end. A window that has not started and one that has passed are both trust
+failures.
+
+### 17.5 Key ids and revocation
+
+The key id of a public key is the first 16 bytes of its SHA-256, taken over the
+raw 32-byte Ed25519 public key and never over its SPKI wrapper.
+
+An identifier a certificate carries is never trusted. The subject key identifier
+extension, the authority key identifier extension and every other carried value
+decide nothing: each key id this build compares is recomputed from the public key
+it holds. A trust store's roots are registered by public key, and their ids are
+computed the same way, so a caller cannot register a root under an id of its own
+choosing.
+
+The revocation list names keys by that id. No key of any link may appear in it,
+the anchor included, so that revoking a root key refuses every chain anchored at
+it. A chain that carries an identifier the list names, while its own keys compute
+to ids the list does not, is unaffected.
+
+The compiled-in root set is empty. A daemon starts trusting nothing, and its
+roots and revocations are its own.
+
+### 17.6 The refusals
+
+The checks run in one order, and each refusal answers for itself rather than for
+a later consequence:
+
+1. the container: the magic, the container version, the signing suite, the header
+   length, the reserved field, the chain and signature spans, and the whole-file
+   span;
+2. the chain region: an empty region, a certificate that does not decode, an
+   encoding that is not canonical, bytes after the last whole certificate, and
+   more than eight links;
+3. the anchor's key id, then the revocation list;
+4. every link's validity window;
+5. the profile: the extensions, the CA constraint, the end entity leaf and the
+   leaf's common name;
+6. the links: the issuer and subject rule, then each parent's signature;
+7. the payload signature: its length, then its verification.
+
+A refusal is one of two kinds, and `BundleError::is_trust_failure` answers which:
+
+| Kind | Refusals | What it means |
+| --- | --- | --- |
+| A trust failure | an empty chain, an unknown root, a revoked key, an expired or not-yet-valid certificate, a malformed signature, a signature that does not verify, a broken link, a link signature that does not verify, every chain profile violation, and a leaf with no usable common name | The file claims a signature this daemon does not trust, which is evidence that something is wrong. Start-up stops. |
+| A file this build cannot read | a file shorter than the header, bad magic, an unknown container version, an unknown signing suite, a bad header length, a non-zero reserved field, bytes before the header, a chain or whole-file span mismatch, a malformed certificate, a non-canonical encoding, trailing bytes in the chain region, and more than eight links | There is no evidence of tampering, only a bundle that does not work here. That one bundle degrades. |
+
+Bytes before the header means a declared signature offset that lies before the
+header's end, which would place the chain region's start inside the header. The
+offset cannot both do that and equal the header length plus the chain length, so
+this check runs first.
+
+### 17.7 Dependencies
+
+The trusted parse path takes `ed25519-dalek` 3 over `curve25519-dalek` 5,
+`x509-cert` 0.3 over `der` 0.8 (`spki` 0.8, `const-oid` 0.10), and `sha2` 0.11.
+All of them are pure Rust, none has a build script that compiles C, and none is
+feature-enabled beyond what these checks need, so the path that reads untrusted
+bytes adds no build step. Measured at `plugin-runtime` for the `bundle`
+verification ticket:
+
+- `cargo tree -p plugin-runtime --edges normal --prefix none | sort -u | wc -l`:
+  66 crates before, 85 after, so the parse path adds 19 including its four direct
+  ones.
+- The same pipe without `--edges normal`, which includes the test-only signer:
+  76 crates before, 101 after.
+- The only added crate with a build script is `curve25519-dalek`, whose script
+  selects cfg flags from the rustc version and compiles nothing.
+
+The test signer that builds the committed vectors is a dev-dependency, on
+`x509-cert`'s `builder` feature and on `ed25519-dalek`'s `alloc` and `pkcs8`
+features, so no shipped build compiles a signing path.

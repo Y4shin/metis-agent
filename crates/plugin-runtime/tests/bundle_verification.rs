@@ -561,3 +561,145 @@ fn a_certificate_inside_the_clock_skew_is_accepted() {
     let bytes = signer::signed_bundle(&chain, signer::EMPTY_ZIP);
     verify_bundle(&bytes, &test_trust()).expect("30 seconds of skew is tolerated");
 }
+
+// --- the classification `startup-policy` reads ---------------------------
+
+/// The class of a refusal, stated here rather than read from the build under
+/// test.
+///
+/// This match has no wildcard arm on purpose: a new variant stops this file from
+/// compiling until its class is decided, because the daemon's start-up policy
+/// turns on it.
+fn classified_as_a_trust_failure(error: &BundleError) -> bool {
+    match error {
+        // A file this build cannot read. There is no evidence of tampering, only
+        // a bundle that does not work here, so the bundle degrades.
+        BundleError::Truncated { .. }
+        | BundleError::BadMagic { .. }
+        | BundleError::UnknownContainerVersion { .. }
+        | BundleError::UnknownSigningSuite { .. }
+        | BundleError::BadHeaderLength { .. }
+        | BundleError::ReservedNotZero { .. }
+        | BundleError::BytesBeforeHeader { .. }
+        | BundleError::ChainSpanMismatch { .. }
+        | BundleError::SpanMismatch { .. }
+        | BundleError::ChainTooLong { .. }
+        | BundleError::TrailingChainBytes { .. }
+        | BundleError::NonCanonicalDer { .. }
+        | BundleError::MalformedCertificate { .. } => false,
+        // A file that claims a signature this daemon does not trust. Start-up
+        // stops, because a bundle claiming an untrusted signature is evidence
+        // that something is wrong.
+        BundleError::EmptyChain
+        | BundleError::UnknownRoot { .. }
+        | BundleError::RevokedKey { .. }
+        | BundleError::Expired { .. }
+        | BundleError::NotYetValid { .. }
+        | BundleError::CaConstraintMissing { .. }
+        | BundleError::LeafIsCa
+        | BundleError::UnknownCriticalExtension { .. }
+        | BundleError::ChainBroken { .. }
+        | BundleError::ChainSignatureInvalid { .. }
+        | BundleError::MalformedSignature { .. }
+        | BundleError::SignatureInvalid
+        | BundleError::MissingCommonName => true,
+    }
+}
+
+#[test]
+fn every_refusal_is_classified() {
+    let refusals = [
+        BundleError::Truncated { len: 0 },
+        BundleError::BadMagic { found: [0; 8] },
+        BundleError::UnknownContainerVersion { found: 2 },
+        BundleError::UnknownSigningSuite { found: 2 },
+        BundleError::BadHeaderLength { found: 41 },
+        BundleError::ReservedNotZero { found: 1 },
+        BundleError::BytesBeforeHeader {
+            signature_offset: 20,
+            header_length: 40,
+        },
+        BundleError::ChainSpanMismatch {
+            chain_length: 800,
+            signature_offset: 808,
+        },
+        BundleError::SpanMismatch {
+            file_length: 894,
+            signature_offset: 808,
+            signature_length: 64,
+            zip_length: 23,
+        },
+        BundleError::EmptyChain,
+        BundleError::ChainTooLong { links: 9 },
+        BundleError::TrailingChainBytes { bytes: 1 },
+        BundleError::NonCanonicalDer {
+            link: 0,
+            detail: String::new(),
+        },
+        BundleError::MalformedCertificate {
+            link: 0,
+            detail: String::new(),
+        },
+        BundleError::UnknownRoot { key_id: [0; 16] },
+        BundleError::RevokedKey { key_id: [0; 16] },
+        BundleError::Expired {
+            link: 0,
+            not_after: 0,
+        },
+        BundleError::NotYetValid {
+            link: 0,
+            not_before: 0,
+        },
+        BundleError::CaConstraintMissing { link: 1 },
+        BundleError::LeafIsCa,
+        BundleError::UnknownCriticalExtension {
+            link: 1,
+            oid: "1.2.3.4.5".to_string(),
+        },
+        BundleError::ChainBroken { child: 0 },
+        BundleError::ChainSignatureInvalid { child: 0 },
+        BundleError::MalformedSignature { length: 99 },
+        BundleError::SignatureInvalid,
+        BundleError::MissingCommonName,
+    ];
+    for refusal in &refusals {
+        assert_eq!(
+            refusal.is_trust_failure(),
+            classified_as_a_trust_failure(refusal),
+            "{refusal:?}"
+        );
+        assert!(
+            !refusal.to_string().is_empty(),
+            "{refusal:?} has no message"
+        );
+    }
+}
+
+// --- boundaries ----------------------------------------------------------
+
+#[test]
+fn one_link_chain_verifies_when_its_key_is_a_root() {
+    // A producer may sign with a root key directly: one link, which is the leaf
+    // and the anchor at once.
+    let chain = TestChain::standard(1);
+    let bytes = signer::signed_bundle(&chain, signer::EMPTY_ZIP);
+    let trust = TrustStore::empty().with_root(chain.anchor().public_key());
+    let verified = verify_bundle(&bytes, &trust).expect("a root key may sign a payload");
+    assert_eq!(verified.leaf_common_name(), signer::LEAF_COMMON_NAME);
+}
+
+#[test]
+fn the_returned_name_is_the_leafs_and_not_another_links() {
+    let verified = verify_bundle(VECTOR, &test_trust()).expect("a valid bundle verifies");
+    assert_eq!(verified.leaf_common_name(), signer::LEAF_COMMON_NAME);
+    assert_ne!(
+        verified.leaf_common_name(),
+        signer::standard_common_name(1, 3),
+        "the intermediate's name is not returned"
+    );
+    assert_ne!(
+        verified.leaf_common_name(),
+        signer::standard_common_name(2, 3),
+        "the anchor's name is not returned"
+    );
+}

@@ -47,3 +47,43 @@ id rule, the revocation rule and the refusal rules.
 ## Blocked by
 
 - None (can start immediately).
+
+## Implementation notes
+
+Worker's note, recorded before landing. The working branch is
+`ticket/bundle-verification`, created off the landing branch
+`task/bundle-verification` (which already carries the landed waker fix).
+
+- **The measured dependency count of the trusted parse path.** Taken with
+  `devenv shell -- cargo tree -p plugin-runtime --edges normal --prefix none |
+  sort -u | wc -l`: 66 crates before this ticket, 85 after, so the parse path
+  adds 19, including its four direct crates (`ed25519-dalek` 3, `x509-cert` 0.3,
+  `der` 0.8, `sha2` 0.11, the last already in the workspace table). The same pipe
+  without `--edges normal`, which includes the test-only signer, goes from 76 to
+  101. The only added crate with a build script is `curve25519-dalek`, whose
+  script selects cfg flags from the rustc version and compiles nothing, so no C
+  build step enters the path that reads untrusted bytes. The numbers are
+  recorded in `docs/plugin-contract.md` section 17.7.
+- **The domain tag is fixed here**, because no earlier document named its bytes:
+  the 27 ASCII bytes `METIS-PLUGIN-BUNDLE-PAYLOAD`, ahead of the header, the
+  chain and the archive, with the signature bytes deleted rather than
+  zero-filled. It carries no container version, so a version bump does not change
+  what a signature covers.
+- **The anchor is the last link, trusted by key id rather than by who signed
+  it.** The chain therefore carries the root's certificate, and the root set
+  stays a set of (key id, public key) pairs. This is the reading that makes
+  "unknown root" decidable without a name-matching rule, and it is written into
+  section 17.4.
+- **"Bytes before the header" is read as a declared signature offset below the
+  header's end**, which is the only reading available in a container whose header
+  begins at offset 0. The trigger and its place in the check order are in
+  section 17.6.
+- **The non-canonical case in criterion 1 is a certificate whose `critical`
+  `basicConstraints` flag is spelled `01` rather than `FF`**, plus a separate
+  non-minimal length. `der` reports the first as `Noncanonical` and rewrites the
+  second into a length error at the header, so both are mapped to the one refusal
+  the contract names.
+- **The test signer is a second implementation of the layout.** It restates the
+  offsets, the magic, the version and the domain tag in
+  `crates/plugin-runtime/tests/support/signer.rs` rather than calling the
+  verifier's constants, and the vectors are compared against it on every run.
