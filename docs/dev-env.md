@@ -92,6 +92,30 @@ it. A keychain that is present but refuses is an error rather than a silent
 fallback to the file: a credential that is stored and cannot be read must not
 look like one that was never stored.
 
+## Remote exposure and reverse proxies
+
+The remote listener is off unless `METIS_TCP_ADDR` names an `IP:port` literal,
+and it carries no TLS: a reverse proxy terminates TLS in front of it, which is
+the deployment shape ADR 0004 chose. The daemon reads forwarded information only
+from the proxies an operator names in `METIS_TRUSTED_PROXIES`, a comma-separated
+list of exact IP addresses with whitespace tolerated. An absent or empty value
+names no proxy, and loopback is not trusted implicitly, so the trust rule stays
+visible in configuration where an operator can read it. A malformed entry is a
+typed `ConfigError`, never a silent empty set.
+
+Forwarded headers from a peer that is not one of those addresses are ignored,
+and only the left-most `x-forwarded-for` entry of a single trusted hop is read:
+the daemon does not walk a multi-hop chain. The daemon terminates no TLS,
+presents no certificate or fingerprint, and grows no trusted-CA setting, so a
+client's trust in the endpoint beyond the proxy's own certificate validation is
+out of scope (ADR 0004).
+
+Plaintext is allowed with a warning. A listener bound to an address that is not
+loopback with no proxy named prints one warning before it accepts, and naming a
+trusted proxy suppresses it. The pairing call carries the preshared key in its
+body, so a plaintext client leg on that call prints one warning per service,
+which is once rather than once per call.
+
 ## Reproduction
 
 The first runnable path is the local transport skeleton:
