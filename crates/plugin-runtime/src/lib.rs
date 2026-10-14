@@ -19,7 +19,7 @@
 //! resident. Nothing is unloaded while a future is alive, and the ordering is
 //! recorded in the host's ledger rather than inferred from a timer.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -27,7 +27,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
 use plugin_contract::abi::*;
@@ -699,14 +699,7 @@ impl PluginCall {
     }
 
     fn host_waker(&self) -> MetisWaker {
-        // One owning reference is handed to the plugin for this poll, and the
-        // host releases it as soon as the poll returns.
-        let data = Arc::into_raw(Arc::clone(&self.state)) as *mut c_void;
-        self.state.counts.wakers_handed_out.fetch_add(1, SeqCst);
-        MetisWaker {
-            data,
-            vtable: &WAKER_VTABLE,
-        }
+        owning_waker(&self.state)
     }
 }
 
@@ -774,6 +767,72 @@ impl Drop for PluginCall {
 
 // --- the host waker -------------------------------------------------------
 
+/// Every owning waker reference this process has handed out and not seen back,
+/// keyed by the token a `MetisWaker` carries in its `data` field.
+///
+/// A `MetisWaker` is an opaque two-field value, so the token is the only handle
+/// a plugin has. This table is what makes "one clone is consumed exactly once"
+/// checkable: the first `wake` or `drop` of a token takes its entry out, so a
+/// second use of one consumed clone finds nothing left to release and cannot
+/// take the call's state apart twice. It is process-wide because a waker carries
+/// no host pointer, and it holds outstanding references only: a released clone
+/// leaves no entry behind.
+fn live_wakers() -> &'static Mutex<HashMap<usize, Arc<CallState>>> {
+    static WAKERS: OnceLock<Mutex<HashMap<usize, Arc<CallState>>>> = OnceLock::new();
+    WAKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A token no waker of this process has carried before.
+///
+/// Zero is never handed out, so a null waker can never name a live one.
+fn next_waker_token() -> usize {
+    static TOKENS: AtomicUsize = AtomicUsize::new(0);
+    TOKENS.fetch_add(1, SeqCst) + 1
+}
+
+/// Records a use of a waker that was already consumed.
+///
+/// It is a protocol violation rather than a second release: the caller is told
+/// nothing, and the call's state is left as it is.
+fn refuse_consumed_waker(what: &str) {
+    eprintln!("[runtime] a waker was {what} after it was already consumed");
+}
+
+/// Hands out one owning waker reference for a call's state.
+///
+/// It is the reference the host gives each poll it runs, and it is the shape
+/// every clone has: one owning reference, with its own token, released by
+/// exactly one `wake` or `drop`.
+fn owning_waker(state: &Arc<CallState>) -> MetisWaker {
+    let token = next_waker_token();
+    live_wakers()
+        .lock()
+        .unwrap()
+        .insert(token, Arc::clone(state));
+    state.counts.wakers_handed_out.fetch_add(1, SeqCst);
+    MetisWaker {
+        data: token as *mut c_void,
+        vtable: &WAKER_VTABLE,
+    }
+}
+
+/// Takes one owning waker reference out of the table.
+///
+/// `None` means the reference was already consumed, or never handed out: either
+/// way there is nothing left to release.
+fn take_owned_waker(waker: MetisWaker) -> Option<Arc<CallState>> {
+    live_wakers().lock().unwrap().remove(&(waker.data as usize))
+}
+
+/// The state a borrowed waker names, left in the table for its owner.
+fn borrowed_waker(waker: &MetisWaker) -> Option<Arc<CallState>> {
+    live_wakers()
+        .lock()
+        .unwrap()
+        .get(&(waker.data as usize))
+        .cloned()
+}
+
 /// Records a wake that arrived after the call's future was dropped, naming the
 /// call it belongs to.
 ///
@@ -786,52 +845,60 @@ fn record_late_wake(state: &CallState) {
     record.push(state.request_id);
 }
 
-unsafe extern "C" fn waker_clone(waker: *const MetisWaker) -> MetisWaker {
-    // SAFETY: the waker's data is an `Arc<CallState>` this crate built, and the
-    // handle is borrowed for the poll.
-    let data = unsafe { (*waker).data };
-    // SAFETY: taking the borrowed reference into an `Arc` and putting it back
-    // leaves the count unchanged.
-    let borrowed = unsafe { Arc::from_raw(data as *const CallState) };
-    let cloned = Arc::clone(&borrowed);
-    let _ = Arc::into_raw(borrowed);
-    cloned.counts.wakers_handed_out.fetch_add(1, SeqCst);
-    // The clone becomes the caller's owning reference.
-    let _ = Arc::into_raw(cloned);
-    MetisWaker {
-        data,
-        vtable: &WAKER_VTABLE,
-    }
-}
-
-unsafe extern "C" fn waker_wake(waker: MetisWaker) {
-    // SAFETY: the data is an `Arc<CallState>` this crate built, and this
-    // consumes one owning reference.
-    let state = unsafe { Arc::from_raw(waker.data as *const CallState) };
-    state.counts.wakers_released.fetch_add(1, SeqCst);
+/// Wakes the task polling the call, or records the wake when the future is
+/// already gone.
+fn wake_or_record(state: &Arc<CallState>) {
     if state.dropped.load(SeqCst) {
         // A wake may arrive after the future was dropped. It is recorded, with
         // the call it belongs to, rather than dereferenced into anything that
         // no longer exists.
-        record_late_wake(&state);
-        return;
-    }
-    if let Some(waker) = state.waker.lock().unwrap().take() {
-        waker.wake();
-    }
-}
-
-unsafe extern "C" fn waker_wake_by_ref(waker: *const MetisWaker) {
-    // SAFETY: the data is a live `Arc<CallState>` and stays borrowed.
-    let data = unsafe { (*waker).data };
-    let state = unsafe { &*(data as *const CallState) };
-    if state.dropped.load(SeqCst) {
         record_late_wake(state);
         return;
     }
     if let Some(waker) = state.waker.lock().unwrap().take() {
         waker.wake();
     }
+}
+
+unsafe extern "C" fn waker_clone(waker: *const MetisWaker) -> MetisWaker {
+    // SAFETY: the waker is this host's own and is borrowed for the poll.
+    let borrowed = unsafe { &*waker };
+    if borrowed.vtable.is_null() {
+        return MetisWaker::null();
+    }
+    let Some(state) = borrowed_waker(borrowed) else {
+        refuse_consumed_waker("cloned");
+        return MetisWaker::null();
+    };
+    // One clone is one more owning reference, so it gets one more token.
+    owning_waker(&state)
+}
+
+unsafe extern "C" fn waker_wake(waker: MetisWaker) {
+    if waker.vtable.is_null() {
+        return;
+    }
+    let Some(state) = take_owned_waker(waker) else {
+        refuse_consumed_waker("woken");
+        return;
+    };
+    // The token is gone, so this is the one and only release of that reference:
+    // the `Arc` is dropped with `state` at the end of this frame.
+    state.counts.wakers_released.fetch_add(1, SeqCst);
+    wake_or_record(&state);
+}
+
+unsafe extern "C" fn waker_wake_by_ref(waker: *const MetisWaker) {
+    // SAFETY: the waker is this host's own and stays borrowed.
+    let borrowed = unsafe { &*waker };
+    if borrowed.vtable.is_null() {
+        return;
+    }
+    let Some(state) = borrowed_waker(borrowed) else {
+        refuse_consumed_waker("woken by reference");
+        return;
+    };
+    wake_or_record(&state);
 }
 
 /// Releases one owning waker reference without waking it.
@@ -843,9 +910,10 @@ fn release_waker(waker: MetisWaker) {
     if waker.vtable.is_null() {
         return;
     }
-    // SAFETY: this consumes one owning reference, as the `drop` entry is
-    // defined to.
-    let state = unsafe { Arc::from_raw(waker.data as *const CallState) };
+    let Some(state) = take_owned_waker(waker) else {
+        refuse_consumed_waker("released");
+        return;
+    };
     state.counts.wakers_released.fetch_add(1, SeqCst);
 }
 
@@ -943,4 +1011,54 @@ unsafe extern "C" fn host_service_request(
         MetisStatus::Ok
     }));
     caught.unwrap_or(MetisStatus::Internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host waker, driven the way a hostile plugin drives it: `wake` twice
+    /// on the same owning clone.
+    ///
+    /// One clone is one owning reference. The first `wake` consumes it, so the
+    /// second must be refused rather than take the call's state apart a second
+    /// time.
+    #[test]
+    fn a_second_wake_on_one_consumed_clone_does_not_release_the_call_state() {
+        let host = Host::new();
+        let state = Arc::new(CallState {
+            waker: Mutex::new(None),
+            dropped: AtomicBool::new(false),
+            counts: Arc::clone(&host.inner),
+            request_id: 9,
+        });
+        let waker = owning_waker(&state);
+        let (data, vtable) = (waker.data, waker.vtable);
+
+        // SAFETY: the waker is the one this host just handed out, and the first
+        // wake consumes it, as the entry is defined to.
+        unsafe { ((*vtable).wake)(waker) };
+        assert_eq!(host.waker_counts(), (1, 1, 0));
+        assert_eq!(
+            Arc::strong_count(&state),
+            1,
+            "the test's own reference is the only one left"
+        );
+
+        // The same clone again: it was already consumed, so there is nothing
+        // left for it to release and the call's state must survive.
+        // SAFETY: the value is the same two fields the host handed out, and
+        // refusing it is the behaviour under test.
+        unsafe { ((*vtable).wake)(MetisWaker { data, vtable }) };
+        assert_eq!(
+            host.waker_counts().1,
+            1,
+            "a consumed clone releases nothing a second time"
+        );
+        assert_eq!(
+            Arc::strong_count(&state),
+            1,
+            "the call's state is still held once, not released twice"
+        );
+    }
 }
