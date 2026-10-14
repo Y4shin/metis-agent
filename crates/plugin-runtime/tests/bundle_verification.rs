@@ -703,3 +703,17 @@ fn the_returned_name_is_the_leafs_and_not_another_links() {
         "the anchor's name is not returned"
     );
 }
+
+#[test]
+fn a_key_id_is_the_first_sixteen_bytes_of_the_keys_sha256() {
+    // A known answer, computed from the definition rather than from this build:
+    // SHA-256 of the bytes 00 through 1F, whose first sixteen bytes these are.
+    let key: [u8; 32] = std::array::from_fn(|index| index as u8);
+    assert_eq!(
+        key_id(&key),
+        [
+            0x63, 0x0d, 0xcd, 0x29, 0x66, 0xc4, 0x33, 0x66, 0x91, 0x12, 0x54, 0x48, 0xbb, 0xb2,
+            0x5b, 0x4f,
+        ]
+    );
+}
