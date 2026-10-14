@@ -23,7 +23,18 @@ pub const TRUSTED_PROXIES_ENV: &str = "METIS_TRUSTED_PROXIES";
 use std::fmt;
 use std::net::IpAddr;
 
+use http::HeaderMap;
+
 use crate::transport::ConfigError;
+
+/// The header a reverse proxy appends the client's address to.
+const FORWARDED_FOR: &str = "x-forwarded-for";
+
+/// The header a reverse proxy names the scheme it was reached with in.
+const FORWARDED_PROTO: &str = "x-forwarded-proto";
+
+/// The forwarded scheme that says the leg before the proxy is encrypted.
+const HTTPS: &str = "https";
 
 /// The addresses trusted to send forwarded headers.
 ///
@@ -109,10 +120,114 @@ impl fmt::Display for TrustedProxies {
     }
 }
 
+/// The address a request is attributed to, and where that address came from.
+///
+/// The variant is the provenance, so a test, a warning, or an audit record can
+/// tell the peer's own address from one a trusted proxy forwarded. That is what
+/// makes "forwarded information is accepted only from a named proxy"
+/// observable, rather than a property of a value that happens to match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientAddress {
+    /// The address of the peer that opened the connection.
+    Peer(IpAddr),
+    /// The left-most entry of a forwarded chain a trusted peer sent.
+    Forwarded(IpAddr),
+}
+
+impl ClientAddress {
+    /// The address itself, whatever its provenance.
+    #[must_use]
+    pub fn address(self) -> IpAddr {
+        match self {
+            Self::Peer(address) | Self::Forwarded(address) => address,
+        }
+    }
+}
+
+impl fmt::Display for ClientAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Peer(address) => write!(f, "peer {address}"),
+            Self::Forwarded(address) => write!(f, "forwarded {address}"),
+        }
+    }
+}
+
+/// The address a request is attributed to.
+///
+/// A forwarded chain is read only from a peer the operator named, and only its
+/// left-most entry: a multi-hop chain is not walked, because every hop past the
+/// first is a claim this daemon cannot check. An entry that is not an IP
+/// literal is not an address, so the answer falls back to the peer rather than
+/// inventing one.
+///
+/// `None` when no peer is known, which is the local Unix socket: a local caller
+/// has no address, and nothing is forwarded on its behalf.
+#[must_use]
+pub fn client_address(
+    peer: Option<IpAddr>,
+    trusted: &TrustedProxies,
+    headers: &HeaderMap,
+) -> Option<ClientAddress> {
+    let peer = peer?;
+    if !trusted.contains(peer) {
+        return Some(ClientAddress::Peer(peer));
+    }
+    let forwarded = headers
+        .get(FORWARDED_FOR)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .and_then(|left| left.parse::<IpAddr>().ok());
+    Some(match forwarded {
+        Some(address) => ClientAddress::Forwarded(address),
+        None => ClientAddress::Peer(peer),
+    })
+}
+
+/// How the leg between the caller and the proxy was served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientScheme {
+    /// Nothing said the leg was encrypted, so it is treated as plaintext.
+    Plaintext,
+    /// A trusted proxy said it was reached over TLS.
+    Encrypted,
+}
+
+/// The scheme the client leg was served over.
+///
+/// `Encrypted` only when a trusted peer sent `x-forwarded-proto: https`.
+/// Everything else, an untrusted peer included, is [`ClientScheme::Plaintext`],
+/// because this daemon terminates no TLS and must not claim an encryption it
+/// cannot see.
+#[must_use]
+pub fn client_scheme(
+    peer: Option<IpAddr>,
+    trusted: &TrustedProxies,
+    headers: &HeaderMap,
+) -> ClientScheme {
+    let encrypted = peer.is_some_and(|peer| {
+        trusted.contains(peer)
+            && headers
+                .get(FORWARDED_PROTO)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case(HTTPS))
+    });
+    if encrypted {
+        ClientScheme::Encrypted
+    } else {
+        ClientScheme::Plaintext
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TRUSTED_PROXIES_ENV, TrustedProxies};
+    use super::{
+        ClientAddress, ClientScheme, TRUSTED_PROXIES_ENV, TrustedProxies, client_address,
+        client_scheme,
+    };
     use crate::transport::ConfigError;
+    use http::{HeaderMap, HeaderValue};
     use std::ffi::OsString;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -263,5 +378,128 @@ mod tests {
         let trusted = TrustedProxies::resolve().expect("a configured list resolves");
         assert!(trusted.contains(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         drop(env);
+    }
+
+    /// The address a proxy named is accepted, and the entry that counts is the
+    /// left-most one: the chain is not walked, because every hop past the first
+    /// is a claim this daemon cannot check.
+    #[test]
+    fn forwarded_information_is_accepted_from_a_named_proxy() {
+        let proxy = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let trusted = TrustedProxies::parse("203.0.113.7").expect("the list parses");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.9, 203.0.113.7"),
+        );
+
+        let client =
+            client_address(Some(proxy), &trusted, &headers).expect("a connection has a peer");
+        assert_eq!(
+            client,
+            ClientAddress::Forwarded(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))),
+            "the left-most entry is the client"
+        );
+        assert_eq!(client.address(), IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)));
+        assert_eq!(
+            client.to_string(),
+            "forwarded 198.51.100.9",
+            "the answer says where it came from"
+        );
+        assert_eq!(
+            client_address(Some(proxy), &trusted, &HeaderMap::new()),
+            Some(ClientAddress::Peer(proxy))
+        );
+    }
+
+    /// The same header from a peer nobody named changes nothing: the answer is
+    /// the address the connection came from, so a hostile client cannot choose
+    /// the address it is recorded under.
+    #[test]
+    fn forwarded_information_is_ignored_from_an_unnamed_peer() {
+        let peer = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let trusted = TrustedProxies::parse("").expect("nothing is named");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.9, 203.0.113.7"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+
+        let client =
+            client_address(Some(peer), &trusted, &headers).expect("a connection has a peer");
+        assert_eq!(
+            client,
+            ClientAddress::Peer(peer),
+            "an unnamed peer's forwarded header is not read"
+        );
+        assert_eq!(client.to_string(), "peer 203.0.113.7");
+        assert_eq!(
+            client_scheme(Some(peer), &trusted, &headers),
+            ClientScheme::Plaintext,
+            "the daemon does not claim an encryption it cannot see"
+        );
+    }
+
+    /// A named proxy whose forwarded entry is not an address falls back to the
+    /// peer rather than inventing a client, and a missing peer is no address at
+    /// all.
+    #[test]
+    fn the_rule_never_invents_an_address() {
+        let proxy = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let trusted = TrustedProxies::parse("203.0.113.7").expect("the list parses");
+        let garbage = {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", HeaderValue::from_static("unknown"));
+            headers
+        };
+        assert_eq!(
+            client_address(Some(proxy), &trusted, &garbage),
+            Some(ClientAddress::Peer(proxy)),
+            "an entry that is not an address is not a client address"
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.9"));
+        assert_eq!(
+            client_address(None, &trusted, &headers),
+            None,
+            "the local socket has no peer and nothing is forwarded for it"
+        );
+        assert_eq!(
+            client_scheme(None, &trusted, &headers),
+            ClientScheme::Plaintext
+        );
+    }
+
+    /// The leg is encrypted only when a named proxy says the proxy itself was
+    /// reached over TLS; anything else is plaintext.
+    #[test]
+    fn the_scheme_is_encrypted_only_when_a_named_proxy_says_so() {
+        let proxy = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let named = TrustedProxies::parse("203.0.113.7").expect("the list parses");
+        let unnamed = TrustedProxies::parse("").expect("nothing is named");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+
+        assert_eq!(
+            client_scheme(Some(proxy), &named, &headers),
+            ClientScheme::Encrypted
+        );
+        assert_eq!(
+            client_scheme(Some(proxy), &unnamed, &headers),
+            ClientScheme::Plaintext
+        );
+        assert_eq!(
+            client_scheme(None, &named, &headers),
+            ClientScheme::Plaintext
+        );
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        assert_eq!(
+            client_scheme(Some(proxy), &named, &headers),
+            ClientScheme::Plaintext,
+            "only `https` means encrypted"
+        );
     }
 }
