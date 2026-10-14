@@ -696,4 +696,28 @@ mod tests {
             "the latch is spent for every warning, not per warning text"
         );
     }
+
+    /// The front-end reads the trusted-proxy set where it binds, so a value it
+    /// cannot read refuses the bind rather than being ignored or silently read
+    /// as "no proxy".
+    #[tokio::test]
+    async fn a_malformed_trusted_proxy_value_refuses_the_tcp_front_end() {
+        use crate::transport::serve_tcp_listener_service;
+        use connectrpc::{ConnectRpcService, Router};
+        use std::sync::Arc;
+
+        let env = TrustedProxiesEnv::set("not-an-address");
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind a loopback port");
+        let service = ConnectRpcService::from_arc(Arc::new(Router::new()));
+        let error = serve_tcp_listener_service(listener, service)
+            .await
+            .expect_err("a set the daemon cannot read refuses the bind");
+        assert!(
+            error.to_string().contains(TRUSTED_PROXIES_ENV),
+            "the refusal names the variable: {error}"
+        );
+        drop(env);
+    }
 }
