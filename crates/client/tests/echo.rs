@@ -16,17 +16,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use api_contracts::connect::metis::v1::DaemonServiceClient;
 use api_contracts::proto::metis::v1::EchoRequest;
-use api_contracts::transport::{local_authority, serve_stream};
+use api_contracts::transport::{ENDPOINT_ENV, local_authority, serve_stream};
 use client::Client;
 use client::skeleton;
 use client::{default_endpoint, resolve_endpoint};
 use connectrpc::client::{ClientConfig, Http2Connection};
 use hyper_util::rt::TokioIo;
 use tower::service_fn;
-
-/// The environment variable that overrides the local endpoint. The daemon
-/// effort binds the same variable.
-const ENDPOINT_ENV: &str = "METIS_ENDPOINT";
 
 /// A temporary socket directory that removes itself on drop, so the socket
 /// directory is cleaned up on the success path and on a panic alike.

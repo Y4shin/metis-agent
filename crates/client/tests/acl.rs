@@ -13,11 +13,9 @@ use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 
+use api_contracts::transport::ENDPOINT_ENV;
 use client::Client;
 use client::skeleton;
-
-/// The environment variable that overrides the local endpoint.
-const ENDPOINT_ENV: &str = "METIS_ENDPOINT";
 
 /// The mode the daemon gives a socket directory and the socket itself when no
 /// group is configured. Restated rather than imported: this test asserts what

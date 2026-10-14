@@ -33,14 +33,19 @@ use connectrpc::{
 };
 
 /// How long the skeleton's streams may carry nothing before they carry a
-/// heartbeat. The daemon's own default is the same interval, and it is public
-/// for the walkthrough example and for a test that serves its own ring.
-pub const HEARTBEAT_DEFAULT: Duration = Duration::from_secs(15);
+/// heartbeat.
+///
+/// The one definition is [`api_contracts::events::HEARTBEAT_DEFAULT`], which the
+/// daemon's own service uses too; it is re-exported here because this is the path
+/// the walkthrough example and a test that serves its own ring name.
+pub use api_contracts::events::HEARTBEAT_DEFAULT;
 
 /// How many events the skeleton's ring holds before the oldest is dropped.
 ///
-/// Smaller than the daemon's window on purpose: the skeleton is test support and
-/// a smaller window makes a drop reachable from a test.
+/// The daemon declares its own window as 1024 and this is deliberately not that
+/// number: the skeleton is test support, and a window small enough to fill from
+/// a test is what makes a drop reachable there. The two capacities are not meant
+/// to agree, so neither is derived from the other.
 const EVENT_CAPACITY: usize = 64;
 
 /// The skeleton service: it echoes whatever it receives, and it streams the

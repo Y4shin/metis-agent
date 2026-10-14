@@ -131,8 +131,8 @@ pub trait Plugin: Default + Send + Sync + 'static {
     ///
     /// The future is polled by the host on the host's own runtime, and it must
     /// not block: a capability that has to wait asks for a host service through
-    /// [`Call::service`] and returns `Pending` from its poll until the answer
-    /// arrives.
+    /// [`Call::service_request`] and returns `Pending` from its poll until the
+    /// answer arrives.
     fn call(
         &self,
         call: Call,

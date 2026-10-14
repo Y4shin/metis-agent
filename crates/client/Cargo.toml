@@ -29,7 +29,6 @@ http = "1"
 # system's random source.
 getrandom.workspace = true
 
-
 [dev-dependencies]
 # The loop-seam test drives a duplex stream through the generated client, so it
 # needs the connector shape itself.

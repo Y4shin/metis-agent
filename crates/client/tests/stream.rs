@@ -215,6 +215,11 @@ async fn a_channel_with_no_events_carries_the_skeleton_heartbeat() {
 /// the ring and a reader. Stated in the ring's own observable bounds rather than
 /// in a capacity a test does not own, and bounded so a much larger window fails
 /// loudly instead of hanging.
+///
+/// The helper is deliberately duplicated, with the same 10 000 bound, in
+/// `crates/daemon/tests/cancel.rs`: the two live in separate test binaries over
+/// separate surfaces (the wrapper's drop here, the daemon's refusal there), and
+/// sharing one helper would mean a test-support crate both binaries depend on.
 fn stall_past_the_bound(ring: &Ring) {
     ring.publish("daemon", EventKind::Event, "{}");
     while ring.since(0, &["daemon"]).len() * 2 > ring.latest_id() as usize {

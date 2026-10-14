@@ -361,12 +361,14 @@ pub const PIPE_PREFIX: &str = r"\\.\pipe\";
 /// another one.
 pub const DEFAULT_PIPE_NAME: &str = "metis-daemon";
 
-/// The environment variable the pipe name override is read from.
+/// The environment variable the local endpoint override is read from.
 ///
-/// It is the same variable the Unix endpoint override uses, so a host has one
-/// endpoint setting whichever local transport it runs: a socket path on Unix, a
-/// pipe name on Windows. An absent or empty value is the platform default.
-const PIPE_NAME_ENV: &str = "METIS_ENDPOINT";
+/// One name for every local transport, so a host has one endpoint setting
+/// whichever one it runs: a socket path on Unix, a pipe name on Windows. The
+/// client reads this same constant where it resolves the endpoint it connects
+/// to, which is why it is public rather than private to this module. An absent
+/// or empty value is the platform default.
+pub const ENDPOINT_ENV: &str = "METIS_ENDPOINT";
 
 /// The longest pipe name `CreateNamedPipeW` documents: 256 characters.
 const PIPE_NAME_MAX_CHARS: usize = 256;
@@ -394,7 +396,7 @@ impl PipeName {
     /// silent fall back to the default.
     pub fn parse(value: &str) -> Result<Self, ConfigError> {
         let refuse = || ConfigError::InvalidPipeName {
-            variable: PIPE_NAME_ENV,
+            variable: ENDPOINT_ENV,
             value: value.to_owned(),
         };
         let prefix = value.get(..PIPE_PREFIX.len());
@@ -443,7 +445,7 @@ impl std::fmt::Display for PipeName {
 /// Returns [`ConfigError::InvalidPipeName`] when the variable names something
 /// that is not a local pipe path.
 pub fn resolve_pipe_name() -> Result<PipeName, ConfigError> {
-    match env_value(PIPE_NAME_ENV) {
+    match env_value(ENDPOINT_ENV) {
         Some(value) => PipeName::parse(&value),
         None => Ok(PipeName::default()),
     }
@@ -1261,19 +1263,14 @@ mod tests {
     mod pipe {
         use super::ENV_LOCK;
         use crate::transport::{
-            ConfigError, DEFAULT_PIPE_NAME, PIPE_PREFIX, PipeName, pipe_descriptor_sddl,
-            resolve_pipe_name,
+            ConfigError, DEFAULT_PIPE_NAME, ENDPOINT_ENV, PIPE_PREFIX, PipeName,
+            pipe_descriptor_sddl, resolve_pipe_name,
         };
         use std::ffi::OsString;
         use std::sync::{MutexGuard, PoisonError};
 
-        /// The variable the pipe name override is read from. It is the same
-        /// variable the Unix endpoint override uses, so a host has one
-        /// endpoint setting whichever local transport it runs.
-        const ENDPOINT_ENV: &str = "METIS_ENDPOINT";
-
-        /// Holds one value of `METIS_ENDPOINT` for the duration of a test and
-        /// restores the previous value on drop, so a panic cannot leak the
+        /// Holds one value of the endpoint override for the duration of a test
+        /// and restores the previous value on drop, so a panic cannot leak the
         /// value into another test. The lock it carries is the one this test
         /// binary serialises every environment mutation with.
         struct EndpointEnv {

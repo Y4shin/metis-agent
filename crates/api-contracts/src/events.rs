@@ -32,6 +32,16 @@ use tokio::sync::broadcast;
 use crate::cancel::InFlight;
 use crate::proto::metis::v1::{self, EventKind};
 
+/// How long a stream may carry nothing before it carries a heartbeat.
+///
+/// One definition for both services that open streams, because the two must
+/// agree: the daemon's own service and the client's in-process skeleton default
+/// to this constant, and two copies can drift while one cannot. The interval
+/// belongs to the service that opens the stream rather than to the serving
+/// loop, so a caller that needs another pace sets one; idle detection is not
+/// implemented, because the heartbeat is a pace, not a probe.
+pub const HEARTBEAT_DEFAULT: Duration = Duration::from_secs(15);
+
 /// Why a cursor cannot be served.
 ///
 /// One value covers both ways a cursor expires, because a caller's answer is

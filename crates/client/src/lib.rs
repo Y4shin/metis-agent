@@ -52,16 +52,12 @@ use api_contracts::proto::metis::v1::{
     CancelRequest, EchoRequest, PairRequest, StreamEventsRequest,
 };
 use api_contracts::request::{self, RequestId};
-use api_contracts::transport;
+use api_contracts::transport::{self, ENDPOINT_ENV};
 use connectrpc::ConnectError;
 use connectrpc::client::{CallOptions, ClientConfig, SharedHttp2Connection};
 use http::HeaderMap;
 
 use crate::credential::Backend;
-
-/// The environment variable that points the local client at a non-default
-/// endpoint. The daemon effort binds the same variable.
-const ENDPOINT_ENV: &str = "METIS_ENDPOINT";
 
 /// The first private base the default endpoint is derived from. The daemon
 /// effort reads the same variable.

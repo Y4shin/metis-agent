@@ -32,17 +32,24 @@ use crate::state::Store;
 
 /// How long a stream may carry nothing before it carries a heartbeat.
 ///
-/// A stream is configured with the interval rather than the interval being a
-/// constant of the serving loop, so a test sets a short one instead of waiting
-/// fifteen seconds. Idle detection is not implemented: the heartbeat is a pace,
-/// not a probe.
-pub const HEARTBEAT_DEFAULT: Duration = Duration::from_secs(15);
+/// The one definition is [`api_contracts::events::HEARTBEAT_DEFAULT`], which the
+/// client's skeleton uses too; it is re-exported here because this is the path
+/// the daemon's own callers and tests name. A stream is configured with the
+/// interval rather than the interval being a constant of the serving loop, so a
+/// test sets a short one instead of waiting fifteen seconds. Idle detection is
+/// not implemented: the heartbeat is a pace, not a probe.
+pub use api_contracts::events::HEARTBEAT_DEFAULT;
 
 /// How many events the daemon's ring holds before the oldest is dropped.
 ///
 /// The window is what a reconnect can resume from; the map's resync rule is
 /// that an expired cursor means a fresh stream, which is why the number is a
 /// capacity rather than a retention time.
+///
+/// The skeleton in `client` declares its own window as 64 and deliberately not
+/// this number, because it is test support and a window small enough to fill
+/// from a test is what makes a drop reachable there. The two capacities are not
+/// meant to agree, so neither is derived from the other.
 const EVENT_CAPACITY: usize = 1024;
 
 /// The daemon's service: the store it pairs against, the preshared key that

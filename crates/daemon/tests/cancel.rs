@@ -258,6 +258,11 @@ async fn wait_for(what: &str, condition: impl Fn() -> bool) {
 /// been published, which no buffer between the ring and a reader can retain. It
 /// is bounded, so a capacity far beyond the bound fails loudly instead of
 /// hanging.
+///
+/// The helper is deliberately duplicated, with the same 10 000 bound, in
+/// `crates/client/tests/stream.rs`: the two live in separate test binaries over
+/// separate surfaces (the daemon's refusal here, the wrapper's drop there), and
+/// sharing one helper would mean a test-support crate both binaries depend on.
 fn stall_past_the_bound(ring: &Ring) {
     ring.publish("daemon", EventKind::Event, "{}");
     while ring.since(0, &["daemon"]).len() * 2 > ring.latest_id() as usize {
