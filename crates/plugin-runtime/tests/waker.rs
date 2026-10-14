@@ -32,13 +32,20 @@ fn poll_once(call: &mut PluginCall) -> Poll<Result<Vec<u8>, CallError>> {
 }
 
 /// Every owning waker reference the host handed out was released.
-fn assert_balanced(host: &Host, what: &str) {
-    let (handed_out, released, late_wakes) = host.waker_counts();
+fn assert_references_balanced(host: &Host, what: &str) {
+    let (handed_out, released, _) = host.waker_counts();
     assert!(handed_out > 0, "{what}: no waker reference was handed out");
     assert_eq!(
         handed_out, released,
         "{what}: every owning reference the host handed out is released"
     );
+}
+
+/// The references balance and no wake arrived late, which is what a call that is
+/// not the wake-after-drop case must show.
+fn assert_balanced(host: &Host, what: &str) {
+    assert_references_balanced(host, what);
+    let (_, _, late_wakes) = host.waker_counts();
     assert_eq!(late_wakes, 0, "{what}: no wake arrived after a drop");
 }
 
@@ -131,4 +138,57 @@ fn a_full_call_a_cancelled_call_and_an_abandoned_call_all_balance() {
     );
     drop(call);
     assert_balanced(&host, "an abandoned call");
+}
+
+#[test]
+fn a_wake_after_the_future_was_dropped_names_the_call_it_belongs_to() {
+    let (host, instance) = new_instance();
+
+    // A call that keeps one clone of the waker it is polled with and stays
+    // pending. The clone belongs to the plugin, so it outlives the call.
+    let mut deferred = instance
+        .invoke("tool.deferred", 41, &request("hold"))
+        .expect("the future starts");
+    assert!(matches!(poll_once(&mut deferred), Poll::Pending));
+    drop(deferred);
+    assert!(
+        host.wakes_after_drop().is_empty(),
+        "no wake has been delivered yet"
+    );
+
+    // A later call wakes that kept clone. The call it belongs to is gone, so the
+    // record has to name it.
+    let mut woken = instance
+        .invoke("tool.wake_deferred", 42, &request("wake"))
+        .expect("the future starts");
+    match poll_once(&mut woken) {
+        Poll::Ready(Ok(body)) => {
+            assert_eq!(support::decode(&body).echo, "woke the deferred call")
+        }
+        Poll::Ready(Err(error)) => panic!("the waker capability answers: {error:?}"),
+        Poll::Pending => panic!("the waker capability answers on its first poll"),
+    }
+
+    assert_eq!(
+        host.wakes_after_drop(),
+        vec![41],
+        "the record names the call whose future was dropped"
+    );
+    assert_eq!(
+        host.waker_counts().2,
+        1,
+        "one wake arrived after a drop, and it is counted"
+    );
+    assert!(
+        !host
+            .ordering()
+            .iter()
+            .any(|event| event.contains("after the future was dropped")),
+        "a counted violation, not an ordering-ledger entry: {:?}",
+        host.ordering()
+    );
+
+    // The late wake consumed the reference the plugin was keeping, so the
+    // accounting closes with it.
+    assert_references_balanced(&host, "a wake after the future was dropped");
 }

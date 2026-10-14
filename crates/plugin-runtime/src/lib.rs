@@ -240,9 +240,9 @@ struct HostInner {
     /// visible instead of silent.
     wakers_handed_out: AtomicUsize,
     wakers_released: AtomicUsize,
-    /// How many wakes arrived after a future was dropped, which is a counted
-    /// violation rather than an ordering-ledger entry.
-    wakes_after_drop: AtomicUsize,
+    /// The request ids of the wakes that arrived after that call's future was
+    /// dropped, in arrival order.
+    wakes_after_drop: Mutex<Vec<u64>>,
 }
 
 /// One service the plugin asked for and the host has not answered.
@@ -367,8 +367,19 @@ impl Host {
         (
             self.inner.wakers_handed_out.load(SeqCst),
             self.inner.wakers_released.load(SeqCst),
-            self.inner.wakes_after_drop.load(SeqCst),
+            self.wakes_after_drop().len(),
         )
+    }
+
+    /// The request ids of the wakes that arrived after that call's future was
+    /// dropped, in arrival order.
+    ///
+    /// A wake after a drop is a counted violation rather than a step in the
+    /// ordering ledger: it is recorded here, against the call it belongs to,
+    /// instead of being appended to the ledger, which carries the steps unload
+    /// safety depends on.
+    pub fn wakes_after_drop(&self) -> Vec<u64> {
+        self.inner.wakes_after_drop.lock().unwrap().clone()
     }
 
     pub(crate) fn order(&self, event: impl Into<String>) {
@@ -524,6 +535,7 @@ impl Instance {
                 waker: Mutex::new(None),
                 dropped: AtomicBool::new(false),
                 counts: Arc::clone(&self.host.inner),
+                request_id,
             }),
         })
     }
@@ -644,6 +656,12 @@ struct CallState {
     /// Whether the plugin's future has been dropped.
     dropped: AtomicBool,
     counts: Arc<HostInner>,
+    /// The id of the call this state belongs to.
+    ///
+    /// It is here so that a record made after the future was dropped can name
+    /// the call it belongs to: the plugin's clone outlives the call, and the id
+    /// is the only name the call still has.
+    request_id: u64,
 }
 
 /// One call in flight: the plugin's future, driven by the caller's runtime.
@@ -756,6 +774,18 @@ impl Drop for PluginCall {
 
 // --- the host waker -------------------------------------------------------
 
+/// Records a wake that arrived after the call's future was dropped, naming the
+/// call it belongs to.
+///
+/// It is a counted violation rather than a step in the ordering ledger: the
+/// ledger carries what unload safety depends on, and a late wake from a clone
+/// the plugin kept depends on nothing. The call's id is what makes the record
+/// name something rather than just tally.
+fn record_late_wake(state: &CallState) {
+    let mut record = state.counts.wakes_after_drop.lock().unwrap();
+    record.push(state.request_id);
+}
+
 unsafe extern "C" fn waker_clone(waker: *const MetisWaker) -> MetisWaker {
     // SAFETY: the waker's data is an `Arc<CallState>` this crate built, and the
     // handle is borrowed for the poll.
@@ -780,9 +810,10 @@ unsafe extern "C" fn waker_wake(waker: MetisWaker) {
     let state = unsafe { Arc::from_raw(waker.data as *const CallState) };
     state.counts.wakers_released.fetch_add(1, SeqCst);
     if state.dropped.load(SeqCst) {
-        // A wake may arrive after the future was dropped. It is recorded rather
-        // than dereferenced into anything that no longer exists.
-        state.counts.wakes_after_drop.fetch_add(1, SeqCst);
+        // A wake may arrive after the future was dropped. It is recorded, with
+        // the call it belongs to, rather than dereferenced into anything that
+        // no longer exists.
+        record_late_wake(&state);
         return;
     }
     if let Some(waker) = state.waker.lock().unwrap().take() {
@@ -795,7 +826,7 @@ unsafe extern "C" fn waker_wake_by_ref(waker: *const MetisWaker) {
     let data = unsafe { (*waker).data };
     let state = unsafe { &*(data as *const CallState) };
     if state.dropped.load(SeqCst) {
-        state.counts.wakes_after_drop.fetch_add(1, SeqCst);
+        record_late_wake(state);
         return;
     }
     if let Some(waker) = state.waker.lock().unwrap().take() {
