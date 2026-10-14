@@ -466,6 +466,263 @@ pub fn pipe_descriptor_sddl(user_sid: &str) -> String {
     format!("D:P(D;;GA;;;NU)(A;;GA;;;{user_sid})(A;;GA;;;SY)")
 }
 
+/// Serve a Connect router over a named pipe.
+///
+/// This is the Windows local front-end, beside [`serve_uds`] and
+/// [`serve_tcp`]. The pipe is a duplex byte-mode pipe, and every accepted
+/// instance is handed to the same private connection body the other front-ends
+/// use, so serving over a pipe is not a second connection path.
+///
+/// # Errors
+///
+/// Returns the descriptor, creation, or accept error. Accepting runs until the
+/// task is dropped, exactly as the other front-ends do.
+#[cfg(windows)]
+pub async fn serve_pipe(name: PipeName, router: Router) -> io::Result<()> {
+    serve_pipe_service(name, ConnectRpcService::from_arc(Arc::new(router))).await
+}
+
+/// Serve an already built Connect service over a named pipe.
+///
+/// The access control is the same one [`serve_pipe`] applies, because it is the
+/// same accept loop: a caller reaches this instead of `serve_pipe` when it
+/// mounted an interceptor chain, which lives on the service rather than on the
+/// router.
+///
+/// One instance exists at a time, and the first one carries
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a squatter holding the name makes the
+/// daemon fail loudly instead of quietly coexisting with it. Each instance is
+/// created with the security descriptor the daemon's own account is allowed to
+/// reach, and with remote clients rejected.
+///
+/// # Errors
+///
+/// Returns the descriptor, creation, or accept error. Accepting runs until the
+/// task is dropped.
+#[cfg(windows)]
+pub async fn serve_pipe_service(
+    name: PipeName,
+    service: ConnectRpcService<Router>,
+) -> io::Result<()> {
+    let descriptor = PipeSecurityDescriptor::for_this_account()?;
+    let service = Arc::new(service);
+    let mut first = true;
+    loop {
+        // The next instance is created after this one connected, so the
+        // listener holds exactly one unconnected instance at a time. A second
+        // client arriving in that window is told the pipe is busy rather than
+        // being served by a second connection path.
+        let server = create_pipe_instance(&name, &descriptor, first)?;
+        first = false;
+        server.connect().await?;
+        let service = Arc::clone(&service);
+        tokio::spawn(async move {
+            if let Err(err) = serve_connection(server, (*service).clone()).await {
+                eprintln!("local pipe connection ended with error: {err}");
+            }
+        });
+    }
+}
+
+/// Create one pipe instance with the daemon's descriptor, rejecting remote
+/// clients.
+///
+/// The security attributes are built here rather than in the accept loop, so
+/// the pointer they carry never lives across an await point and the served
+/// future stays `Send`.
+#[cfg(windows)]
+fn create_pipe_instance(
+    name: &PipeName,
+    descriptor: &PipeSecurityDescriptor,
+    first: bool,
+) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    // SAFETY: the attributes point at a `SECURITY_ATTRIBUTES` that is alive for
+    // the call and whose descriptor outlives it, and `CreateNamedPipeW` copies
+    // what it needs before returning.
+    unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(first)
+            // Remote clients are rejected by default in tokio; the flag is
+            // stated here because it is the boundary, not a default to
+            // inherit: the pipe is reachable over SMB whenever the server
+            // service runs, and a remote caller with the daemon account's
+            // credentials carries the same user SID as the daemon.
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(
+                name.as_str(),
+                std::ptr::from_mut(&mut attributes).cast(),
+            )
+    }
+}
+
+/// Build an h2c client connection over a named pipe, lazily on first use.
+///
+/// The connector is the shape [`uds_transport`] uses: a plain
+/// `tower::service_fn` that opens the pipe. The authority is the same
+/// [`local_authority`] the Unix socket transport names, because this is the
+/// same local IPC surface.
+#[cfg(windows)]
+pub fn pipe_transport(name: &PipeName) -> connectrpc::client::Http2Connection {
+    let name = name.as_str().to_owned();
+    let connector = tower::service_fn(move |_uri: http::Uri| {
+        let name = name.clone();
+        async move {
+            let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(name)?;
+            Ok::<_, io::Error>(TokioIo::new(stream))
+        }
+    });
+    connectrpc::client::Http2Connection::lazy_with_connector(connector, local_authority())
+}
+
+/// The pipe's security descriptor, released when it is dropped.
+#[cfg(windows)]
+struct PipeSecurityDescriptor(windows_sys::Win32::Security::PSECURITY_DESCRIPTOR);
+
+// SAFETY: the value owns a descriptor nothing else points at, and it is only
+// read by `CreateNamedPipeW`. Moving it to another thread moves that ownership
+// with it; it is deliberately not `Sync`, because two threads must not read the
+// raw pointer at once while the owner might free it.
+#[cfg(windows)]
+unsafe impl Send for PipeSecurityDescriptor {}
+
+#[cfg(windows)]
+impl PipeSecurityDescriptor {
+    /// The descriptor for the account this process runs as.
+    ///
+    /// The SID is read from this process's own token rather than configured,
+    /// so the descriptor always names the account that owns the daemon. The
+    /// descriptor itself is [`pipe_descriptor_sddl`].
+    fn for_this_account() -> io::Result<Self> {
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
+
+        let sddl = pipe_descriptor_sddl(&user_sid_string()?);
+        let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let mut size = 0u32;
+        // SAFETY: `wide` is a NUL-terminated UTF-16 string and both out
+        // parameters are valid for the call. The buffer the call returns is a
+        // self-relative descriptor owned by this value and released with
+        // `LocalFree` on drop.
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                &mut size,
+            )
+        };
+        if converted == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(descriptor))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PipeSecurityDescriptor {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: the pointer is the descriptor the SDDL conversion
+            // returned, and the documentation says to release it with
+            // `LocalFree`. It is released exactly once, here.
+            unsafe { windows_sys::Win32::Foundation::LocalFree(self.0.cast()) };
+        }
+    }
+}
+
+/// The account this process runs as, as a SID string.
+///
+/// The SID comes from the process's own token, so the descriptor names the
+/// daemon's account whether the daemon runs as a user or as a service account.
+#[cfg(windows)]
+fn user_sid_string() -> io::Result<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// A token handle, closed when it goes out of scope.
+    struct Token(HANDLE);
+
+    impl Drop for Token {
+        fn drop(&mut self) {
+            // SAFETY: the handle was opened by `OpenProcessToken` and is closed
+            // exactly once, here.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo-handle for the current process is always valid and
+    // needs no closing, and the out parameter is valid for the call.
+    let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    if opened == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = Token(token);
+
+    // The first call asks for the size of the buffer `TokenUser` needs: a null
+    // buffer with a zero length is the documented way to ask, and it fails with
+    // `ERROR_INSUFFICIENT_BUFFER` while reporting the length.
+    let mut needed = 0u32;
+    // SAFETY: a null buffer with a zero length writes nothing but the length.
+    unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut needed) };
+    if needed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut buffer = vec![0u8; needed as usize];
+    // SAFETY: the buffer is `needed` bytes, the size the call asked for, and
+    // `TokenUser` writes a `TOKEN_USER` at its start.
+    let read = unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the buffer holds the `TOKEN_USER` the call wrote, and the read is
+    // unaligned because a byte buffer carries no alignment guarantee.
+    let user: TOKEN_USER = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast()) };
+
+    let mut sid: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `user.User.Sid` points into `buffer`, which is alive here, and the
+    // out parameter is valid for the call. The string it returns is released
+    // with `LocalFree` below.
+    let converted = unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid) };
+    if converted == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut length = 0usize;
+    // SAFETY: `sid` is the NUL-terminated string the conversion returned.
+    while unsafe { *sid.add(length) } != 0 {
+        length += 1;
+    }
+    // SAFETY: the string is `length` UTF-16 units long, all of them initialized.
+    let string = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(sid, length)) };
+    // SAFETY: `sid` is the pointer the conversion returned, released exactly
+    // once here, after the last read of it.
+    unsafe { LocalFree(sid.cast()) };
+    Ok(string)
+}
+
 /// The mode a socket and its directory carry when no group is configured:
 /// only the daemon's own user may reach it.
 pub const SOCKET_MODE_PRIVATE: u32 = 0o700;

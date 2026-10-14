@@ -50,6 +50,7 @@ dependencies = [
  "serde",
  "tokio",
  "tower",
+ "windows-sys",
 ]
 
 [[package]]
