@@ -87,3 +87,33 @@ Worker's note, recorded before landing. The working branch is
   offsets, the magic, the version and the domain tag in
   `crates/plugin-runtime/tests/support/signer.rs` rather than calling the
   verifier's constants, and the vectors are compared against it on every run.
+
+Landing note. Merged with `git merge --no-ff`, no conflict, no source edit at
+landing.
+
+- Working branch `ticket/bundle-verification` (`b68f491`, five `wip:` commits)
+  merged into `task/bundle-verification` as merge commit `7306244`, parents
+  `b30efde` (landing branch) and `b68f491`. The branch is deleted afterwards.
+- The landed tree is byte-identical to the verified tip: `git diff b68f491 HEAD`
+  is empty, so every file landed exactly as the TDD and verify steps saw it.
+- Verification state carried into the landed tree, recorded and not re-run:
+  verify returned PASS at `b68f491`. `cargo fmt --check` and
+  `cargo clippy --all-targets -- -D warnings` clean; `cargo test` 262 passed, 0
+  failed, 8 ignored; `cargo test -p plugin-runtime --test bundle_verification` 39
+  passed, 0 failed, 1 ignored. The only diagnostic is the pre-existing
+  `plugin-contract` C `_FORTIFY_SOURCE` build-script warning, present on the
+  landing branch too.
+- The deviation report for this ticket is committed alongside this note, under
+  `deviation-reports/bundle-verification.md`. `docs/tasks/state.yaml` (the
+  orchestration task pointer) stays modified and unstaged, as in earlier
+  landings; `workflow_state` stays `ready` because finalize-task owns it and the
+  effort archive.
+- One non-blocking documentation defect is carried as a residual risk: the
+  recorded dependency-count pipeline in contract section 17.7 and in the note
+  above, `cargo tree -p plugin-runtime --edges normal --prefix none | sort -u |
+  wc -l`, over-counts because `cargo tree` prints a repeated subtree as
+  `name vX.Y.Z (*)` and those marker lines survive `sort -u`. Run literally it
+  prints 77 before and 101 after, against the recorded 66 and 85. The recorded
+  figures are the correct counts of distinct crates (85 - 66 = 19 added, which
+  verify reproduced), so the substantive claim holds; the pipeline needs
+  `| grep -v '(*)'` before the numbers are quoted.
