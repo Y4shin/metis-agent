@@ -13,7 +13,16 @@
 //!
 //! The remote front-end is off unless the operator names a bind address:
 //! `REMOTE_ADDR_ENV` carries an `IP:port` literal, `resolve_remote_addr` reads
-//! it, and there is no default address to fall back to.
+//! it, and there is no default address to fall back to. The remote front-end is
+//! plaintext, so a reverse proxy terminates TLS in front of it: the TCP accept
+//! loop stamps the peer it accepted into each request (which is what
+//! [`RequestContext::peer_addr`] returns), reads
+//! [`TRUSTED_PROXIES_ENV`](crate::proxy::TRUSTED_PROXIES_ENV) where it binds,
+//! and warns once when the address it bound is exposed and no proxy is named.
+//! Which forwarded headers are believed is `crate::proxy`'s rule, not this
+//! module's.
+//!
+//! [`RequestContext::peer_addr`]: connectrpc::RequestContext::peer_addr
 //!
 //! The local front-end carries its access control itself, because the
 //! operating system enforces it: `serve_uds` creates the socket's directory
@@ -35,6 +44,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use hyper_util::service::TowerToHyperService;
 use tokio::io::{AsyncRead, AsyncWrite};
+
+use crate::proxy::{TrustedProxies, listener_warning};
 
 /// Serve a Connect router over any asynchronous bidirectional stream.
 ///
@@ -62,18 +73,73 @@ where
 /// Serve an already built Connect service over one connection.
 ///
 /// This is the same body [`serve_stream`] uses. It exists for the caller that
-/// mounted an interceptor chain: `connectrpc` attaches interceptors to
-/// [`ConnectRpcService`], not to a [`Router`], so an authorization policy can
-/// only be served through the service it was installed on.
-async fn serve_connection<S>(stream: S, service: ConnectRpcService<Router>) -> io::Result<()>
+/// mounted an interceptor chain or stamped the peer: `connectrpc` attaches
+/// interceptors to [`ConnectRpcService`], not to a [`Router`], so an
+/// authorization policy can only be served through the service it was
+/// installed on, and [`PeerStamped`] wraps a service the same way.
+async fn serve_connection<S, P>(stream: S, service: P) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    P: tower::Service<
+            http::Request<hyper::body::Incoming>,
+            Response = http::Response<connectrpc::ConnectRpcBody>,
+            Error = std::convert::Infallible,
+        > + Clone
+        + Send
+        + 'static,
+    P::Future: Send + 'static,
 {
     let builder = AutoBuilder::new(TokioExecutor::new());
     builder
         .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service))
         .await
         .map_err(io::Error::other)
+}
+
+/// A Connect service that stamps the peer of the connection into every request.
+///
+/// `connectrpc` reads the peer out of the request extensions: `PeerAddr` is the
+/// type its own accept loop inserts, and [`RequestContext::peer_addr`] is what a
+/// handler reads. These front-ends own their accept loop, and this is where the
+/// stamp goes, once per connection rather than in every handler.
+///
+/// The stamp is the address the connection came from, never a forwarded one:
+/// what a proxy reports is read by the proxy rule, not by the transport.
+///
+/// [`RequestContext::peer_addr`]: connectrpc::RequestContext::peer_addr
+#[derive(Clone)]
+struct PeerStamped<P> {
+    inner: P,
+    peer: SocketAddr,
+}
+
+impl<P> PeerStamped<P> {
+    fn new(inner: P, peer: SocketAddr) -> Self {
+        Self { inner, peer }
+    }
+}
+
+impl<P, B> tower::Service<http::Request<B>> for PeerStamped<P>
+where
+    P: tower::Service<http::Request<B>>,
+{
+    type Response = P::Response;
+    type Error = P::Error;
+    type Future = P::Future;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: http::Request<B>) -> Self::Future {
+        request
+            .extensions_mut()
+            .insert(connectrpc::PeerAddr(self.peer));
+        self.inner.call(request)
+    }
 }
 
 /// Serve a Connect router over a Unix domain socket.
@@ -152,8 +218,9 @@ pub fn uds_transport(path: impl Into<std::path::PathBuf>) -> connectrpc::client:
 /// The listener is bound here, so a requested port of `0` is resolved by the
 /// operating system. Each accepted stream is handed to the shared connection
 /// body on its own task, carrying one service built from the router. The
-/// transport is plaintext: TLS and the proxy trust rule belong to their own
-/// tickets.
+/// transport is plaintext: a reverse proxy terminates TLS in front of it, and
+/// [`TRUSTED_PROXIES_ENV`](crate::proxy::TRUSTED_PROXIES_ENV) names the proxies
+/// whose forwarded headers are read.
 ///
 /// # Errors
 ///
@@ -186,7 +253,9 @@ pub async fn serve_tcp_listener(
 ///
 /// The listener is bound here, so a requested port of `0` is resolved by the
 /// operating system, exactly as [`serve_tcp`] resolves it. The transport is
-/// plaintext: TLS and the proxy trust rule belong to their own tickets.
+/// plaintext: a reverse proxy terminates TLS in front of it, and
+/// [`TRUSTED_PROXIES_ENV`](crate::proxy::TRUSTED_PROXIES_ENV) names the proxies
+/// whose forwarded headers are read.
 ///
 /// # Errors
 ///
@@ -208,19 +277,32 @@ pub async fn serve_tcp_service(
 /// chain, which lives on the service rather than on the router: a remote
 /// listener that enforces a credential policy mounts a service.
 ///
+/// The loop also carries the proxy rule's front-end half. It resolves
+/// [`TRUSTED_PROXIES_ENV`](crate::proxy::TRUSTED_PROXIES_ENV) where it binds, so
+/// a value this build cannot read refuses the bind rather than being ignored,
+/// it warns once, before accepting, when the bound address is exposed and no
+/// proxy is named, and it stamps each accepted peer into that connection's
+/// requests so a handler reads the address the connection came from.
+///
 /// # Errors
 ///
-/// Returns the accept error. Accepting runs until the task is dropped.
+/// Returns the accept error, or the configuration error when the trusted-proxy
+/// set cannot be read. Accepting runs until the task is dropped.
 pub async fn serve_tcp_listener_service(
     listener: tokio::net::TcpListener,
     service: ConnectRpcService<Router>,
 ) -> io::Result<()> {
+    let trusted = TrustedProxies::resolve().map_err(io::Error::other)?;
+    if let Some(warning) = listener_warning(listener.local_addr()?, &trusted) {
+        eprintln!("metis: {warning}");
+    }
     let service = Arc::new(service);
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         let service = Arc::clone(&service);
         tokio::spawn(async move {
-            if let Err(err) = serve_connection(stream, (*service).clone()).await {
+            let stamped = PeerStamped::new((*service).clone(), peer);
+            if let Err(err) = serve_connection(stream, stamped).await {
                 eprintln!("remote connection ended with error: {err}");
             }
         });
@@ -568,6 +650,14 @@ pub enum ConfigError {
         /// The value it held.
         value: String,
     },
+    /// [`TRUSTED_PROXIES_ENV`](crate::proxy::TRUSTED_PROXIES_ENV) names
+    /// something that is not an IP address.
+    InvalidTrustedProxy {
+        /// The variable that was read.
+        variable: &'static str,
+        /// The value it held.
+        value: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -589,6 +679,12 @@ impl std::fmt::Display for ConfigError {
             Self::UnknownSocketGroup { variable, value } => {
                 write!(f, "{variable} names no group on this host: {value:?}")
             }
+            Self::InvalidTrustedProxy { variable, value } => {
+                write!(
+                    f,
+                    "{variable} names something that is not an IP address: {value:?}"
+                )
+            }
         }
     }
 }
@@ -600,6 +696,7 @@ impl std::error::Error for ConfigError {
             Self::RemoteBind { source, .. } => Some(source),
             Self::SocketAcl { source, .. } => Some(source),
             Self::UnknownSocketGroup { .. } => None,
+            Self::InvalidTrustedProxy { .. } => None,
         }
     }
 }

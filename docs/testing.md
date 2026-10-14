@@ -139,6 +139,29 @@ is no default bind address, so remote access cannot be enabled by accident:
   anything else is a typed `ConfigError` naming the variable and the value
   rather than a silent disable.
 
+Reverse-proxy mode, documented in `crates/api-contracts/src/proxy.rs`,
+`crates/api-contracts/src/transport.rs` and `crates/daemon/tests/proxy.rs`.
+`METIS_TRUSTED_PROXIES` names the exact addresses whose forwarded headers are
+read, and there is no default: an absent or empty value trusts nobody.
+
+- `cargo test -p api-contracts --lib proxy` -- the rule's unit tests: an absent
+  or empty value names no proxy, a comma-separated list parses with whitespace
+  tolerated and does not trust loopback implicitly, and a malformed entry is the
+  typed `ConfigError::InvalidTrustedProxy` naming the variable and the value.
+  With the peer named, `x-forwarded-for` gives `Forwarded` with its left-most
+  entry and `x-forwarded-proto: https` gives `Encrypted`; the same headers from
+  an unnamed peer leave `Peer` and `Plaintext`. A missing peer gives no client
+  address and forwards nothing. `listener_warning` is `Some` on a non-loopback
+  address with no proxy named and `None` with a proxy named or on loopback,
+  `secret_warning` is `Some` on a plaintext client leg and `None` on an
+  encrypted one, and `WarnOnce` emits exactly one warning. The same run asserts
+  the TCP front-end refuses to bind when the configured set cannot be read.
+- `cargo test -p daemon --test proxy` -- over a real listener: the peer that
+  opened a TCP connection reaches a handler as `ctx.peer_addr()`, the local
+  socket reports no peer and forwards nothing even when the caller sends
+  forwarded headers, and the same forwarded header is accepted from a named
+  proxy and ignored from an unnamed one.
+
 Local access control and the identity declaration, documented in
 `crates/api-contracts` and `crates/client`. The access control is the operating
 system's, so a local client carries no credential; the declaration says which

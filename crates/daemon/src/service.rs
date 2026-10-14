@@ -18,7 +18,9 @@ use api_contracts::proto::metis::v1::{
     CancelRequest, CancelResponse, EchoRequest, EchoResponse, Event, PairRequest, PairResponse,
     StreamEventsRequest,
 };
+use api_contracts::proxy::{self, TrustedProxies, WarnOnce};
 use api_contracts::request::{self, EchoRequestId, RequestIdError};
+use api_contracts::transport::ConfigError;
 use connectrpc::{
     ConnectError, ConnectRpcService, ErrorCode, RequestContext, Response, Router, ServiceRequest,
     ServiceResult, ServiceStream,
@@ -59,6 +61,10 @@ pub struct Service {
     cancellations: Registry,
     /// The heartbeat interval of every stream this service opens.
     heartbeat: Duration,
+    /// The latch that keeps a per-call plaintext warning from repeating, one per
+    /// service: the warning is about this daemon's exposure, so it belongs to
+    /// the daemon rather than to a connection.
+    warnings: WarnOnce,
 }
 
 impl Service {
@@ -72,6 +78,7 @@ impl Service {
             ring: Ring::new(EVENT_CAPACITY),
             cancellations: Registry::new(),
             heartbeat,
+            warnings: WarnOnce::new(),
         }
     }
 
@@ -142,6 +149,19 @@ impl DaemonService for Service {
         ctx: RequestContext,
         request: ServiceRequest<'_, PairRequest>,
     ) -> Result<connectrpc::Response<PairResponse>, ConnectError> {
+        // The leg's exposure is a property of the connection rather than of the
+        // request, so it is judged before the call is refused for any other
+        // reason: a plaintext leg that carried the preshared key is what the
+        // operator is told about, once per process. A named proxy that says it
+        // terminated TLS is believed, because the transport has no way to see
+        // the leg in front of it and the proxy rule is the only account of it.
+        let trusted = TrustedProxies::resolve().map_err(refuse_trusted_proxies)?;
+        let peer = ctx.peer_addr().map(|addr| addr.ip());
+        let scheme = proxy::client_scheme(peer, &trusted, ctx.headers());
+        if let Some(warning) = proxy::secret_warning(scheme, peer) {
+            self.warnings.warn(&warning);
+        }
+
         let declared = identity::from_headers(ctx.headers()).map_err(refuse_identity)?;
         // A daemon with no configured key has nothing to compare a presented key
         // with, so pairing is closed rather than open to any key. The rest of the
@@ -271,6 +291,16 @@ fn refuse_cursor(error: CursorError) -> ConnectError {
 /// cancellable has lost the guarantee it asked for.
 fn refuse_request_id(error: RequestIdError) -> ConnectError {
     ConnectError::new(ErrorCode::InvalidArgument, error.to_string())
+}
+
+/// Refuse a pairing call this daemon cannot judge the exposure of.
+///
+/// The trusted-proxy set is read where the proxy rule is applied, so a value
+/// this build cannot read is an internal failure rather than an exposure
+/// decision made on configuration nobody could parse: a daemon that cannot say
+/// whether the key travelled in plaintext must not answer as if it could.
+fn refuse_trusted_proxies(error: ConfigError) -> ConnectError {
+    ConnectError::new(ErrorCode::Internal, error.to_string())
 }
 
 /// Map a pairing refusal onto the wire.
