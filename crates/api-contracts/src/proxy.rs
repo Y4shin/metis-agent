@@ -11,6 +11,14 @@
 //! restating the rule. The module sits beside `transport` because both the
 //! listener front-ends and the daemon's handlers reach `api-contracts`.
 
+use std::fmt;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use http::HeaderMap;
+
+use crate::transport::ConfigError;
+
 /// The environment variable that names the addresses trusted to send forwarded
 /// headers.
 ///
@@ -19,14 +27,6 @@
 /// trusted because an operator said so, never because it is loopback, is
 /// private, or happened to connect first.
 pub const TRUSTED_PROXIES_ENV: &str = "METIS_TRUSTED_PROXIES";
-
-use std::fmt;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use http::HeaderMap;
-
-use crate::transport::ConfigError;
 
 /// The header a reverse proxy appends the client's address to.
 const FORWARDED_FOR: &str = "x-forwarded-for";
