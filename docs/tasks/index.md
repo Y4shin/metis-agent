@@ -10,7 +10,6 @@ title: docs/tasks
 
 - metis-agent-core
 - metis-daemon
-- metis-foundations
 - metis-plugin-sdk
 - metis-plugins
 - metis-surfaces
@@ -18,3 +17,4 @@ title: docs/tasks
 ## Archived
 
 - metis-bootstrap
+- metis-foundations
