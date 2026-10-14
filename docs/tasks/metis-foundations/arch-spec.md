@@ -7,9 +7,12 @@ status: stable
 # arch-spec, metis-foundations
 
 Effort-wide architecture spec, shared by every ticket chain in this effort. Every
-ticket has landed, so the sections below are the measured record of what was
-built and the interface contracts the effort's consumers inherit. Later levels
-get their own sections added by the spec-reconciler when they become pending.
+ticket that ran has landed and the effort's frontier is empty, so the sections
+below are the measured record of what was built and the interface contracts the
+effort's consumers inherit. Each section folds in the divergences its ticket's
+committed deviation report recorded, and corrects in place the few places where
+the approved text named something that does not exist. The one ticket that never
+ran, `tls-and-client-trust`, was deprecated by ADR 0004 and has no section here.
 
 ## Source of truth for the target state
 
@@ -27,9 +30,14 @@ get their own sections added by the spec-reconciler when they become pending.
 
 ## Shared conventions
 
-- Ticket branches: landing branch `task/<ticket-slug>` off the previous ticket's
-  landing branch (`main` for the first), working branch `ticket/<ticket-slug>`.
-  Chains land in dependency-level order.
+- Ticket branches: landing branch `task/<ticket-slug>`, working branch
+  `ticket/<ticket-slug>`, deleted after the merge; chains land in
+  dependency-level order. The landing branch of a later ticket is created at
+  `main`'s tip when it does not exist, and `main` carries the merge afterwards;
+  the early chains stacked instead, so `plugin-abi-core` and
+  `contract-gate-hardening` merged into a landing branch that already carried
+  `contract-pipeline`. Each section's landing paragraph records the actual
+  parents.
 - Toolchain: devenv only (`devenv.nix`, `devenv.lock`). Rust nightly through
   rust-overlay, edition 2024, `resolver = "3"`. Add a tool by adding it to
   `devenv.nix` and running it as `devenv shell -- <cmd>`, matching the existing
@@ -43,9 +51,12 @@ get their own sections added by the spec-reconciler when they become pending.
   files stay as they are (see the `contract-pipeline` section).
 - Generated code is mounted, never edited; handwritten behaviour lives outside
   the generated trees. Generated trees are not excluded from fmt, clippy, or
-  test, they carry the measured allow set (`clippy::match_single_binding` is
-  load-bearing today, `clippy::derivable_impls` stays dormant until the
-  contract declares its first enum).
+  test; they carry the measured allow set. `clippy::match_single_binding` was
+  load-bearing from the first landing, because the generated fallback dispatcher
+  emits single-arm `match` blocks when the service has few methods.
+  `clippy::derivable_impls` is the allow the buffa mount reserved for the
+  contract's first enum, because raw buffa output writes an explicit `Default`
+  impl where a derive would do; `event-stream` landed that enum as `EventKind`.
 - Dependency posture: pin the pre-1.0 protocol pair exactly (`connectrpc` and
   `buffa` move together). Keep `plugin-contract` free of async runtimes and of
   serde in its C ABI surface.
@@ -75,14 +86,18 @@ run from the repository root and read the root `buf.yaml`.
   `rpc Echo(EchoRequest) returns (EchoResponse)`. Messages:
   `EchoRequest { string message = 1; }` and
   `EchoResponse { string message = 1; string received_at = 2; }`, where
-  `received_at` is an RFC 3339 string, mirroring the spike contract. A later
-  ticket (`event-stream`) appends `StreamEvents` and its messages; this ticket
-  reserves the shape without declaring them.
+  `received_at` is an RFC 3339 string, mirroring the spike contract. This ticket
+  reserved the shape without declaring a stream: `event-stream` landed
+  `StreamEvents`, `StreamEventsRequest`, `Event` and `EventKind`, and
+  `cancellation-and-slow-consumers` later appended `Cancel`, its two messages and
+  `CancelOutcome`, so the committed service carries four RPCs (`Echo`, `Pair`,
+  `Cancel` and the streaming `StreamEvents`).
 - Root `buf.yaml`, moved there by `contract-gate-hardening` from the
   `contracts/buf.yaml` this ticket landed (the old file is gone): module at
   `contracts/proto`, so `buf lint` covers the contract alone, `lint` STANDARD
-  with no exception yet (the `RPC_RESPONSE_STANDARD_NAME` exception arrives with
-  the streaming `Event` message, and is recorded then), `breaking` FILE. Every
+  with no exception at this landing (the scoped `RPC_RESPONSE_STANDARD_NAME`
+  exception for the streaming `StreamEvents` RPC arrived with `event-stream`, and
+  the root file carries it today), `breaking` FILE. Every
   buf command runs from the repository root and reads this one file, so the
   declared `breaking` category is the one the gate applies. `buf breaking`
   requires `--against-config buf.yaml` from the root: without it the working
@@ -114,10 +129,11 @@ run from the repository root and read the root `buf.yaml`.
   `#![allow(clippy::derivable_impls)]`. `src/connect.rs` does the same for the
   connect tree with `#![allow(clippy::match_single_binding)]`. The mount point
   is `crate::proto`, which is exactly what `buffa_module` names. Both allows are
-  present as planned, but only `clippy::match_single_binding` is load-bearing
-  (removing it fails clippy with three errors); `clippy::derivable_impls` stays
-  dormant until the contract declares its first enum, which `event-stream` adds
-  as `EventKind`.
+  present as planned, but only `clippy::match_single_binding` was load-bearing at
+  this landing (removing it fails clippy with three errors);
+  `clippy::derivable_impls` was dormant then, because the contract declared no
+  enum, and the contract got its first enum when `event-stream` landed
+  `EventKind`, which is the case the allow was reserved for.
 - `crates/api-contracts/Cargo.toml` dependencies: `connectrpc = "=0.9.1"` with
   `default-features = false, features = ["client", "server", "json"]`,
   `buffa = "=0.9.2"`, `serde = "1"`, `http = "1"`, `http-body = "1"`. The
@@ -421,10 +437,13 @@ compile-time assertions for seam 6; the script for seam 7.
   `size`-based presence predicate, never a direct field read past the prefix it
   knows, and it appends nothing to the layout. Per-capability version gating
   reads descriptor payloads, not the table. The predicate is named here as the
-  contract but is not exported today: this ticket landed `metis_read_prefix`
-  only, and `plugin-compatibility` adds the helper in-crate, which is additive
-  and changes no layout. A per-capability version gate check was written
-  against the fixture and removed before landing, because the fixture
+  contract but was not exported at this landing: this ticket landed
+  `metis_read_prefix`
+  only, and the helper landed later with `plugin-contract-v1`, as the `const fn`
+  presence predicates beside the prefix read, which `plugin-compatibility` then
+  consumed; it is additive and changes no layout. A per-capability version gate
+  check was written against the fixture and removed before landing, because the
+  fixture
   advertises no version a host would refuse, so the check could not fail;
   gating is `plugin-compatibility`'s subject.
 - `plugin-authoring-trait` lives in the same crate behind a feature gate named
@@ -641,8 +660,10 @@ literals with the `/tmp` conflict they open against `local-identity-and-acl`.
     endpoint and delegates to `with_endpoint`, which builds the local transport
     and connects. `with_endpoint` is the explicit endpoint constructor the plan
     named but did not export; it is async and returns a `Result` so it can
-    become an eager connect without an API break. On non-Unix there is no local
-    constructor until `windows-named-pipe` lands.
+    become an eager connect without an API break. On non-Unix there is still no
+    local constructor: `windows-named-pipe` landed the pipe front-end and its
+    connector but added no constructor to `client`, and that section records the
+    gap.
   - `pub async fn echo(&self, message: &str) -> Result<String, ClientError>`,
     performing the echo RPC over the local transport and returning the
     response's `message`.
@@ -778,9 +799,10 @@ the existing all-targets gates.
   manifest gains the runtime and transport crates only, never Tauri or a
   terminal UI crate. `Client` holds its transport privately with no public
   injection point, so every new transport extends `client` with its own
-  constructor rather than being supplied from outside; on non-Unix there is no
-  local constructor until `windows-named-pipe` lands, because `local()` and
-  `with_endpoint()` are `#[cfg(unix)]`.
+  constructor rather than being supplied from outside; on non-Unix there is still
+  no local constructor, because `local()` and `with_endpoint()` are `#[cfg(unix)]`
+  and `windows-named-pipe` landed no constructor for the pipe, which its section
+  records as a gap.
 - The skeleton service is test support. The daemon effort replaces it with the
   real service, keeps the transport module, and carries the same
   `#[allow(refining_impl_trait)]` on every `DaemonService` implementation that
@@ -2858,8 +2880,8 @@ footprint, and the example landing as a new file beside `echo.rs`.
     added no `EventKind` member. The enum is the
     contract's first, the one the buffa mount's dormant
     `clippy::derivable_impls` allow was reserved for.
-  - `Cancel` is **not** in this ticket; `cancellation-and-slow-consumers` appends
-    it.
+  - `Cancel` is **not** in this ticket; `cancellation-and-slow-consumers` appended
+    it (merge `9465e0d`), and its landed section is below.
 - `buf.yaml`: the `RPC_RESPONSE_STANDARD_NAME` exception this file already
   reserves for the streaming message, scoped as tightly as buf v2 allows, with
   `buf lint` green. Regeneration through `scripts/regenerate-contracts.sh`, so the
@@ -4261,8 +4283,10 @@ rationale.
   `## CI` note about the new job, and a gap list of seven bullets each naming its
   closing check; `docs/dev-env.md` gains a `Windows local transport` section with
   `METIS_ENDPOINT` as a pipe name on Windows, the endpoint rule and the access rule.
-  One line is still missing: `docs/testing.md` omits the cross-target toolchain
-  requirement, which the caller adds during the harvest rather than this ticket.
+  The harvest added the one line this ticket did not: `docs/testing.md` now states
+  the cross-target toolchain requirement beside the Windows commands, because the
+  check needs the rustup `nightly-2026-10-12` toolchain first on `PATH` and fails
+  `E0463` from `devenv shell` alone.
 
 ### Existing abstractions to use
 
@@ -4381,8 +4405,8 @@ the contract and workspace gates for the rest.
   effort that adds a Windows runner which runs tests can close every gap listed
   above without changing a signature. The cross-target check needs the rustup
   `nightly-2026-10-12` toolchain first on `PATH` and fails `E0463` from
-  `devenv shell` alone, and `docs/testing.md` does not yet state that requirement;
-  the caller adds the line during the harvest rather than this ticket.
+  `devenv shell` alone, and `docs/testing.md` now states that requirement beside
+  the Windows commands.
 - Recorded residuals, carried from the approved section: any process running as the
   daemon's account on the same machine, another logon session included, can connect,
   exactly as mode 0700 behaves on Unix; a low-integrity same-user process is not
@@ -4706,12 +4730,13 @@ refactor and the archive.
   the Windows half of the local transport, with the name rule, the descriptor, the
   front-end pair, the connector and the Windows compile gate, and it leaves the
   contract, the generated trees, the ABI, the plugin crates and the Unix and TCP
-  paths untouched. **The effort's frontier is now empty: all 18 tickets have landed
-  sections in this file.** What remains is the end-of-effort review, the coherence refactor
+  paths untouched. **The effort's frontier is now empty: every landed ticket has a
+  section in this file, and the deprecated `tls-and-client-trust`, which never ran,
+  has none.** What remains is the end-of-effort review, the coherence refactor
   and the archive, plus the gaps this landing records (the seven `docs/testing.md`
   lists with their closing checks, the local unverifiability of the CI job's
-  `daemon` half, and the cross-target toolchain requirement the harvest adds to
-  `docs/testing.md`). The earlier notes in this section carry the pending set at
+  `daemon` half, and the cross-target toolchain requirement, which the harvest has
+  since added to `docs/testing.md`). The earlier notes in this section carry the pending set at
   their own landing moment; this note carries the empty one.
 
 ---
@@ -4986,6 +5011,11 @@ thread-count tests for seam 8; the feature-gate test for seam 9.
   them: streaming them to a consumer is the daemon effort's work.
 - The C plugin keeps its ledgers in file-scope globals and assumes one instance
   per loaded library.
+- `crates/plugin-contract/src/authoring/traits.rs` doc-links `Call::service`,
+  which does not exist: the method is `Call::service_request`, linked correctly in
+  `call.rs` and `authoring/mod.rs`. No rustdoc broken-link deny is configured, so
+  nothing fails today, and the ticket's deviation report recorded the defect while
+  diffing.
 
 ### Interface contract
 

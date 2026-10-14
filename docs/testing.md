@@ -1,8 +1,38 @@
 # Testing
 
-> Status: the tooling is in place, but no product behaviour exists yet, so
-> there are no meaningful tests. The conventions below are what the bootstrap
-> established; revisit them when the first real behaviour lands.
+> Status: the commands below are the protocol the effort's chains and CI run.
+> Every one named there exists and is green on `main` except the Windows
+> compile-only job and the gaps `docs/testing.md` records in the Windows local
+> transport block.
+
+## Test protocol
+
+Run these always, in this order:
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
+
+Run if asked (by number):
+
+1. `buf lint`
+2. `buf breaking --against '.git#branch=main' --against-config buf.yaml`
+3. `bash scripts/regenerate-contracts.sh --check`
+4. `bash scripts/build-c-plugin.sh`
+5. `cargo check -p plugin-contract --no-default-features`
+6. `cargo run -p plugin-fixture --bin abi-harness`
+7. `bash scripts/regenerate-abi-header.sh --check`
+8. `cargo run -p client --example echo`
+9. `cargo run -p client --example events`
+
+Every command runs inside the devenv shell as `devenv shell -- <command>`, which
+is where `cargo`, `buf` and the rest exist. The three always-run commands are what
+`.github/workflows/ci.yml` gates on first, and numbers 1 to 7 are the contract and
+plugin ABI commands it runs after them; numbers 3 and 2 resolve their pinned
+plugins from the BSR, so they need the credential described in `docs/dev-env.md`.
+Numbers 8 and 9 are the two runnable walkthroughs, which CI does not run. The
+`## Run commands` section below documents the same commands per area, with what
+each one proves.
 
 ## Framework
 

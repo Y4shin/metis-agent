@@ -392,10 +392,11 @@ streaming assumptions before anything is built on top.
   `metis-stream-error` metadata, so the resync decision is not guesswork. A
   transport failure stays `ClientError::Call`, and what a caller should do about
   one is still open.
-- The endpoint override's variable name is a private constant in `client`, so the
-  daemon effort would restate the literal `METIS_ENDPOINT` unless the constant is
-  exported. Related: `serve_uds` has no shutdown path that unlinks its socket, so
-  a stopped listener leaves the socket file behind.
+- Closed by the coherence pass at the end of `metis-foundations`: the endpoint
+  override's literal has one owner now, `api_contracts::transport::ENDPOINT_ENV`,
+  and `client` and the tests reuse it instead of restating `METIS_ENDPOINT`. Still
+  open: `serve_uds` has no shutdown path that unlinks its socket, so a stopped
+  listener leaves the socket file behind.
 - Answered by `docs/plugin-contract.md` and the `plugin-contract-v1` ticket: the
   runtime dispatch method on the trait was chosen, so the four-arm vocabulary and
   the four-capability ceiling are removed and `metis-plugin-sdk` can pin the
