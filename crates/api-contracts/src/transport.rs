@@ -347,6 +347,125 @@ pub fn local_authority() -> http::Uri {
     "http://localhost".parse().expect("static authority")
 }
 
+/// The local pipe namespace prefix.
+///
+/// A pipe name under this prefix is on this machine. A name under another one,
+/// `\\server\pipe\name`, reaches a pipe over SMB, which is exactly what the
+/// Windows local transport never serves or connects.
+pub const PIPE_PREFIX: &str = r"\\.\pipe\";
+
+/// The pipe name the Windows local transport uses unless the operator names
+/// another one.
+pub const DEFAULT_PIPE_NAME: &str = "metis-daemon";
+
+/// The environment variable the pipe name override is read from.
+///
+/// It is the same variable the Unix endpoint override uses, so a host has one
+/// endpoint setting whichever local transport it runs: a socket path on Unix, a
+/// pipe name on Windows. An absent or empty value is the platform default.
+const PIPE_NAME_ENV: &str = "METIS_ENDPOINT";
+
+/// The longest pipe name `CreateNamedPipeW` documents: 256 characters.
+const PIPE_NAME_MAX_CHARS: usize = 256;
+
+/// A named pipe this machine serves the daemon on.
+///
+/// Every value comes from [`PipeName::parse`] or from the platform default, so
+/// a caller cannot reach the transport with a name that is not a local pipe
+/// path. Windows pipe names are not case sensitive, so the prefix is compared
+/// case-insensitively and the operator's own spelling is kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeName(String);
+
+impl PipeName {
+    /// Read a pipe name from a configured value.
+    ///
+    /// The value must stay in the local pipe namespace, must fit the 256
+    /// characters `CreateNamedPipeW` documents, and must carry no interior NUL,
+    /// which no pipe call can pass through a NUL-terminated name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidPipeName`] naming the variable and the
+    /// value for anything else, so a mistyped endpoint is loud rather than a
+    /// silent fall back to the default.
+    pub fn parse(value: &str) -> Result<Self, ConfigError> {
+        let refuse = || ConfigError::InvalidPipeName {
+            variable: PIPE_NAME_ENV,
+            value: value.to_owned(),
+        };
+        let prefix = value.get(..PIPE_PREFIX.len());
+        if !prefix.is_some_and(|prefix| prefix.eq_ignore_ascii_case(PIPE_PREFIX)) {
+            return Err(refuse());
+        }
+        if value.chars().count() > PIPE_NAME_MAX_CHARS {
+            return Err(refuse());
+        }
+        if value.contains('\0') {
+            return Err(refuse());
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    /// The name as it was given.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for PipeName {
+    /// The platform default: the local pipe namespace plus the fixed name.
+    fn default() -> Self {
+        Self(format!("{PIPE_PREFIX}{DEFAULT_PIPE_NAME}"))
+    }
+}
+
+impl std::fmt::Display for PipeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Resolve the pipe name from the environment.
+///
+/// This is the Windows half of the endpoint rule the Unix path applies through
+/// `METIS_ENDPOINT`: an absent or empty variable is the platform default, and a
+/// value is validated as a local pipe path.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::InvalidPipeName`] when the variable names something
+/// that is not a local pipe path.
+pub fn resolve_pipe_name() -> Result<PipeName, ConfigError> {
+    match env_value(PIPE_NAME_ENV) {
+        Some(value) => PipeName::parse(&value),
+        None => Ok(PipeName::default()),
+    }
+}
+
+/// The security descriptor the daemon's pipe is created with, as SDDL.
+///
+/// The string is the one the `windows-pipe-security` findings decided, kept in
+/// one function so the assembled value is asserted on any host:
+///
+/// - `D:P` makes the DACL protected, so an inherited ACE cannot widen it;
+/// - `(D;;GA;;;NU)` denies everything to the network-logon group, which every
+///   token carries when it logged on across the network;
+/// - `(A;;GA;;;{user_sid})` grants everything to the daemon's own account,
+///   which includes the `FILE_CREATE_PIPE_INSTANCE` right later instances need;
+/// - `(A;;GA;;;SY)` grants the same to Local System, so system tooling and
+///   inspection still work.
+///
+/// The ACL is not the remote boundary on its own: a remote caller using the
+/// same credentials carries the same user SID. The pipe mode
+/// `PIPE_REJECT_REMOTE_CLIENTS` is what rejects remote clients, and the Windows
+/// front-end sets it explicitly.
+#[must_use]
+pub fn pipe_descriptor_sddl(user_sid: &str) -> String {
+    format!("D:P(D;;GA;;;NU)(A;;GA;;;{user_sid})(A;;GA;;;SY)")
+}
+
 /// The mode a socket and its directory carry when no group is configured:
 /// only the daemon's own user may reach it.
 pub const SOCKET_MODE_PRIVATE: u32 = 0o700;
@@ -658,6 +777,13 @@ pub enum ConfigError {
         /// The value it held.
         value: String,
     },
+    /// The endpoint variable names something that is not a local pipe path.
+    InvalidPipeName {
+        /// The variable that was read.
+        variable: &'static str,
+        /// The value it held.
+        value: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -685,6 +811,9 @@ impl std::fmt::Display for ConfigError {
                     "{variable} names something that is not an IP address: {value:?}"
                 )
             }
+            Self::InvalidPipeName { variable, value } => {
+                write!(f, "{variable} is not a local pipe name: {value:?}")
+            }
         }
     }
 }
@@ -697,6 +826,7 @@ impl std::error::Error for ConfigError {
             Self::SocketAcl { source, .. } => Some(source),
             Self::UnknownSocketGroup { .. } => None,
             Self::InvalidTrustedProxy { .. } => None,
+            Self::InvalidPipeName { .. } => None,
         }
     }
 }
@@ -860,6 +990,222 @@ mod tests {
                 "the error names the value: {message}"
             );
             drop(env);
+        }
+    }
+
+    /// The Windows local transport's name and descriptor rules. Both are
+    /// platform-independent, so they run on every host rather than only where
+    /// the pipe itself can be created.
+    mod pipe {
+        use super::ENV_LOCK;
+        use crate::transport::{
+            ConfigError, DEFAULT_PIPE_NAME, PIPE_PREFIX, PipeName, pipe_descriptor_sddl,
+            resolve_pipe_name,
+        };
+        use std::ffi::OsString;
+        use std::sync::{MutexGuard, PoisonError};
+
+        /// The variable the pipe name override is read from. It is the same
+        /// variable the Unix endpoint override uses, so a host has one
+        /// endpoint setting whichever local transport it runs.
+        const ENDPOINT_ENV: &str = "METIS_ENDPOINT";
+
+        /// Holds one value of `METIS_ENDPOINT` for the duration of a test and
+        /// restores the previous value on drop, so a panic cannot leak the
+        /// value into another test. The lock it carries is the one this test
+        /// binary serialises every environment mutation with.
+        struct EndpointEnv {
+            previous: Option<OsString>,
+            _lock: MutexGuard<'static, ()>,
+        }
+
+        impl EndpointEnv {
+            fn set(value: &str) -> Self {
+                let lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+                let previous = std::env::var_os(ENDPOINT_ENV);
+                // Edition 2024 makes mutating the process environment unsafe
+                // because it is not thread-safe. Every test that touches the
+                // variable holds `ENV_LOCK`, so nothing races this write.
+                unsafe { std::env::set_var(ENDPOINT_ENV, value) };
+                Self {
+                    previous,
+                    _lock: lock,
+                }
+            }
+
+            fn unset() -> Self {
+                let lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+                let previous = std::env::var_os(ENDPOINT_ENV);
+                // SAFETY: see `set`.
+                unsafe { std::env::remove_var(ENDPOINT_ENV) };
+                Self {
+                    previous,
+                    _lock: lock,
+                }
+            }
+        }
+
+        impl Drop for EndpointEnv {
+            fn drop(&mut self) {
+                // SAFETY: see `set`; the lock is held until this guard is
+                // dropped.
+                unsafe {
+                    match &self.previous {
+                        Some(value) => std::env::set_var(ENDPOINT_ENV, value),
+                        None => std::env::remove_var(ENDPOINT_ENV),
+                    }
+                }
+            }
+        }
+
+        /// The platform default is the local pipe namespace plus the fixed
+        /// name: an operator configures nothing and gets a per-machine pipe.
+        #[test]
+        fn the_platform_default_is_the_local_pipe_name() {
+            let name = PipeName::default();
+            assert_eq!(name.as_str(), r"\\.\pipe\metis-daemon");
+            assert_eq!(
+                name.as_str(),
+                format!("{PIPE_PREFIX}{DEFAULT_PIPE_NAME}"),
+                "the default is assembled from the two public pieces"
+            );
+            assert_eq!(name.to_string(), name.as_str());
+            assert_eq!(
+                PipeName::parse(name.as_str())
+                    .expect("the default is a valid name")
+                    .as_str(),
+                name.as_str()
+            );
+        }
+
+        /// An override is accepted when it stays in the local pipe namespace.
+        /// The prefix is compared case-insensitively, because Windows pipe
+        /// names are not case sensitive, so an operator's spelling is kept as
+        /// they wrote it.
+        #[test]
+        fn a_local_pipe_override_is_accepted_whatever_its_case() {
+            let plain = PipeName::parse(r"\\.\pipe\custom").expect("a local pipe path is accepted");
+            assert_eq!(plain.as_str(), r"\\.\pipe\custom");
+
+            let shouted =
+                PipeName::parse(r"\\.\PIPE\Custom").expect("the prefix is case-insensitive");
+            assert_eq!(shouted.as_str(), r"\\.\PIPE\Custom");
+
+            // The whole documented length is allowed, and one character more
+            // is refused: `CreateNamedPipeW` takes at most 256 characters.
+            let longest = format!("{PIPE_PREFIX}{}", "a".repeat(256 - PIPE_PREFIX.len()));
+            assert_eq!(longest.chars().count(), 256);
+            assert!(PipeName::parse(&longest).is_ok(), "256 characters fit");
+        }
+
+        /// A remote path is refused rather than silently used: a pipe reachable
+        /// over SMB is exactly what this transport must not hand the daemon,
+        /// and it is what an operator would write by accident.
+        #[test]
+        fn a_remote_pipe_path_and_a_bare_name_are_refused() {
+            for value in [
+                r"\\server\pipe\metis",
+                "metis-daemon",
+                "/tmp/metis/daemon.sock",
+            ] {
+                let error = PipeName::parse(value).expect_err("only a local pipe path is accepted");
+                match &error {
+                    ConfigError::InvalidPipeName {
+                        variable,
+                        value: held,
+                    } => {
+                        assert_eq!(variable, &ENDPOINT_ENV);
+                        assert_eq!(held, value);
+                    }
+                    other => panic!("expected a pipe-name refusal, got {other:?}"),
+                }
+                let message = error.to_string();
+                assert!(
+                    message.contains(ENDPOINT_ENV),
+                    "the error names the variable: {message}"
+                );
+                assert!(
+                    message.contains(&format!("{value:?}")),
+                    "the error names the value: {message}"
+                );
+            }
+        }
+
+        /// The two length-and-content refusals: a name past the documented
+        /// 256 characters, and one carrying an interior NUL, which no pipe
+        /// call can carry through a NUL-terminated string.
+        #[test]
+        fn an_over_long_name_and_one_with_an_inner_nul_are_refused() {
+            let over_long = format!("{PIPE_PREFIX}{}", "a".repeat(256 - PIPE_PREFIX.len() + 1));
+            assert_eq!(over_long.chars().count(), 257);
+            assert!(
+                matches!(
+                    PipeName::parse(&over_long),
+                    Err(ConfigError::InvalidPipeName { .. })
+                ),
+                "257 characters are past the documented limit"
+            );
+
+            let nul = format!("{PIPE_PREFIX}metis\0daemon");
+            assert!(
+                matches!(
+                    PipeName::parse(&nul),
+                    Err(ConfigError::InvalidPipeName { .. })
+                ),
+                "an interior NUL is refused"
+            );
+        }
+
+        /// An absent variable and an empty one both mean the platform default:
+        /// the same rule `resolve_endpoint` applies on Unix, so an empty value
+        /// never becomes a nameless pipe.
+        #[test]
+        fn an_absent_or_empty_variable_is_the_platform_default() {
+            let absent = EndpointEnv::unset();
+            assert_eq!(
+                resolve_pipe_name()
+                    .expect("an absent variable is not an error")
+                    .as_str(),
+                PipeName::default().as_str()
+            );
+            drop(absent);
+
+            let empty = EndpointEnv::set("");
+            assert_eq!(
+                resolve_pipe_name()
+                    .expect("an empty value is treated as unset")
+                    .as_str(),
+                PipeName::default().as_str()
+            );
+            drop(empty);
+
+            let named = EndpointEnv::set(r"\\.\pipe\from-the-environment");
+            assert_eq!(
+                resolve_pipe_name()
+                    .expect("a local pipe path is accepted")
+                    .as_str(),
+                r"\\.\pipe\from-the-environment"
+            );
+            drop(named);
+
+            let _remote = EndpointEnv::set(r"\\server\pipe\metis");
+            let error = resolve_pipe_name().expect_err("a remote path is refused, not disabled");
+            assert!(
+                matches!(error, ConfigError::InvalidPipeName { .. }),
+                "expected a pipe-name refusal, got {error:?}"
+            );
+        }
+
+        /// The descriptor is assembled here, so the exact string an operator
+        /// and an auditor read is asserted on any host: a protected DACL, a
+        /// deny for the network-logon group, the daemon's own account, and
+        /// Local System.
+        #[test]
+        fn the_descriptor_names_the_daemon_account_and_denies_network_logons() {
+            assert_eq!(
+                pipe_descriptor_sddl("S-1-5-21-1-2-3-1001"),
+                "D:P(D;;GA;;;NU)(A;;GA;;;S-1-5-21-1-2-3-1001)(A;;GA;;;SY)"
+            );
         }
     }
 
