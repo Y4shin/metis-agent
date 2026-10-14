@@ -354,3 +354,11 @@ startup and released at shutdown, and there is no live teardown path. So a
 configuration change is a daemon restart, and the "new instance" that decision
 describes is the one the next startup creates. Nothing else in the decision
 changes.
+
+A third note, from the `compatibility-policy` grilling. The disabled placeholder
+recorded above is built from the manifest, so it has a name and a capability
+list. One bundle-level failure has no manifest to build it from: a container
+whose format version this build does not know cannot be parsed, so the archive is
+never opened. That case still degrades rather than aborting, and its placeholder
+is identified by the bundle's file name, carries no capabilities, and records
+that a newer daemon is needed.

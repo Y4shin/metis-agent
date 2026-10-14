@@ -81,10 +81,12 @@ CI.
   `linux-x86_64`. A bundle holds one or more targets at the producer's
   choice; the host selects its own target and refuses a bundle that does not
   carry it.
-- The manifest is `manifest.toml` at the bundle root. It declares the bundle
-  format version, the plugin identity and version, the ABI it needs, the
-  library path per target, and the capability list with each capability's
-  name, kind, version, and request and response schema.
+- The manifest is `manifest.toml` at the bundle root. It declares the plugin
+  identity and version, the ABI major and minimum minor it needs, the library
+  path per target, and the capability list with each capability's name, kind,
+  version, and request and response schema. The bundle format version is not
+  here: it lives in the container header, because it has to be readable before
+  the archive can be parsed or the signature located.
 - The capability list in the manifest is required and is generated from the
   same source as the plugin's own declaration, so the SDK's export macros and
   the SDK CLI write it at bundle time. A plugin built without the SDK
@@ -126,11 +128,42 @@ CI.
   generated header, the C static asserts, the fixture, the C plugin and the ABI
   harness, and it moves the `plugin-contract` table from "consumed only" to
   "amended here".
+- A bundle is signed. It is one file with a fixed-size prefix header carrying
+  the magic, the container format version, the suite, the offsets and lengths of
+  the chain and the signature, and the ZIP length, followed by the chain, the
+  payload signature, and the ZIP bytes. The chain is X.509 certificates over
+  Ed25519 keys, and the leaf key signs the payload with raw Ed25519 over the
+  header, the chain and the ZIP bytes. The daemon holds a root set and a
+  revocation list, both compiled in with empty defaults and modified through the
+  configuration file, and it recomputes every key id from the public key rather
+  than trusting a carried one. A signature that is absent or does not verify, or
+  an expired certificate, aborts start-up. The issuing tooling is standard, so
+  the SDK CLI signs the payload and embeds a chain it was given or issued with a
+  parent key.
+- Plugins load and initialise at daemon start-up and are released at shutdown.
+  There is no live teardown: one async function mirrors the load function and
+  unregisters, cancels or drains in-flight calls to the caller's deadline, calls
+  `shutdown`, drops every future, destroys the instance, unloads the library,
+  and reports the ledger. An instance that cannot be released stays mapped and is
+  reported rather than forced. Disable and enable are registry state only, so a
+  configuration change is a daemon restart. The daemon bounds its own shutdown
+  with a deadline.
+- The compatibility policy reads the landed ABI rule from the bundle's side. The
+  container format version is a single integer at a fixed offset after the magic
+  and must match exactly, since the container has no append-only size rule; an
+  unknown version refuses and degrades that bundle, with a placeholder named from
+  its file. The manifest states `abi_major` and a minimum `abi_minor`, and no
+  range syntax. The plugin's own version gates nothing. The checks run in one
+  order, magic, container version, signature and chain, manifest shape,
+  capability cross-check, target library, ABI, capability descriptor versions,
+  registration, and each failure reports itself rather than a later consequence.
 
 ## Fog
 
-- Trust roots: where the daemon keeps them, in what format, and how a
-  rotation or revocation is expressed. This is the signing task's to settle.
+- Trust roots and the revocation list: the daemon holds both, compiled in with
+  empty defaults and modified through the configuration file. The file
+  representation, the root set's rotation story and the revocation entry's shape
+  are spec-level detail for `to-spec`.
 - The exact manifest field names and types, the extraction limits (entry
   count, uncompressed size, permission bits), and whether a v1 bundle may
   carry assets. These are spec-level detail for `to-spec`, not decisions that

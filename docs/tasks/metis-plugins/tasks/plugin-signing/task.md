@@ -297,7 +297,10 @@ required link fields are a conjunction no established format native carries, and
 because this project must be able to review or reimplement the parser that reads
 untrusted bytes whose acceptance leads to loading compiled code. A C build step
 is kept out of the trusted parse path, which is why the two small
-certificate-validating crates were refused. Verification never reads a value it
+certificate-validating crates were refused. **S19 supersedes the format choice in
+this paragraph.** The chain is X.509, read by `x509-cert` and `der` with no C
+build in the trusted path, and what survives is the requirement that the parser
+reading bytes whose acceptance leads to loading compiled code be reviewable. Verification never reads a value it
 can recompute, which is why ids are derived and the header's key id is ignored in
 favour of the recomputed one. The container layout keeps one file, because
 signature enforcement is the default.
@@ -320,9 +323,12 @@ ids, and the refusal rules, all of which belong in `docs/plugin-contract.md`.
 header, the link record, the signing input domain tags, and the two key-id and
 revocation rules.
 
-**The layout.** The authoritative byte layout for the link record, the chain,
-the two signing inputs, the key id rule and the refusal rules is section 3 of
-`docs/tasks/metis-plugins/tasks/plugin-signing-format/findings.md`. The
+**The layout.** **S19 supersedes the link record, the chain and the link signing
+input in section 3 of
+`docs/tasks/metis-plugins/tasks/plugin-signing-format/findings.md`**: a link is an
+X.509 certificate, so the chain region holds concatenated DER certificates. The
+payload signing input, the key id rule and the container refusal rules in that
+section still apply. The
 container header is the one part of the layout this task owns rather than the
 survey; the proposal is a fixed 32 byte big-endian header carrying the magic
 `METISBND`, the container format version, the suite, the header length, the chain
