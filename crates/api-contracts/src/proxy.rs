@@ -21,7 +21,8 @@
 pub const TRUSTED_PROXIES_ENV: &str = "METIS_TRUSTED_PROXIES";
 
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use http::HeaderMap;
 
@@ -220,16 +221,120 @@ pub fn client_scheme(
     }
 }
 
+/// What the daemon tells the operator about plaintext it can see.
+///
+/// Both variants exist because both are reachable without anyone making a
+/// mistake in code: a listener can be bound to a public address, and a pairing
+/// call can arrive over a leg that nothing encrypted. Each `Display` names what
+/// is exposed and the remedy, because a warning that only says "plaintext"
+/// leaves the operator to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Warning {
+    /// A listener serves plaintext on an address reachable from outside this
+    /// host, and no trusted proxy is named.
+    PlaintextListener {
+        /// The address the listener is bound to.
+        addr: SocketAddr,
+    },
+    /// The pairing call, the one call that carries a secret in a body, arrived
+    /// over a plaintext leg.
+    PlaintextSecret {
+        /// The client the plaintext leg came from, or `None` when the leg has no
+        /// visible peer, which is the local socket.
+        client: Option<IpAddr>,
+    },
+}
+
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PlaintextListener { addr } => write!(
+                f,
+                "the listener at {addr} serves plaintext and no proxy is named in {TRUSTED_PROXIES_ENV}; \
+                 terminate TLS in a reverse proxy and name it there"
+            ),
+            Self::PlaintextSecret { client } => {
+                let leg = match client {
+                    Some(client) => client.to_string(),
+                    None => "no visible peer, so the local socket".to_owned(),
+                };
+                write!(
+                    f,
+                    "the pairing call arrived in plaintext from {leg} and carried the preshared key \
+                     in its body; terminate TLS in a reverse proxy and name it in {TRUSTED_PROXIES_ENV}"
+                )
+            }
+        }
+    }
+}
+
+/// What to tell the operator about the listener that is about to accept.
+///
+/// `Some` exactly when the bind address is reachable from outside this host and
+/// no trusted proxy is named. A loopback listener is not exposed, and a named
+/// proxy says the operator put something encrypted in front of this one, so
+/// neither is worth a warning.
+#[must_use]
+pub fn listener_warning(addr: SocketAddr, trusted: &TrustedProxies) -> Option<Warning> {
+    if addr.ip().is_loopback() || !trusted.is_empty() {
+        return None;
+    }
+    Some(Warning::PlaintextListener { addr })
+}
+
+/// What to tell the operator about the leg a secret-bearing call arrived on.
+///
+/// `Some` on a plaintext leg, whatever it is worth: the warning is the only
+/// signal this daemon has that the secret may have been readable on the way.
+#[must_use]
+pub fn secret_warning(scheme: ClientScheme, client: Option<IpAddr>) -> Option<Warning> {
+    match scheme {
+        ClientScheme::Encrypted => None,
+        ClientScheme::Plaintext => Some(Warning::PlaintextSecret { client }),
+    }
+}
+
+/// A latch so a per-request warning reaches the operator once per process.
+///
+/// A warning that repeats on every call is noise an operator learns to skip;
+/// the first occurrence is the one that says the configuration is wrong.
+#[derive(Debug, Default)]
+pub struct WarnOnce {
+    emitted: AtomicBool,
+}
+
+impl WarnOnce {
+    /// A latch that has emitted nothing.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            emitted: AtomicBool::new(false),
+        }
+    }
+
+    /// Emit `warning` unless this latch already has.
+    ///
+    /// Returns whether this call was the one that emitted, so the rule is
+    /// observable without reading stderr.
+    pub fn warn(&self, warning: &Warning) -> bool {
+        if self.emitted.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        eprintln!("metis: {warning}");
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientAddress, ClientScheme, TRUSTED_PROXIES_ENV, TrustedProxies, client_address,
-        client_scheme,
+        ClientAddress, ClientScheme, TRUSTED_PROXIES_ENV, TrustedProxies, WarnOnce, Warning,
+        client_address, client_scheme, listener_warning, secret_warning,
     };
     use crate::transport::ConfigError;
     use http::{HeaderMap, HeaderValue};
     use std::ffi::OsString;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
     /// Serialises the environment in this test binary: `std::env` is process
@@ -500,6 +605,95 @@ mod tests {
             client_scheme(Some(proxy), &named, &headers),
             ClientScheme::Plaintext,
             "only `https` means encrypted"
+        );
+    }
+
+    /// A listener that is reachable from outside this host and has no proxy
+    /// named is the exposure the operator must be told about. A named proxy
+    /// suppresses it, because naming one says something encrypted sits in
+    /// front; loopback is not exposed and needs no proxy at all.
+    #[test]
+    fn the_listener_warning_follows_the_bind_address_and_the_named_proxies() {
+        let exposed = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8443);
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8443);
+        let loopback_v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8443);
+        let none = TrustedProxies::parse("").expect("nothing is named");
+        let named = TrustedProxies::parse("203.0.113.7").expect("the list parses");
+
+        let warning = listener_warning(exposed, &none)
+            .expect("a plaintext listener with no proxy named is warned about");
+        assert_eq!(warning, Warning::PlaintextListener { addr: exposed });
+        let message = warning.to_string();
+        assert!(
+            message.contains(&exposed.to_string()),
+            "the warning says what is exposed: {message}"
+        );
+        assert!(
+            message.contains(TRUSTED_PROXIES_ENV),
+            "the warning names the remedy: {message}"
+        );
+
+        assert_eq!(
+            listener_warning(exposed, &named),
+            None,
+            "naming a trusted proxy suppresses the warning"
+        );
+        assert_eq!(
+            listener_warning(loopback, &none),
+            None,
+            "a loopback listener is not exposed"
+        );
+        assert_eq!(listener_warning(loopback_v6, &none), None);
+    }
+
+    /// The pairing call, the one call carrying a secret in a body, is warned
+    /// about on a plaintext leg and not on an encrypted one.
+    #[test]
+    fn the_secret_warning_follows_the_client_leg() {
+        let client = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+
+        let warning = secret_warning(ClientScheme::Plaintext, Some(client))
+            .expect("a plaintext client leg is warned about");
+        assert_eq!(
+            warning,
+            Warning::PlaintextSecret {
+                client: Some(client)
+            }
+        );
+        let message = warning.to_string();
+        assert!(
+            message.contains(&client.to_string()),
+            "the warning names the leg: {message}"
+        );
+        assert!(
+            message.contains(TRUSTED_PROXIES_ENV),
+            "the warning names the remedy: {message}"
+        );
+
+        assert_eq!(secret_warning(ClientScheme::Encrypted, Some(client)), None);
+        let local = secret_warning(ClientScheme::Plaintext, None)
+            .expect("a leg with no peer is still plaintext");
+        assert_eq!(local, Warning::PlaintextSecret { client: None });
+        assert!(local.to_string().contains(TRUSTED_PROXIES_ENV));
+    }
+
+    /// The latch emits once and then reports that it did not, so a warning that
+    /// would repeat on every call reaches the operator one time.
+    #[test]
+    fn warn_once_emits_exactly_once() {
+        let warn_once = WarnOnce::new();
+        let listener = Warning::PlaintextListener {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8443),
+        };
+        let secret = Warning::PlaintextSecret {
+            client: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))),
+        };
+
+        assert!(warn_once.warn(&listener), "the first call emits");
+        assert!(!warn_once.warn(&listener), "the second call does not");
+        assert!(
+            !warn_once.warn(&secret),
+            "the latch is spent for every warning, not per warning text"
         );
     }
 }
