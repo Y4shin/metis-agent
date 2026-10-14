@@ -11,8 +11,9 @@
 //! `bash scripts/regenerate-contracts.sh`; see `contracts/README.md`.
 //!
 //! `transport` is the one handwritten transport in the repository: the serve
-//! loop, the Unix and TCP listener front-ends, and the connector shapes the
-//! skeleton, the `client` crate, and the daemon effort share.
+//! loop, the Unix, TCP, and Windows named-pipe listener front-ends, and the
+//! connector shapes the skeleton, the `client` crate, and the daemon effort
+//! share.
 //!
 //! `proxy` is the reverse-proxy rule ADR 0004 chose: the proxies an operator
 //! named, the forwarded headers read from them and from nobody else, and the

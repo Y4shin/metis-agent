@@ -8,8 +8,8 @@
 //! `serve_tcp` (`serve_tcp_listener` when the caller must report the bound
 //! address) and `tcp_transport` are the TCP ones, with `serve_tcp_service` and
 //! `serve_tcp_listener_service` as the service-taking twins a caller mounts an
-//! interceptor chain through; the later transport tickets add their own
-//! listener and connector against the same shapes.
+//! interceptor chain through; `serve_pipe` and `pipe_transport` are the Windows
+//! named-pipe ones, with `serve_pipe_service` as their service-taking twin.
 //!
 //! The remote front-end is off unless the operator names a bind address:
 //! `REMOTE_ADDR_ENV` carries an `IP:port` literal, `resolve_remote_addr` reads
@@ -27,7 +27,10 @@
 //! The local front-end carries its access control itself, because the
 //! operating system enforces it: `serve_uds` creates the socket's directory
 //! with the mode and group this daemon is configured with, and refuses a
-//! directory it did not create to spec rather than changing it. A local client
+//! directory it did not create to spec rather than changing it. The Windows
+//! pipe carries the same rule as an object descriptor: every instance is
+//! created with one that admits the daemon's own account and Local System and
+//! nobody else, and remote clients are rejected outright. A local client
 //! therefore needs no credential; `identity` carries the declaration it makes
 //! instead. The state store uses the same private-path rule for the directory
 //! and the file it owns, through `ensure_private_dir` and `restrict_file`.
