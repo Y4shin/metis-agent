@@ -20,11 +20,11 @@ use x509_cert::certificate::{Certificate, TbsCertificate};
 use x509_cert::der::asn1::OctetString;
 use x509_cert::der::oid::AssociatedOid;
 use x509_cert::der::{DateTime, Encode};
-use x509_cert::ext::pkix::BasicConstraints;
 use x509_cert::ext::Extension;
+use x509_cert::ext::pkix::BasicConstraints;
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
-use x509_cert::spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
+use x509_cert::spki::{ObjectIdentifier, SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use x509_cert::time::{Time, Validity};
 
 /// The container's magic, at offset 0.
@@ -50,7 +50,8 @@ pub const LEAF_COMMON_NAME: &str = "dev.metis.test-plugin";
 /// An empty ZIP archive: the end-of-central-directory record alone. The
 /// verifier treats the archive as opaque bytes, so a vector only needs bytes
 /// that a later reader can open.
-pub const EMPTY_ZIP: &[u8] = b"PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+pub const EMPTY_ZIP: &[u8] =
+    b"PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
 
 /// The validity window every standard link carries: inside it until 2040, so a
 /// committed vector keeps verifying.
@@ -65,6 +66,23 @@ pub fn key(seed: u8) -> SigningKey {
 /// The raw 32-byte public key of a signing key.
 pub fn public_key(key: &SigningKey) -> [u8; 32] {
     key.verifying_key().to_bytes()
+}
+
+/// An extension with a chosen OID, criticality and DER value, so a test can
+/// carry one this project's profile does not understand.
+pub fn extension(oid: &str, critical: bool, value: &[u8]) -> Extension {
+    Extension {
+        extn_id: ObjectIdentifier::new_unwrap(oid),
+        critical,
+        extn_value: OctetString::new(value).expect("an extension value is an octet string"),
+    }
+}
+
+/// A subject key identifier extension: an OCTET STRING wrapping the identifier.
+pub fn key_identifier_extension(id: &[u8]) -> Extension {
+    let mut value = vec![0x04, id.len() as u8];
+    value.extend_from_slice(id);
+    extension("2.5.29.14", false, &value)
 }
 
 /// Seconds since the unix epoch, as a certificate's validity is expressed.
@@ -160,10 +178,7 @@ impl TestChain {
         let keys: Vec<SigningKey> = seeds.iter().copied().map(key).collect();
         let mut links = Vec::new();
         for (index, spec) in specs.iter().enumerate() {
-            let issuer = keys
-                .get(index + 1)
-                .unwrap_or_else(|| &keys[index])
-                .clone();
+            let issuer = keys.get(index + 1).unwrap_or_else(|| &keys[index]).clone();
             let certificate = build_certificate(spec, &keys[index], &issuer);
             let der = certificate.to_der().expect("a built certificate encodes");
             links.push(TestLink {
@@ -337,8 +352,8 @@ fn build_certificate(
     issuer_key: &SigningKey,
 ) -> Certificate {
     let profile = TestProfile {
-        subject: name(&spec.common_name),
-        issuer: name(&spec.issuer_common_name),
+        subject: link_name(&spec.common_name),
+        issuer: link_name(&spec.issuer_common_name),
         ca: spec.ca,
         extensions: spec.extensions.clone(),
     };
@@ -357,9 +372,16 @@ fn build_certificate(
         .expect("the certificate signs")
 }
 
-/// A distinguished name carrying one common name.
-fn name(common_name: &str) -> Name {
-    Name::from_str(&format!("CN={common_name}")).expect("a common name parses")
+/// A distinguished name for a link.
+///
+/// An empty common name produces a name that carries none, so a test can build
+/// a leaf with nothing for the manifest check to compare.
+fn link_name(common_name: &str) -> Name {
+    if common_name.is_empty() {
+        Name::from_str("O=the test profile").expect("an organization name parses")
+    } else {
+        Name::from_str(&format!("CN={common_name}")).expect("a common name parses")
+    }
 }
 
 /// A certificate time from unix seconds.
