@@ -157,6 +157,22 @@ CI.
   order, magic, container version, signature and chain, manifest shape,
   capability cross-check, target library, ABI, capability descriptor versions,
   registration, and each failure reports itself rather than a later consequence.
+- Cancellation belongs to the caller. It owns the deadline and the drop, and the
+  runtime holds no timer and no default. `cancel` marks the plugin's token through
+  the frozen entry; an id the host does not hold answers the frozen `NotFound`
+  without calling the plugin; an unacknowledged cancel is recorded on the ledger
+  and the instance keeps serving, because the drop path reclaimed the context;
+  a dropped call releases its buffers and cancels its service requests; and a
+  cancelled call reaches its caller as the frozen `Cancelled` status.
+- The host exposes one sink trait, set at construction, with a recording default
+  that keeps the existing tests and the ABI harness working. Each of the four
+  callbacks names the instance, progress and service requests also name the
+  request, events carry no request id because the ABI has none, payloads arrive as
+  owned copies taken before the plugin buffer is released, the sink must not block
+  and cannot fail, a panic inside it is caught and recorded, delivery is ordered
+  per instance, and a host with no sink is legal. The host's callback frames are
+  additionally asserted not to panic with `#[no_panic]` in a dedicated CI run that
+  meets that crate's requirements.
 
 ## Fog
 

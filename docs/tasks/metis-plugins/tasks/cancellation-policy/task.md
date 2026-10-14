@@ -3,7 +3,7 @@ type: task
 subtype: grilling
 title: Cancellation acknowledgement, its deadline, and its races
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 mode: human
 ---
@@ -86,8 +86,108 @@ host's error for the caller.
   reload.
 - Whether the host should retry `cancel` once before dropping.
 
-## Completion evidence
+## Decisions recorded
 
-The deadline owner, the missed-cancel consequence, the `cancel` result for
-each request-id case, and the drop-versus-cancel rule, recorded as decisions
-with the alternatives considered.
+**A1, the caller owns the deadline.** The runtime holds no timer, no default
+deadline and no thread, because it starts neither a runtime nor a thread. The
+caller awaits the call with its own timeout, calls `cancel`, and drops the future
+when the plugin has not resolved. The daemon's policy lives in the daemon, and
+the runtime's own test drives the sequence against `tool.stubborn`.
+
+**A2, an unacknowledged cancel is recorded and does not quarantine.** This
+revises the starting answer, which had it quarantine the instance. Dropping the
+future runs the plugin's own drop path and reclaims its context, which is the
+mechanism the contract provides for exactly this case, and the contract forbids a
+plugin from keeping work running outside a call. Quarantine stays reserved for an
+abandoned poll and an unreleasable teardown. The operator's fail-fast posture was
+put to them and this is the deliberate exception: the host cannot distinguish a
+plugin that ignores the token from one that is merely busy, so quarantining would
+make one slow call fatal to a plugin under a tight caller deadline.
+
+**A3, `cancel` for an id the host does not hold returns the frozen `NotFound`.**
+The host checks its own in-flight set first and never calls the plugin, since the
+set is authoritative for what is in flight and poking a plugin about a dead
+request risks a plugin bug for no information. `CallError::Status(MetisStatus::NotFound)`
+is the existing way to say it; `CallError` has no not-found variant of its own.
+An id belonging to another instance cannot occur, because `cancel` is a method on
+the instance and the set is per instance. A second `cancel` for an id still in
+flight is accepted and marks the token again, and the runtime does not retry
+`cancel` on its own.
+
+**A4, cancellation is per call, and the instance-wide form is a host-side loop.**
+The plugin table stays frozen. The loop runs over the instance's own in-flight
+set, and `teardown-and-unload` uses it for cancelling or draining to the caller's
+deadline.
+
+**A5, a dropped call releases its buffers and cancels its outstanding service
+requests.** Every plugin buffer the host still holds for that call is released
+before the context is reclaimed, and a completion is never delivered for a call
+that was dropped, because the context it would be written into has been released.
+
+**A6, the acknowledgement is the status return, and the frozen status is the
+surface.** `cancel` returning `Ok` acknowledges that the token is marked;
+resolution as `Cancelled` is the confirmation; a call the plugin cancels surfaces
+`CallError::Status(MetisStatus::Cancelled)`; and a call the caller dropped yields
+nothing to that caller, which already knows it dropped. No new host error variant
+is introduced for cancellation.
+
+## Completion record
+
+**The decision in the operator's terms.** The caller that starts a call owns the
+deadline and the drop; the runtime owns no timer and no default. Cancelling marks
+the plugin's token and the plugin is expected to resolve `Cancelled`; if it does
+not before the caller's deadline, the caller drops the future, the runtime
+records the unacknowledged cancel on the ledger, and the instance keeps serving,
+because the drop path reclaimed the context and a slow call is not an unsafe one.
+`cancel` for an id the host does not hold answers with the frozen `NotFound` and
+the plugin is not called. Cancellation is per call, with an instance-wide loop on
+the host side for teardown. A dropped call releases its buffers and cancels its
+service requests, so nothing is ever completed into a released context. A call
+the plugin cancels reaches its caller as the frozen `Cancelled` status.
+
+**Alternatives considered and rejected.**
+
+- A default deadline held by the runtime, or a daemon-wide timer policy the
+  runtime enforces. Rejected: it is a policy the daemon cannot see, and the
+  runtime cannot time anything without the thread it does not start.
+- Quarantining the instance on an unacknowledged cancel. Rejected as the default,
+  though it was the starting answer: it makes every slow call fatal.
+- Disabling the instance until a reload on the same event. Rejected twice over:
+  the same over-reaction plus a registry write for a protocol note.
+- Forwarding every `cancel` to the plugin and letting it answer, including for
+  ids the host does not hold.
+- A new host-side not-found error rather than the frozen status.
+- An instance-wide cancel as a new ABI entry, or no instance-wide form at all for
+  teardown to use.
+- Delivering a service completion for a call that was dropped.
+- Waiting for the plugin to resolve `Cancelled` before the host may drop, and a
+  new host error variant for cancellation.
+
+**Constraints and rationale.** The runtime starts no runtime and no thread, so no
+timing can live in it. `PluginCall`'s drop already reclaims the plugin's context
+and removes the request id from the in-flight set, which is what makes a recorded
+non-quarantining outcome coherent: after the drop there is no live call to be
+unsafe about. The frozen status space already carries `Cancelled` and `NotFound`,
+so the policy adds no vocabulary.
+
+**Dependent-task implications.**
+
+- `plugin-runtime` owns the in-flight pre-check in `cancel`, the ledger entry for
+  an unacknowledged cancel, the instance-wide loop, and the buffer and service
+  release at drop.
+- `metis-daemon` owns the per-call deadline, any user-visible cancel request, and
+  the decision to drop.
+- `teardown-and-unload` consumes the instance-wide loop for its "cancel or drain
+  to the caller's deadline" step.
+- The tickets must drive `tool.cancellable` and `tool.stubborn` past a deadline,
+  assert the ledger entry, and assert that a second cancel of a live id is
+  accepted and that an unknown id answers `NotFound` without touching the plugin.
+
+**Remaining fog, all spec level.**
+
+- The daemon's deadline values and whether they are configurable, which belongs
+  to `metis-daemon` rather than to this effort.
+
+**Completion evidence.** The six recorded decisions, the rejected alternatives,
+the constraints and rationale, the dependent-task implications and the remaining
+fog, confirmed by the operator.
