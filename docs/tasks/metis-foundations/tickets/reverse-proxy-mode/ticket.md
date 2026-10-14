@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Reverse-proxy mode and the plaintext warning
 status: stable
-workflow_state: ready
-blocked_by: [tls-and-client-trust]
+workflow_state: done
+blocked_by:
+- tls-and-client-trust
 size: s
 ---
 
@@ -98,3 +99,35 @@ harness wrote into the working tree). It is not touched by this landing commit,
 which holds only the ticket doc and the deviation report, and its final value
 stays with `finalize-task` together with the ticket's `workflow_state` and the
 archive.
+
+Knowledge harvested at finalize. The effort map's ADR 0004 bullet now records
+what landed: `METIS_TRUSTED_PROXIES` names exact proxy addresses, the two
+forwarded headers are read only from a named peer, the TCP front-end stamps the
+peer per connection so a handler can decide, a non-loopback bind with no proxy
+named warns once at bind, and a secret-bearing pairing call on a plaintext client
+leg warns once per service. What the daemon still cannot do is detect an operator
+who exposes the listener with no proxy, which is the ADR 0004 residual and stays.
+
+The arch spec carries the measured details rather than the plan's: the warning
+latch is once per `Service` instance and once per listener rather than once per
+process, as the approved section said; the front-end's `eprintln!` is not asserted
+because libtest captures stderr, so the tested artefact is the pure
+`listener_warning` decision the front-end prints; and the bind-time environment
+resolve is covered indirectly, because the integration test passes the trusted set
+to `serve_tcp_listener_service` directly and `METIS_TRUSTED_PROXIES` is never
+exercised end to end. Three behaviours the section left to the implementer became
+real: a junk `x-forwarded-for` entry from a named proxy falls back to the peer
+instead of inventing an address, an empty entry between commas is skipped, and an
+unreadable variable refuses the TCP bind while separately turning a pairing call
+into an `ErrorCode::Internal` refusal that no test asserts.
+
+The chain history is the third instance of the same lesson in this effort's last
+three tickets, and the first that was not a budget problem: the first attempt
+passed its preconditions gate and then lost its tdd child to a provider error
+before any work existed, and the same-protocol retry at a 50 percent larger budget
+landed the ticket with eight `wip:` commits. A provider failure with no work
+produced needs no split and no diagnosis beyond confirming the branch and the tree
+are untouched, which is what the retry's `extra` recorded. This ticket also left
+the `state.yaml` pointer inside the working branch, so a later change to that
+split should note that the pointer can travel in a `wip:` commit rather than only
+in the harvest commit.

@@ -139,6 +139,13 @@ streaming assumptions before anything is built on top.
   `reverse-proxy-mode` names trusted proxies, and that ticket owns the warning
   and the trusted-proxy rule. The daemon grows no certificate, key or
   trusted-CA setting, and client trust is deferred past the first efforts.
+  Landed as `reverse-proxy-mode`: `METIS_TRUSTED_PROXIES` names exact proxy
+  addresses, `X-Forwarded-For` and `X-Forwarded-Proto` are read only when the
+  peer is one of them, the TCP front-end stamps the peer address per connection
+  so a handler can make that decision, a non-loopback bind with no proxy named
+  warns once at bind, and a secret-bearing pairing call on a plaintext client
+  leg warns once per service. The daemon cannot detect an operator who exposes
+  the listener without a proxy, which stands.
 - The daemon's state lives in one SQLite database through sqlx (ADR 0003), at
   `METIS_STATE_DB`, defaulting to `$XDG_DATA_HOME/metis/metis.db`, with the file
   at mode 600 and its directory at mode 700. Schema changes go through committed
