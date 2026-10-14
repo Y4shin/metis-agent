@@ -568,6 +568,14 @@ pub enum ConfigError {
         /// The value it held.
         value: String,
     },
+    /// [`TRUSTED_PROXIES_ENV`](crate::proxy::TRUSTED_PROXIES_ENV) names
+    /// something that is not an IP address.
+    InvalidTrustedProxy {
+        /// The variable that was read.
+        variable: &'static str,
+        /// The value it held.
+        value: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -589,6 +597,12 @@ impl std::fmt::Display for ConfigError {
             Self::UnknownSocketGroup { variable, value } => {
                 write!(f, "{variable} names no group on this host: {value:?}")
             }
+            Self::InvalidTrustedProxy { variable, value } => {
+                write!(
+                    f,
+                    "{variable} names something that is not an IP address: {value:?}"
+                )
+            }
         }
     }
 }
@@ -600,6 +614,7 @@ impl std::error::Error for ConfigError {
             Self::RemoteBind { source, .. } => Some(source),
             Self::SocketAcl { source, .. } => Some(source),
             Self::UnknownSocketGroup { .. } => None,
+            Self::InvalidTrustedProxy { .. } => None,
         }
     }
 }

@@ -14,6 +14,10 @@
 //! loop, the Unix and TCP listener front-ends, and the connector shapes the
 //! skeleton, the `client` crate, and the daemon effort share.
 //!
+//! `proxy` is the reverse-proxy rule ADR 0004 chose: the proxies an operator
+//! named, the forwarded headers read from them and from nobody else, and the
+//! plaintext warnings that follow from the exposure the daemon can see.
+//!
 //! `identity` is the declaration a client carries as request metadata on every
 //! call and the version gate the daemon applies to it.
 //!
@@ -33,6 +37,7 @@ pub mod events;
 pub mod identity;
 pub mod keychain;
 pub mod proto;
+pub mod proxy;
 pub mod request;
 pub mod time;
 pub mod transport;
