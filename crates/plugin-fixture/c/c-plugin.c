@@ -177,8 +177,9 @@ static void ctx_park(ctx_t *ctx, MetisWaker borrowed) {
     if (ctx->has_waker || borrowed.vtable == NULL) {
         return;
     }
-    /* The waker the host passes to `poll` is borrowed and valid until the
-     * future is dropped, so a plugin that parks has to clone it. */
+    /* The waker the host passes to `poll` is one owning reference the host
+     * releases when the poll returns, so this plugin clones it and never
+     * releases the base. */
     ctx->waker = borrowed.vtable->clone(&borrowed);
     ctx->has_waker = 1;
     g_ledger.waker_clones++;

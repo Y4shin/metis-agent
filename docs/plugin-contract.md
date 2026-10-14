@@ -135,11 +135,13 @@ typedef struct MetisWakerVtable {
 } MetisWakerVtable;
 ```
 
-The waker the host passes is valid until the future is dropped. The plugin may
-clone it (each clone is one `clone` call) and must `drop` every clone. `wake` may
-be called from any thread, must be cheap and non-blocking, and may arrive after
-the future was dropped, which the host detects and records rather than crashing
-on.
+The waker the host passes is one owning reference for that poll, and the host
+releases it when the poll returns, so the plugin must not release it. The plugin
+may clone it (each clone is one `clone` call and one owning reference) and must
+`drop` every clone. One clone is consumed by exactly one `wake` or `drop`, so a
+second use of one consumed clone is refused rather than acted on. `wake` may be
+called from any thread, must be cheap and non-blocking, and may arrive after the
+future was dropped, which the host detects and records rather than crashing on.
 
 ## 9. Status space, buffers, payloads
 
@@ -191,7 +193,11 @@ still drop, but it records a protocol violation.
    poll that blocks is detected by a watchdog, recorded, and the plugin is
    quarantined.
 4. **Waker liveness.** A wake from any thread is legal. A wake after the future
-   is dropped is a recorded violation, never a dangling dereference.
+   is dropped is a counted violation, not a step in the ordering ledger: the
+   host's record counts it and names the request id of the call it belongs to,
+   and it is never a dangling dereference. One clone is consumed by exactly one
+   `wake` or `drop`, so a second use of one consumed clone cannot release the
+   call's state twice.
 5. **Panic containment.** The SDK's poll and drop shims wrap the author's future
    in `catch_unwind`. A panic becomes `Internal`, leaves the future terminal, and
    drop stays legal. No path may reach `process::abort`. Host callbacks are
