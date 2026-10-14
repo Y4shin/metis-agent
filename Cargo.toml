@@ -114,3 +114,15 @@ hyper-util = { version = "0.1", features = [
 # re-exports, so one crate adds the `Stream` impl and the other two add no
 # dependency.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# The Windows local front-end builds the pipe's security descriptor and reads
+# the daemon's own account from its token through the platform APIs, so the
+# descriptor is honest about who may connect. `windows-sys` is already in the
+# lock through tokio and mio; only the Windows target gates it in, and the
+# features are the ones those calls name.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }

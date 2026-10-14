@@ -6,10 +6,10 @@ status: stable
 
 # arch-spec, metis-foundations
 
-Effort-wide architecture spec, shared by every ticket chain in this effort. It
-covers the pending frontier in depth and states the interface contracts the
-later tickets inherit. Later levels get their own sections added by the
-spec-reconciler when they become pending.
+Effort-wide architecture spec, shared by every ticket chain in this effort. Every
+ticket has landed, so the sections below are the measured record of what was
+built and the interface contracts the effort's consumers inherit. Later levels
+get their own sections added by the spec-reconciler when they become pending.
 
 ## Source of truth for the target state
 
@@ -4102,7 +4102,38 @@ failed, 7 ignored, up from 197 before this ticket.
 
 ---
 
-## Pending ticket: `windows-named-pipe`
+## Landed ticket: `windows-named-pipe`
+
+Landed on `task/windows-named-pipe` as the merge commit `84bdc61`, parents
+`4d1b59c` (the landing branch, created at `main`'s tip because it did not exist
+before this landing, the convention this spec records) and `e3f35db` (the
+working branch `ticket/windows-named-pipe`, six `wip:` commits off `main` at
+`4d1b59c`, deleted after the merge); the docs commit `0dda9c4` carries the
+ticket note and the committed deviation report. The merge was clean and the
+landing tree is byte-identical to the verified tip (both trees hash to
+`5321156e`, and `git diff e3f35db HEAD` is empty), so every source file landed
+exactly as verified and no source gate was re-run at landing. The gates were
+measured on `e3f35db` by the verifier and re-run at finalize on `0dda9c4` by the
+parent through `devenv shell --`: `cargo fmt --check` clean; `cargo clippy
+--all-targets -- -D warnings` clean, with only the pre-existing
+`plugin-contract` C `_FORTIFY_SOURCE` line on stderr; the workspace `cargo test`
+at 219 passed, 0 failed, 7 ignored across 45 suites (212 passed before this
+ticket); `cargo test -p api-contracts --lib pipe` at 6 passed; `cargo test -p
+api-contracts --test pipe -- --nocapture` at 1 passed, printing its `[skip]` line
+naming the Windows host; `buf lint` and `buf breaking` green with the contract
+untouched; both regeneration `--check` runs clean; and the ABI harness at
+`[result] PASS (73 checks)`.
+
+The cross-target evidence and its limit, measured on the same tree:
+`cargo check -p api-contracts --all-targets --target x86_64-pc-windows-msvc`
+passes, compiling the Windows pipe, the descriptor and token calls and the
+Windows-target test binary, but only with the rustup `nightly-2026-10-12`
+toolchain first on `PATH`; from `devenv shell` alone the same command fails
+`E0463` (`can't find crate for std`), because that `rustc` is the nix one whose
+sysroot carries no Windows std. The same check for `-p daemon` fails locally at
+`plugin-contract`'s C build step, which a native Windows runner with MSVC avoids,
+so the `daemon` half of the CI job's command is unverified locally and is
+recorded as such.
 
 Blocked by the landed skeleton, and the last ticket in the effort. It lands the
 Windows half of the local transport: the same Connect service over a duplex
@@ -4112,84 +4143,153 @@ explicit skip where the pipe cannot run. The `windows-pipe-security` findings ta
 already decided the mechanism, so this ticket follows it rather than reopening it.
 Because the CI job compiles and does not run, the pipe is proven by construction,
 by compilation for the Windows target and by the platform-independent rules tested
-on Linux; no pipe code path is executed anywhere in this effort.
+on Linux; no pipe code path is executed anywhere in this effort. Nine files
+changed (+903/-6) against `main`.
+
+The surfaces below are the measured ones. The deviation report found no planned
+public surface differing from the actual one, and the three textual errors it
+found in the approved text are corrected in place here: the SID conversion is
+`ConvertSidToStringSidW`, not the `ConvertSidToStringW` the approved section
+named; the `windows-sys` feature list is foundation, security, authorization and
+threading, with no memory feature; and the `#[cfg(windows)]` serve-and-connect
+test and the `#[cfg(not(windows))]` explicit-skip test live in
+`crates/api-contracts/tests/pipe.rs`, not in the module's own test block. The
+rest of the deviation report's items are folded in below: the private
+`create_pipe_instance` and `PipeSecurityDescriptor`, the duplication of the
+endpoint variable name, and the measured correction to the client-gate
+rationale.
 
 ### Exports
 
 - `crates/api-contracts/src/transport.rs`, a Windows section:
   - **Platform-independent rules**, compiled and tested on every host, which is what
-    gives this ticket real test evidence on Linux rather than only a compile gate:
+    gives this ticket real test evidence on Linux rather than only a compile gate.
     - `pub const PIPE_PREFIX: &str = r"\\.\pipe\";` and `pub const DEFAULT_PIPE_NAME:
       &str = "metis-daemon";`
     - `pub struct PipeName(String)` with `Default` (the prefix plus the default
       name), `parse(&str) -> Result<Self, ConfigError>`, `as_str()` and `Display`.
       `parse` rejects anything that does not start with the local pipe prefix,
       compared case-insensitively because Windows pipe names are not case sensitive;
-      anything longer than the 256 characters `CreateNamedPipeW` documents; and
-      anything carrying an inner NUL. So an operator cannot quietly point the daemon
-      at `\\server\pipe\name`.
+      anything longer than the 256 characters `CreateNamedPipeW` documents, counted
+      in characters as that call does; and anything carrying an inner NUL, which no
+      pipe call can pass through a NUL-terminated name. So an operator cannot
+      quietly point the daemon at `\\server\pipe\name`. The bare prefix `\\.\pipe\`
+      passes the rule, and `CreateNamedPipeW` then refuses it at creation, so that
+      value fails loudly rather than silently; the residual is recorded below.
     - `pub fn resolve_pipe_name() -> Result<PipeName, ConfigError>`, reading
       `METIS_ENDPOINT` as the map's endpoint decision requires: absent or empty means
       the platform default, a value goes through `PipeName::parse`, and a malformed
       value is `ConfigError::InvalidPipeName { variable, value }`, the new variant on
-      the non-exhaustive enum.
+      the non-exhaustive enum. The variable is read through a private `const
+      PIPE_NAME_ENV` in this module, beside the `client` crate's own private literal
+      for the same variable, so the variable name now exists twice in the tree and
+      one export removes both (the map's fog entry covers that).
     - `pub fn pipe_descriptor_sddl(user_sid: &str) -> String`, the findings'
       descriptor `D:P(D;;GA;;;NU)(A;;GA;;;<daemon-user-SID>)(A;;GA;;;SY)`, kept as
       one function so the assembled string is asserted on any host.
   - **The Windows half** (`#[cfg(windows)]`):
     - `pub async fn serve_pipe(name: PipeName, router: Router)` and `pub async fn
       serve_pipe_service(name: PipeName, service: ConnectRpcService<Router>)`, the
-      router-taking and service-taking pair the Unix front-end set: one pipe
-      instance at a time, `first_pipe_instance(true)` on the first,
-      `reject_remote_clients(true)` stated explicitly even though tokio defaults it
-      true, and `create_with_security_attributes_raw` carrying the
-      `SECURITY_ATTRIBUTES` built from the descriptor. Every accepted pipe goes to
-      the same private `serve_connection` the Unix and TCP front-ends share, because
-      `NamedPipeServer` is `AsyncRead + AsyncWrite`, so there is no second connection
-      path and no second service.
+      router-taking and service-taking pair the Unix front-end set. One instance
+      exists at a time: the accept loop creates the next instance after the current
+      one has connected, so the listener holds one unconnected instance at a time and
+      a second client in that window is told the pipe is busy rather than served by a
+      second path. Every accepted pipe goes to the same private `serve_connection`
+      the Unix and TCP front-ends share, because `NamedPipeServer` is `AsyncRead +
+      AsyncWrite`, so there is no second connection path and no second service. The
+      creation call itself is the private `create_pipe_instance(name, descriptor,
+      first)`: `first_pipe_instance(true)` is set on the first instance only, so a
+      squatter holding the name makes the daemon fail loudly, `reject_remote_clients(true)`
+      is stated explicitly even though tokio defaults it true, and
+      `create_with_security_attributes_raw` carries the `SECURITY_ATTRIBUTES` built
+      from the descriptor. It exists because building those attributes inside the
+      accept loop lets the raw pointer live across an await point and the served
+      future stops being `Send`, which `tokio::spawn` refuses (measured, not
+      theoretical). The connection body was not relaxed for it, and that is the first
+      of the two real `Send` problems the TDD loop exposed and fixed.
     - `pub fn pipe_transport(name: &PipeName) -> connectrpc::client::Http2Connection`,
-      the connector half over `ClientOptions`, with the same local authority the Unix
-      socket transport uses.
-    - The SID and descriptor calls: `OpenProcessToken` with
-      `GetTokenInformation(TokenUser)` and `ConvertSidToStringW` for the daemon's own
-      account, `ConvertStringSecurityDescriptorToSecurityDescriptorW` with
-      `SDDL_REVISION_1` for the descriptor, and `LocalFree` for both buffers.
-      `windows-sys` is added target-gated with the foundation, security,
-      authorization, memory and threading features, so the Linux dependency tree does
-      not change and no `interprocess` and no `widestring` is added, which is the
-      map's decision.
+      the connector half over `ClientOptions`, with the same `local_authority` the
+      Unix socket transport names, because the pipe is the same local IPC surface.
+      Its connector is a plain `tower::service_fn` that opens the pipe, the shape
+      `uds_transport` uses.
+    - The private `PipeSecurityDescriptor`, a `PSECURITY_DESCRIPTOR` wrapper with
+      `for_this_account()` and a `Drop` that calls
+      `windows_sys::Win32::Foundation::LocalFree` on the non-null pointer exactly
+      once, so the buffer the SDDL conversion returned is released. The conversion is
+      `ConvertStringSecurityDescriptorToSecurityDescriptorW` with `SDDL_REVISION_1`,
+      applied to `pipe_descriptor_sddl(&user_sid_string()?)`. The wrapper carries
+      `unsafe impl Send` with a `SAFETY` comment, because the descriptor pointer does
+      outlive awaits; it is deliberately not `Sync`, and no other surface was
+      relaxed. That is the second of the two real `Send` problems the TDD loop
+      exposed and fixed.
+    - The private `user_sid_string()`, the 0.61.2 shape: `OpenProcessToken` on
+      `GetCurrentProcess` with `TOKEN_QUERY`, `GetTokenInformation(TokenUser)`, then
+      `ConvertSidToStringSidW` on the resulting SID. **That last name is a
+      correction:** the approved section named `ConvertSidToStringW`, which exists in
+      neither Win32 nor `windows-sys`, and the `windows-pipe-security` findings had
+      the right name. The token handle is closed through a private RAII `Token`
+      guard.
+    - `windows-sys` is added target-gated with the **foundation, security,
+      authorization and threading** features, so the Linux dependency tree does not
+      change and no `interprocess` and no `widestring` is added, which is the map's
+      decision. **The correction:** there is no memory feature to add, because
+      `LocalFree` lives in `Win32::Foundation` in 0.61.2 and `Win32::System::Memory`
+      names nothing this code uses, while `OpenProcessToken` needs
+      `Win32::System::Threading`. The lock gains one edge to a package already
+      present through tokio and mio.
 - `.github/workflows/ci.yml`: a second job, `windows`, on `windows-latest`,
-  installing the same toolchain channel devenv pins (`nightly`) and running
-  `cargo check -p api-contracts -p daemon --all-targets`. It compiles the Windows
-  path and the pipe test binaries for that target and executes nothing, so the
-  Windows evidence this ticket produces is compilation, not a test result.
-- `crates/api-contracts/src/transport.rs` tests: a `#[cfg(windows)]` integration
-  test serving a test service over a pipe and reaching it through `pipe_transport`
-  (criterion 1), which compiles under the gate and is run only by a manual Windows
-  invocation; platform-independent unit tests for the name rule, the resolver and
-  the descriptor string (criteria 2 and 3); and a `#[cfg(not(windows))]` test that
-  prints an explicit skip line and passes, so a Linux `cargo test` reports the skip
-  instead of silently having no pipe tests (criterion 4).
-- `docs/testing.md` gains the Windows commands, the manual command that would run the
-  pipe test, and what the local skip means; `docs/dev-env.md` gains `METIS_ENDPOINT`
-  as a pipe name on Windows and the prefix rule.
+  installing the toolchain channel devenv pins (`nightly`) and running
+  `cargo +nightly check -p api-contracts -p daemon --all-targets`. It compiles the
+  Windows path and the pipe test binaries for that target and executes nothing, so
+  the Windows evidence this ticket produces is compilation, not a test result. The
+  `daemon` half of that command is unverified locally; the compile seam below
+  records why.
+- `crates/api-contracts/tests/pipe.rs` (new): the `#[cfg(windows)]`
+  serve-and-connect test, which serves a test service over the pipe and reaches it
+  through `pipe_transport` (criterion 1), and the `#[cfg(not(windows))]` test that
+  prints the explicit `[skip]` line naming the Windows host and passes, so a Linux
+  `cargo test` reports the skip instead of silently having no pipe tests
+  (criterion 4). **This is the placement correction:** the two tests live in the
+  integration test binary, not in `transport.rs`'s own test block, and the gap
+  seam's invocation `cargo test -p api-contracts --test pipe` is the one that
+  matches reality. `crates/api-contracts/src/transport.rs` keeps the
+  platform-independent unit tests for the name rule, the resolver and the assembled
+  descriptor string (criteria 2 and 3), the six tests `cargo test -p api-contracts
+  --lib pipe` selects.
+- `docs/testing.md` gains a `Windows local transport` section with the commands,
+  the manual invocation that would run the pipe test, what the local skip means, a
+  `## CI` note about the new job, and a gap list of seven bullets each naming its
+  closing check; `docs/dev-env.md` gains a `Windows local transport` section with
+  `METIS_ENDPOINT` as a pipe name on Windows, the endpoint rule and the access rule.
+  One line is still missing: `docs/testing.md` omits the cross-target toolchain
+  requirement, which the caller adds during the harvest rather than this ticket.
 
 ### Existing abstractions to use
 
-- The private `serve_connection` shared by the Unix and TCP front-ends as the one
+Used as specified: yes.
+
+- The private `serve_connection` shared by the Unix and TCP front-ends is the one
   connection body, with the pipe as its third caller; `ConnectRpcService`, the
-  interceptor chain and `Router` as the thing served, exactly as the TCP front-ends
-  do it.
-- `ConfigError`'s non-exhaustive enum and `resolve_remote_addr`'s shape (absent or
-  empty means off, a malformed value is loud) for the new variable.
-- `uds_transport` as the shape of `pipe_transport`, including its authority
-  handling, and `serve_uds`/`serve_uds_service` as the shape of the pipe front-end
-  pair.
-- The `windows-pipe-security` findings as the authority for the descriptor, the pipe
-  mode flag, the tokio entry points and the crate choice, so none of it is
-  re-researched.
-- `windows-sys` (already in the lock transitively through tokio and mio)
-  target-gated, and tokio's already-enabled `net` feature for the pipe types.
+  interceptor chain and `Router` are served exactly as the TCP front-ends serve
+  them, and `serve_pipe`/`serve_pipe_service` mirror the landed
+  `serve_uds`/`serve_uds_service` pair.
+- `ConfigError`'s non-exhaustive enum gained its variant with a `Display` arm and an
+  `Error::source` arm matching the enum's existing arms, and `resolve_pipe_name`
+  copies `resolve_remote_addr`'s shape (absent or empty means the platform default,
+  a malformed value is loud) through the file's existing `env_value` helper.
+- `pipe_transport` copies `uds_transport`'s lazy-connector shape and reuses
+  `local_authority`, so the pipe is the same local IPC surface as the socket.
+- The `windows-pipe-security` findings were followed rather than re-derived:
+  `reject_remote_clients(true)` is stated explicitly, `first_pipe_instance(true)` is
+  set on the first instance only, `create_with_security_attributes_raw` carries the
+  descriptor, byte mode is tokio's default, and the SDDL string is the findings'
+  string. No `interprocess` and no `widestring` was added.
+- `windows-sys` (already in the lock transitively through tokio and mio) is
+  target-gated with the corrected feature set, and tokio's already-enabled `net`
+  feature supplies the pipe types.
+- No contract, ABI or plugin change: `contracts/`, the generated trees, the ABI
+  header and every plugin crate are untouched, so the ten-step gate's contract,
+  drift and harness steps cannot move.
 
 ### Do NOT reimplement
 
@@ -4208,76 +4308,106 @@ on Linux; no pipe code path is executed anywhere in this effort.
 ### Seams
 
 1. **Name seam (criterion 2).** The default name; an override accepted only with the
-   local pipe prefix, with a mixed-case prefix accepted; `\\server\pipe\x`, a bare
-   name, an over-long name and a name with an inner NUL each refused as
-   `ConfigError::InvalidPipeName`; absent and empty both mean the default.
-   Unit-tested on Linux.
+   local pipe prefix, with a mixed-case prefix accepted; `\\server\pipe\name`, a bare
+   name, a Unix socket path, a name past 256 characters and a name with an inner NUL
+   each refused as `ConfigError::InvalidPipeName` naming the variable and the value;
+   absent and empty both mean the default. Unit-tested on Linux as the six tests
+   `cargo test -p api-contracts --lib pipe` selects.
 2. **Descriptor seam (criterion 3).** `pipe_descriptor_sddl` assembles the
    documented string for a given SID, which is unit-tested on Linux. That the server
    actually passes that descriptor, and that Windows records the pipe with
    `PIPE_REJECT_REMOTE_CLIENTS`, is asserted by construction here and left to the
    read-back gap below.
-3. **Serve-and-connect seam (criterion 1).** The Windows integration test serves a
-   test service over the pipe and reaches it through `pipe_transport`, asserting one
-   request round-trips and that the first instance carries `first_pipe_instance`. It
-   is compiled for the Windows target by the CI job and **not run there**, so the
-   record states that no run of it happened and names
+3. **Serve-and-connect seam (criterion 1).** The Windows test in
+   `crates/api-contracts/tests/pipe.rs` serves a test service over the pipe and
+   reaches it through `pipe_transport`, asserting that one echo request round-trips
+   and that the first instance carries `first_pipe_instance` (a second first-instance
+   server is refused). It is compiled for the Windows target by the CI job and **not
+   run there**, so the record states that no run of it happened and names
    `cargo test -p api-contracts --test pipe` on a Windows host as the invocation that
-   would execute it.
+   would execute it. On Linux the same invocation runs the explicit skip test and
+   passes, printing the `[skip]` line the verifier observed.
 4. **Compile seam (criterion 4).** The `windows` job checks `api-contracts` and
    `daemon` with `--all-targets` for the Windows target, which compiles the pipe
    front-end, the connector, the descriptor and token calls and the pipe test
    binary; a Linux `cargo test` reports the explicit skip rather than passing
-   silently.
-5. **Gap seam (criterion 5).** The gaps are recorded with the check that closes
-   each: the pipe test binary has never been run, so a Windows host run closes it;
-   the descriptor has never been read back, so `GetSecurityInfo` for
-   `SE_KERNEL_OBJECT` closes it; the pipe mode has never been inspected, so
-   `GetNamedPipeInfo` closes it; a second local account has never attempted a
-   connection, so a different-user client closes it; a low-integrity same-user
-   process has never been probed, so an integrity-level check closes it; and a remote
-   attempt has never been recorded, so a `\\<own-hostname>\pipe\<name>` attempt or a
-   second host closes it.
+   silently. Measured locally with the rustup `nightly-2026-10-12` toolchain first on
+   `PATH`: the `api-contracts` half passes, and the same check for `-p daemon` fails
+   at `plugin-contract`'s C build step, which a native Windows runner with MSVC
+   avoids, so only the job's `api-contracts` half is verified locally and the
+   `daemon` half is recorded as such.
+5. **Gap seam (criterion 5).** The gaps `docs/testing.md` lists, seven of them, each
+   with the check that closes it: the pipe test binary has never been run, so a
+   Windows host run closes it; the descriptor has never been read back, so
+   `GetSecurityInfo` for `SE_KERNEL_OBJECT` closes it; the pipe mode has never been
+   inspected, so `GetNamedPipeInfo` closes it; a second local account has never
+   attempted a connection, so a different-user client closes it; a low-integrity
+   same-user process has never been probed, so an integrity-level check closes it; a
+   remote attempt has never been recorded, so a `\\<own-hostname>\pipe\<name>` attempt
+   or a second host closes it; and no client reaches the pipe yet, so a follow-up
+   ticket that wraps `pipe_transport` and adds a Windows credential path closes it.
 6. **Additivity seam.** The Unix and TCP paths, the contract, the ABI and the plugin
-   crates are untouched, the workspace suite stays green on Linux, and `windows-sys`
-   is target-gated so no Linux build changes.
+   crates are untouched, the workspace suite stays green on Linux at 219 passed, and
+   `windows-sys` is target-gated so no Linux build changes.
 
-Test types: unit tests in `api-contracts` for the name rule, the resolver and the
-assembled descriptor string, which run on Linux; the `#[cfg(not(windows))]` explicit
-skip test, which runs on Linux; the `#[cfg(windows)]` pipe integration test, which
-is compiled for the Windows target by CI and executed nowhere in this effort; the
-contract and workspace gates for the rest.
+Test types: unit tests in `crates/api-contracts/src/transport.rs` for the name rule,
+the resolver and the assembled descriptor string, which run on Linux;
+`crates/api-contracts/tests/pipe.rs` for the `#[cfg(not(windows))]` explicit skip
+test, which runs on Linux, and for the `#[cfg(windows)]` pipe integration test,
+which is compiled for the Windows target by CI and executed nowhere in this effort;
+the contract and workspace gates for the rest.
 
 ### Interface contract
 
 - This is the last ticket, so the contract is with the efforts that follow rather
   than a sibling: `metis-daemon` inherits `serve_pipe_service` as its Windows
   listener and `resolve_pipe_name` as its endpoint rule, and must reuse the shared
-  `serve_connection` instead of adding a path of its own.
+  `serve_connection` instead of adding a path of its own. With this landing the
+  map's Windows transport decision (tokio named pipes in the listener and the
+  connector, a target-gated `windows-sys`, no `interprocess`, the findings'
+  descriptor and the validated endpoint override) is closed except for the recorded
+  gaps below. One approved rationale is corrected rather than kept: no `client`
+  change landed, and the reason given for keeping `client` out of the compile gate
+  does not hold, because `crates/client/src/credential.rs` carries a
+  `#[cfg(not(unix))]` fallback and `cargo check -p client --all-targets --target
+  x86_64-pc-windows-msvc` succeeds. The narrower gate is a choice rather than a
+  necessity, it was left exactly as approved, and `pipe_transport` is the connector
+  a later ticket wraps.
 - The plugins effort is unaffected: nothing here touches the ABI, the SID work uses
   the daemon process's own token, and the plugin contract keeps its own cancellation
   and payload rules.
 - The Windows evidence boundary is part of the contract: the Windows transport is
   compile-verified and Linux-rule-tested, never executed in this effort, and a later
   effort that adds a Windows runner which runs tests can close every gap listed
-  above without changing a signature.
-- Recorded residuals: any process running as the daemon's account on the same
-  machine, another logon session included, can connect, exactly as mode 0700 behaves
-  on Unix; a low-integrity same-user process is not checked, because setting a
-  mandatory label needs `SeSecurityPrivilege`; the logon-SID principal and the
-  `GetNamedPipeServerProcessId` squatter check stay open findings questions; the
-  exact error a remote client observes stays inference because no second host is in
-  scope; and a Windows client still has no credential path, so pairing and
-  credentialed calls from Windows belong to a later ticket.
+  above without changing a signature. The cross-target check needs the rustup
+  `nightly-2026-10-12` toolchain first on `PATH` and fails `E0463` from
+  `devenv shell` alone, and `docs/testing.md` does not yet state that requirement;
+  the caller adds the line during the harvest rather than this ticket.
+- Recorded residuals, carried from the approved section: any process running as the
+  daemon's account on the same machine, another logon session included, can connect,
+  exactly as mode 0700 behaves on Unix; a low-integrity same-user process is not
+  checked, because setting a mandatory label needs `SeSecurityPrivilege`; the
+  logon-SID principal and the `GetNamedPipeServerProcessId` squatter check stay open
+  findings questions; the exact error a remote client observes stays inference
+  because no second host is in scope; and a Windows client still has no credential
+  path, so pairing and credentialed calls from Windows belong to a later ticket.
+- Recorded residuals, new with this landing: `PipeName::parse` accepts the bare
+  prefix `\\.\pipe\`, which `CreateNamedPipeW` refuses loudly at creation, so the
+  failure is loud rather than silent and is outside the three rules the section set;
+  the server holds one instance at a time, so a second client in the window between
+  an accept and the next instance creation can see `ERROR_PIPE_BUSY`; the seven gaps
+  above stand; and the `daemon` half of the CI job's command is unverified locally
+  because its dependency chain needs an MSVC toolchain, which only the Windows
+  runner has.
 
 ---
 
 ## Downstream interface contracts (outline)
 
-No ticket is pending in this effort. Every landed ticket has its measured section
-above; the commitments below are what the landed tickets must already support, and
-the effort is ready for its end-of-effort review, the coherence refactor and the
-archive.
+Every ticket in this effort has landed, so this outline is the effort's closing
+statement rather than a pending set: the commitments below are what the landed
+tickets must support, and what remains is the end-of-effort review, the coherence
+refactor and the archive.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
@@ -4308,9 +4438,9 @@ archive.
   `cancelled` refusal where a caller fell behind or its work was cancelled. Its
   landed section is above.
 - `reverse-proxy-mode` landed the trusted-proxy rule and the plaintext warnings,
-  and `windows-named-pipe` still inherits the transport shape this bullet
-  reserves: it extends the same `transport` module with its own bind and
-  connector front-end, and it adds no second service implementation. This is the deployment shape ADR 0004 chose and
+  and `windows-named-pipe` landed the transport shape this bullet reserved: the
+  same `transport` module gained its own bind and connector front-end, and it added
+  no second service implementation. This is the deployment shape ADR 0004 chose and
   `reverse-proxy-mode` landed: the daemon stays plaintext and a reverse proxy
   terminates TLS in front of it, so no `transport` front-end terminates TLS.
   `reverse-proxy-mode` added `api_contracts::proxy` beside the transport,
@@ -4321,7 +4451,7 @@ archive.
   `ConfigError::InvalidTrustedProxy`, the per-connection
   `connectrpc::PeerAddr` stamp, the bind-time warning in the one TCP accept loop
   and the pairing handler's plaintext warning; its private connection body now
-  names `connectrpc::ConnectRpcBody`, and `windows-named-pipe` inherits that
+  names `connectrpc::ConnectRpcBody`, and `windows-named-pipe` inherited that
   private shape unchanged.
   `serve_stream` stays the only connection path
   and the landed `serve_tcp_listener` is the shape a new accept loop copies:
@@ -4335,17 +4465,22 @@ archive.
   `serve_tcp_listener_service` and `serve_tcp_service`, so the earlier exception
   is closed. A front-end that resolves a non-default authority
   names it through a helper beside `local_authority` and `remote_authority`; new
-  settings and bind failures join the non-exhaustive `ConfigError`. Because
-  `Client` builds its own transport and exposes no injection point,
-  `windows-named-pipe` extends `client` with a constructor for its own transport
-  instead of injecting one from outside; on non-Unix there is no local
-  constructor and no `serve_uds`
-  ACL until `windows-named-pipe` lands, because the landed socket rule is
-  Unix-only and a named pipe carries its own access rule rather than
-  `METIS_SOCKET_GROUP`. `windows-named-pipe` inherits the cursor refusal
-  unchanged: it is an
-  ordinary Connect error raised by `Ring::stream` at stream establishment, so a
-  front-end carries it without a line of its own.
+  settings and bind failures join the non-exhaustive `ConfigError`.
+  `windows-named-pipe` landed against exactly that shape: `serve_pipe` and
+  `serve_pipe_service` are the router-taking and service-taking pair over the shared
+  `serve_connection`, `pipe_transport` is the connector that reuses
+  `local_authority`, `PipeName` with `resolve_pipe_name` is the endpoint rule
+  (`METIS_ENDPOINT` as a validated local pipe path), `pipe_descriptor_sddl` with the
+  private `PipeSecurityDescriptor` is the access rule for the daemon's own account
+  plus SYSTEM and `PIPE_REJECT_REMOTE_CLIENTS` rejects remote clients, and the
+  `windows` job on `windows-latest` compiles the whole thing for the Windows target
+  and runs nothing. It did not extend `client`: `Client` still builds its own
+  transport with no injection point, so `pipe_transport` is the connector a later
+  ticket wraps and the missing Windows client constructor stays a recorded gap, as
+  does the Unix-only `serve_uds` ACL against the pipe's own access rule, which is
+  the descriptor rather than `METIS_SOCKET_GROUP`. The cursor refusal needed no line
+  of its own: it is an ordinary Connect error raised by `Ring::stream` at stream
+  establishment, so the pipe front-end carried it unchanged.
 - `pairing-and-tokens` landed the credential path this bullet reserved, and
   `remote-pairing` consumes it: request metadata and RPCs under `metis.v1`,
   credentials as `Authorization` metadata on every call, including the stream, on
@@ -4562,6 +4697,22 @@ archive.
   out-of-scope hunk, the `docs/tasks/state.yaml` pointer in commit `d069baa`, which
   the landing commit does not touch. The earlier notes in this section carry the
   pending set at their own landing moment, and this note carries the current set.
+- `windows-named-pipe` landed as the merge commit `84bdc61` on
+  `task/windows-named-pipe`, parents `4d1b59c` (the landing branch, created at
+  `main`'s tip because it did not exist before this landing) and `e3f35db` (the
+  working branch `ticket/windows-named-pipe`, six `wip:` commits off `main` at
+  `4d1b59c`, deleted after the merge), with the ticket note and the committed
+  deviation report in the docs commit `0dda9c4`. It lands the last pending ticket:
+  the Windows half of the local transport, with the name rule, the descriptor, the
+  front-end pair, the connector and the Windows compile gate, and it leaves the
+  contract, the generated trees, the ABI, the plugin crates and the Unix and TCP
+  paths untouched. **The effort's frontier is now empty: all 18 tickets have landed
+  sections in this file.** What remains is the end-of-effort review, the coherence refactor
+  and the archive, plus the gaps this landing records (the seven `docs/testing.md`
+  lists with their closing checks, the local unverifiability of the CI job's
+  `daemon` half, and the cross-target toolchain requirement the harvest adds to
+  `docs/testing.md`). The earlier notes in this section carry the pending set at
+  their own landing moment; this note carries the empty one.
 
 ---
 

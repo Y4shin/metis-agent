@@ -116,6 +116,32 @@ trusted proxy suppresses it. The pairing call carries the preshared key in its
 body, so a plaintext client leg on that call prints one warning per service,
 which is once rather than once per call.
 
+## Windows local transport
+
+On Windows the local endpoint is a named pipe rather than a socket, and
+`METIS_ENDPOINT` names it the way it names a socket path on Unix. An absent or
+empty value is the platform default, `\\.\pipe\metis-daemon`. A value must
+start with the local pipe prefix `\\.\pipe\` (compared case-insensitively,
+because Windows pipe names are not case sensitive), must fit the 256 characters
+`CreateNamedPipeW` documents, and must carry no interior NUL. Anything else, a
+`\\server\pipe\name` path included, is a typed `ConfigError::InvalidPipeName`
+naming the variable and the value rather than a silent fall back to the default,
+so a typo cannot quietly point the daemon at a remote pipe.
+
+Every pipe instance is created with a security descriptor that grants full
+access to the daemon's own account, read from the daemon process's token, and to
+Local System, denies the network logon group, and carries no inherited access,
+and the pipe rejects remote clients. The ACL alone would not make the pipe
+local-only: a remote caller using the daemon account's credentials carries the
+same user SID, so the reject flag is what closes the network path. The first
+instance carries `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a squatter that already
+holds the name makes the daemon fail loudly instead of sharing the pipe with it.
+
+The pipe is the Windows counterpart of the private socket directory: it is
+private to the account that owns the daemon, so any process running as that
+account on the same machine can connect, exactly as mode 0700 behaves on Unix,
+and a Windows client has no credential path yet.
+
 ## Reproduction
 
 The first runnable path is the local transport skeleton:

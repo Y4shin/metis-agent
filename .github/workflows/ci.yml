@@ -86,3 +86,22 @@ jobs:
 
       - name: Plugin ABI header regeneration check
         run: devenv shell -- bash scripts/regenerate-abi-header.sh --check
+
+  # The Windows half of the local transport is compiled, never run: no runner in
+  # this effort executes a named-pipe test, so the evidence this job produces is
+  # compilation for the Windows target. `--all-targets` is what compiles the
+  # pipe test binary (`crates/api-contracts/tests/pipe.rs`) and therefore the
+  # serve-and-connect test with it; the gap that leaves is recorded, with the
+  # invocation that would close it, in `docs/testing.md`.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # devenv is a Linux shell, so this job installs the same toolchain channel
+      # devenv pins for itself.
+      - name: Install the nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Compile the Windows transport
+        run: cargo +nightly check -p api-contracts -p daemon --all-targets
