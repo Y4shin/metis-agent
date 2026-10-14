@@ -427,10 +427,17 @@ has behaviour worth gating.
 
 A second job, `windows`, runs on `windows-latest` and compiles the Windows local
 transport for the Windows target with
-`cargo +nightly check -p api-contracts -p daemon --all-targets`. It executes
-nothing, so it proves the Windows path compiles rather than proving a pipe
-works; the gaps it leaves are listed in the Windows local transport block above,
-together with the check that would close each one.
+`cargo +nightly check -p api-contracts --all-targets`. It executes nothing, so it
+proves the Windows path compiles rather than proving a pipe works; the gaps it
+leaves are listed in the Windows local transport block above, together with the
+check that would close each one. It checks `api-contracts` alone because `daemon`
+reaches `plugin-contract`, whose build script compiles a C file that MSVC's default
+C mode rejects, so the daemon half failed on the plugin line rather than on the
+transport (`docs/bugs/plugin-contract-c-static-assert-msvc.md` records that defect,
+its two candidate fixes and its closing check). Measured on this repository's Linux
+host with the Windows target: `api-contracts` and `client` both check clean and
+`daemon` stops in that C file, so `-p client` joins the job whenever a Windows
+client constructor exists.
 
 ## Mock conventions
 
