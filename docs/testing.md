@@ -277,8 +277,15 @@ Plugin host, documented in `crates/plugin-runtime`:
   gating, duplicate refusal, enable and disable, unregister, both-direction
   schema validation, quarantine and the unload ordering; `tests/concurrency.rs`
   runs eight plugin futures on one host loop and asserts the plugin started no
-  thread. The runtime starts no runtime of its own: it hands back a `Future` and
-  the test's small loop polls it.
+  thread; `tests/waker.rs` covers the waker lifecycle, and the crate's own
+  `#[cfg(test)]` module drives one consumed clone's second `wake`, which only a
+  caller that bypasses the authoring bridge can provoke. The waker tests assert
+  the accounting rather than a log line: the host releases the one owning
+  reference it hands each poll as soon as that poll returns, a wake that arrives
+  after the future was dropped is recorded against the request id of the call it
+  belongs to, and the fixture's `tool.deferred` and `tool.wake_deferred`
+  capabilities are what provoke that late wake. The runtime starts no runtime of
+  its own: it hands back a `Future` and the test's small loop polls it.
 
 Daemon state, documented in `crates/daemon`:
 
