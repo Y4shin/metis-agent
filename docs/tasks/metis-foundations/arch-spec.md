@@ -3846,13 +3846,55 @@ window is built for this policy.
 
 ---
 
-## Pending ticket: `reverse-proxy-mode`
+## Landed ticket: `reverse-proxy-mode`
+
+Landed on `task/reverse-proxy-mode` as the merge commit `2d87824`, parents
+`a81ec4f` (the landing branch, created at `main`'s tip because it did not exist
+before this landing, the convention this spec records) and `7927f61` (the working
+branch `ticket/reverse-proxy-mode`, eight `wip:` commits off `main` at
+`a81ec4f`, deleted after the merge); the docs commit `b89942d` carries the ticket
+note and the committed deviation report. The merge was clean and the landing tree
+is byte-identical to the verified tip (both trees hash to `c20fdb02`, and
+`git diff 7927f61 HEAD` is empty), so every source file landed exactly as
+verified and no source gate was re-run at landing. The gates were measured on
+`7927f61` by the verifier and re-run at finalize on `b89942d` by the parent
+through `devenv shell --`: `cargo fmt --check` clean; `cargo clippy --all-targets
+-- -D warnings` clean, with only the pre-existing `plugin-contract` C
+`_FORTIFY_SOURCE` line on stderr; the workspace `cargo test` at 212 passed, 0
+failed, 7 ignored (197 passed before this ticket); `cargo test -p api-contracts
+--lib proxy` at 12 passed; `cargo test -p daemon --test proxy` at 3 passed;
+`buf lint` and `buf breaking` green with the contract untouched; both
+regeneration `--check` runs clean; and the ABI harness at
+`[result] PASS (73 checks)`.
+
+The chain history is worth recording, because the branch's eight `wip:` commits
+are its trace: the first attempt (workflow run
+`158c525c-d271-41d9-8c7d-756dc67aee5d`) passed its preconditions gate and then
+lost its tdd child to a provider error before any work was produced, and the
+same-protocol retry (run `1934e2a1-0a96-4d40-91cd-21a294985b15`) landed the
+ticket at a budget 50 percent larger, which is why the working branch carries
+eight commits. One out-of-scope hunk travelled in with that branch: commit
+`d069baa` set `docs/tasks/state.yaml`'s `task:` pointer to `reverse-proxy-mode`,
+matching what the harness wrote into the working tree, and the landing commit
+does not touch that file.
 
 Blocked by the deprecated `tls-and-client-trust`, whose alternative it is, so its
-blocking edge is satisfied by a done ticket. It lands the deployment shape ADR
-0004 chose: the daemon stays plaintext, a reverse proxy terminates TLS in front of
-it, the daemon reads forwarded information only from proxies the operator names,
-and it warns honestly wherever plaintext remains.
+blocking edge was satisfied by a done ticket. It implements the deployment shape
+ADR 0004 chose: the daemon stays plaintext, a reverse proxy terminates TLS in
+front of it, the daemon reads forwarded information only from proxies the operator
+names, and it warns honestly wherever plaintext remains. Eight files changed
+(+1210/-12) against `main`, and the client's `skeleton.rs` is untouched, so the
+client's remote path reaches the stamped front-end for free.
+
+The surfaces below are the measured ones. The deviation report found no planned
+export differing from the actual one: every planned name landed with its planned
+signature, and the two divergences it records (`ConfigError::InvalidTrustedProxy`
+and the `Pair` handler) are additions rather than substitutions. What it did find,
+and what is folded in below, is a wider private surface (`PeerStamped<P>`, the
+generalized `serve_connection<S, P>`, `Service`'s warning field and its per-call
+resolve), a few additive items (`warn`'s `bool` return, the const `new()`,
+`Default`, the small derives), three behaviour details the approved section left
+to the implementer, and one corrected residual about the warning's latch.
 
 ### Exports
 
@@ -3867,7 +3909,8 @@ and it warns honestly wherever plaintext remains.
     empty set, which is off by default, the shape `resolve_remote_addr` set; a
     malformed entry is `ConfigError::InvalidTrustedProxy { variable, value }`, the
     variant the non-exhaustive enum was declared to gain. Entries are exact
-    addresses, comma separated, whitespace tolerated, and loopback is not trusted
+    addresses, comma separated, whitespace tolerated, and an empty entry between
+    commas is skipped by `parse` rather than refused. Loopback is not trusted
     implicitly: the trust rule stays visible in configuration.
   - `pub enum ClientAddress { Peer(IpAddr), Forwarded(IpAddr) }` with `address()`
     and a `Display` naming which it is, so a test asserts where the answer came from
@@ -3876,7 +3919,9 @@ and it warns honestly wherever plaintext remains.
     &HeaderMap) -> Option<ClientAddress>`: the peer, or, when the peer is trusted and
     `X-Forwarded-For` is present, its left-most entry. An untrusted peer's forwarded
     headers are never read, so a hostile client cannot influence the answer, and a
-    missing peer (the Unix socket) is `None`.
+    missing peer (the Unix socket) is `None`. A left-most entry from a named proxy
+    that is not an IP literal falls back to the peer rather than inventing an
+    address, which `the_rule_never_invents_an_address` asserts.
   - `pub enum ClientScheme { Plaintext, Encrypted }` and `pub fn client_scheme(peer,
     trusted, headers) -> ClientScheme`: `X-Forwarded-Proto: https` from a trusted peer
     is `Encrypted`; everything else, an untrusted peer included, is `Plaintext`,
@@ -3887,30 +3932,66 @@ and it warns honestly wherever plaintext remains.
     `listener_warning(addr, trusted)`, `Some` exactly when the bind address is not
     loopback and no trusted proxy is named, and `secret_warning(scheme, client)`,
     `Some` on a plaintext client leg. Plus `pub struct WarnOnce` (an `AtomicBool`) so
-    a per-request warning reaches the operator once per process rather than once per
-    call.
+    a per-request warning reaches the operator once per latch rather than once per
+    call, with the latch held where the residuals below record.
+  - Additions the approved section did not name, all measured and all additive:
+    `WarnOnce::warn(&Warning) -> bool` reports whether that call was the one that
+    emitted, which is what makes the latch testable without capturing stderr;
+    `WarnOnce::new()` is `const` and the type is `Default`; `ClientAddress` is `Copy`
+    with `Debug` and `PartialEq`; and `TrustedProxies` is `Debug` and `Clone`. The
+    module is mounted as `pub mod proxy;` in `crates/api-contracts/src/lib.rs` with
+    a module paragraph in the crate docs, and no dependent sees any of this.
 - `crates/api-contracts/src/transport.rs`: the TCP front-ends stop discarding the
   peer. `serve_tcp_listener_service` reads `stream.peer_addr()` and stamps
   `connectrpc::PeerAddr(peer)` into each request's extensions before the mounted
-  service sees it, which is what `RequestContext::peer_addr()` reads. The private
-  `serve_connection` and the single accept loop keep their shape, so the interceptor
-  chain stays mounted and no second connection path appears. The front-end resolves
-  `TRUSTED_PROXIES_ENV` the way `serve_uds_service` resolves its ACL, and prints
-  `listener_warning(local_addr, &trusted)` once at bind through the `eprintln!` this
-  file already uses for connection errors. The two doc comments that say the proxy
-  trust rule belongs to another ticket are corrected.
+  service sees it, which is what `RequestContext::peer_addr()` reads. The stamp
+  landed through two private items the approved section did not name: a
+  `PeerStamped<P>` tower service that inserts the extension in `call`, and a
+  generalized `async fn serve_connection<S, P>(stream: S, service: P)` whose bound
+  names `http::Request<hyper::body::Incoming>` and
+  `http::Response<connectrpc::ConnectRpcBody>`. The wrapper is not a
+  `ConnectRpcService`, so the body could not keep its old concrete parameter, and
+  the coupling to record is that a connectrpc upgrade which renames the body type
+  reaches this private signature. Both callers are in the same file, so no
+  dependent ticket sees the generalization, and the single accept loop keeps its
+  shape, so the interceptor chain stays mounted and no second connection path
+  appears. The front-end resolves `TRUSTED_PROXIES_ENV` the way `serve_uds_service`
+  resolves its ACL, and prints `listener_warning(local_addr, &trusted)` once at
+  bind through the `eprintln!` this file already uses for connection errors. A
+  value this build cannot parse now refuses the bind with the `ConfigError`
+  wrapped in an `io::Error` instead of being ignored, which the front-end
+  documents and
+  `a_malformed_trusted_proxy_value_refuses_the_tcp_front_end` asserts. The two doc
+  comments that say the proxy trust rule belongs to another ticket are corrected.
 - `crates/daemon/src/service.rs`: the `Pair` handler, the one call that carries a
   secret in a body, asks `secret_warning` with the request's peer and scheme and
   emits through the service's `WarnOnce` when the client leg is plaintext. Nothing
-  on the wire changes, and a loopback local call warns at most once.
+  on the wire changes, and a loopback local call warns at most once. Two measured
+  additions: `Service` gained a private `warnings: WarnOnce` field behind its
+  unchanged public constructor, so every caller and foreign test suite is
+  unaffected; and the handler resolves `TrustedProxies` per call rather than holding
+  the set as configuration, because the approved section named no configuration
+  field and `Service::new` is landed API that three foreign test suites call. The
+  consequence is recorded rather than hidden: the front-end and the handler each
+  read the variable, so a value that changes between them is resolved twice. A
+  third private addition, `refuse_trusted_proxies(ConfigError) -> ConnectError`,
+  maps a set this build cannot read to `ErrorCode::Internal`, so a pairing call over
+  an unreadable configuration is refused rather than judged on a set nobody could
+  parse; the approved section did not specify that path and no test asserts it, so
+  it is a residual rather than a contract.
 - `crates/client/src/skeleton.rs`: unchanged in shape; its remote path reaches the
   same front-end, so the peer stamp and the warning come for free and the in-process
   tests can drive the rule over a real loopback listener.
-- `docs/dev-env.md` gains `TRUSTED_PROXIES_ENV` beside `REMOTE_ADDR_ENV`, and
-  `docs/testing.md` gains the rule and warning commands with the properties they
-  assert.
+- `docs/dev-env.md` gained a "Remote exposure and reverse proxies" section with
+  `TRUSTED_PROXIES_ENV` beside `REMOTE_ADDR_ENV`, the trust rule, the left-most
+  entry rule, the no-TLS decision and the two warnings, and `docs/testing.md`
+  gained a "Reverse-proxy mode" command list naming the two test binaries and what
+  each asserts. No command was added to a ticket that did not own it, and the wire
+  contract, the identity headers, the credential and the event stream are untouched.
 
 ### Existing abstractions to use
+
+Used as specified: yes.
 
 - `ConfigError`'s non-exhaustive enum, declared for exactly this, and
   `resolve_remote_addr`'s shape (absent or empty means off, a malformed value is a
@@ -3943,24 +4024,38 @@ and it warns honestly wherever plaintext remains.
 ### Seams
 
 1. **Configuration seam.** Absent and empty mean no trusted proxies;
-   comma-separated literals parse with whitespace tolerated; a malformed entry is
+   comma-separated literals parse with whitespace tolerated, and an empty entry
+   between commas is skipped; a malformed entry is
    `ConfigError::InvalidTrustedProxy` naming variable and value; `contains` is
-   exact-address and does not trust loopback implicitly.
+   exact-address and does not trust loopback implicitly. Landed as the unit tests
+   the filter `cargo test -p api-contracts --lib proxy` selects (12 passed), which
+   cover the configuration, the forwarded rule, the scheme rule and the warning
+   decisions, and which also carry
+   `a_malformed_trusted_proxy_value_refuses_the_tcp_front_end` for the bind
+   refusal of an unreadable set.
 2. **Forwarded-rule seam (criteria 1 and 3).** With the peer named and
    `X-Forwarded-For: 203.0.113.7`, the client address is `Forwarded(203.0.113.7)`;
-   with the same header from an unnamed peer it is `Peer(peer)`; an unnamed peer's
-   `X-Forwarded-Proto: https` leaves the scheme `Plaintext` while a named peer's
-   `https` makes it `Encrypted`; with no peer at all the answer is `None` and nothing
-   is forwarded.
+   with the same header from an unnamed peer it is `Peer(peer)`; a named peer's
+   left-most entry that is not an IP literal falls back to `Peer(peer)` rather than
+   inventing an address, asserted by `the_rule_never_invents_an_address`; an
+   unnamed peer's `X-Forwarded-Proto: https` leaves the scheme `Plaintext` while a
+   named peer's `https` makes it `Encrypted`; with no peer at all the answer is
+   `None` and nothing is forwarded.
 3. **Peer-stamp seam.** Over a real loopback listener through the landed
    service-taking front-end, a handler reads `ctx.peer_addr()` as `Some(loopback)`,
    which is what makes the rule reachable end to end; over the Unix socket it is
-   `None`.
+   `None`. Landed as the three tests in `crates/daemon/tests/proxy.rs`
+   (`cargo test -p daemon --test proxy`, 3 passed), a new binary rather than cases
+   appended to the stream or auth suites, which is the repo's fixture-per-binary
+   convention: the binary carries its own `Observer`, `serve_over_tcp` and
+   `tcp_client` and stays independent of the stream suite.
 4. **Warning seam (criterion 2).** `listener_warning` on a non-loopback address with
    no proxy named is `Some`, the same address with a proxy named is `None`, and a
    loopback address with none named is `None`; a plaintext client leg on the
    secret-bearing call is `Some` and an `Encrypted` one is `None`; and `WarnOnce`
-   allows exactly one emission.
+   allows exactly one emission, which `warn`'s `bool` return makes assertable
+   without capturing stderr. `Warning`'s `Display` is asserted to read as one
+   sentence naming what is exposed and the remedy, an addition beyond the seam list.
 5. **Additivity seam.** The ABI and plugin crates are untouched at 73 checks, the
    contract is unchanged, the local socket path is unaffected, `Pair` behaves
    identically over a loopback listener, and the workspace suite stays green.
@@ -3969,7 +4064,10 @@ Test types: unit tests in `api-contracts` for the configuration, the forwarded r
 the scheme rule and the warning decisions; integration tests over a real loopback
 listener in the daemon's test suite for the peer stamp and the
 accepted-versus-ignored assertion; the existing client remote test for the in-process
-path; the contract and workspace gates for the rest.
+path; the contract and workspace gates for the rest. The measured counts on the
+landing tree: `cargo test -p api-contracts --lib proxy` 12, `cargo test -p daemon
+--test proxy` 3 (the new binary), against the workspace total of 212 passed, 0
+failed, 7 ignored, up from 197 before this ticket.
 
 ### Interface contract
 
@@ -3980,13 +4078,27 @@ path; the contract and workspace gates for the rest.
   the bind-time warning and the peer stamp; it must never use a forwarded header for
   authorization, only for exposure and, if it records one, for its audit record.
 - The map's deferred question of what a client should verify about a proxied endpoint
-  stays deferred with no owner (ADR 0004), and this ticket does not answer it.
+  stays deferred with no owner (ADR 0004), and this ticket did not answer it.
 - Recorded residuals: the daemon cannot detect an operator who exposes the listener
   without a proxy; the stamp covers the landed TCP front-ends only; the warning is
-  stderr text behind a once-per-process latch with no logging framework; a multi-hop
-  chain is not walked, so the left-most entry is only the client when the first hop
-  is honest; and `X-Forwarded-*` is a convention rather than a schema, so a proxy
-  that sets none leaves the daemon believing plaintext.
+  stderr text with no logging framework, and its latch is once per `Service`
+  instance and once per listener rather than once per process, so a multi-listener
+  process can emit more than one warning, which is where the approved section's
+  sentence and the landed behaviour differ; the front-end's `eprintln!` is itself
+  not asserted, because libtest captures stderr, so what is tested is the decision
+  and the wiring; the bind-time
+  environment resolve is covered indirectly only, because the integration test
+  builds the trusted set with `TrustedProxies::parse` and passes it to the observer,
+  so `METIS_TRUSTED_PROXIES` is never exercised end to end; a multi-hop chain is
+  not walked, so the left-most entry is only the client when the first hop is
+  honest; and `X-Forwarded-*` is a convention rather than a schema, so a proxy that
+  sets none leaves the daemon believing plaintext.
+- Recorded residuals, structural: the `Pair` handler's `ErrorCode::Internal`
+  refusal for an unreadable trusted set is a behaviour the approved section did not
+  specify and no test asserts; the front-end and the handler each resolve the
+  variable, so a value that changes between them is read twice; and the private
+  `serve_connection` signature names `connectrpc::ConnectRpcBody`, so a connectrpc
+  upgrade that renames the body type reaches code no test names by type.
 
 ---
 
@@ -3996,8 +4108,8 @@ The only ticket still pending in this effort is `windows-named-pipe`. Its sectio
 added when its chain reaches the frontier, and every ticket landed so far has one;
 the commitments below are what the landed tickets must already support, including
 the surfaces `local-identity-and-acl`, `state-store`, `pairing-and-tokens`,
-`remote-pairing`, `event-stream`, `stream-resume-and-expiry` and
-`cancellation-and-slow-consumers` landed.
+`remote-pairing`, `event-stream`, `stream-resume-and-expiry`,
+`cancellation-and-slow-consumers` and `reverse-proxy-mode` landed.
 
 - `event-stream`, `stream-resume-and-expiry`, `cancellation-and-slow-consumers`:
   append `StreamEvents` and `Cancel` to `metis.v1`, with `last_event_id` in the
@@ -4027,10 +4139,22 @@ the surfaces `local-identity-and-acl`, `state-store`, `pairing-and-tokens`,
   metadata by one interceptor, and an item now fails with the `slow-consumer` or
   `cancelled` refusal where a caller fell behind or its work was cancelled. Its
   landed section is above.
-- `windows-named-pipe`, `reverse-proxy-mode`: extend
-  the same `transport` module with their own bind and connector front-ends; no
-  second service implementation. `tls-and-client-trust` is deprecated (ADR
-  0004), so no `transport` front-end terminates TLS.
+- `reverse-proxy-mode` landed the trusted-proxy rule and the plaintext warnings,
+  and `windows-named-pipe` still inherits the transport shape this bullet
+  reserves: it extends the same `transport` module with its own bind and
+  connector front-end, and it adds no second service implementation. This is the deployment shape ADR 0004 chose and
+  `reverse-proxy-mode` landed: the daemon stays plaintext and a reverse proxy
+  terminates TLS in front of it, so no `transport` front-end terminates TLS.
+  `reverse-proxy-mode` added `api_contracts::proxy` beside the transport,
+  carrying the trusted-proxy set and the forwarded-header rule
+  (`TRUSTED_PROXIES_ENV`, `TrustedProxies`, `ClientAddress` with
+  `client_address`, `ClientScheme` with `client_scheme`, the two decisions
+  `listener_warning` and `secret_warning`, and the `WarnOnce` latch),
+  `ConfigError::InvalidTrustedProxy`, the per-connection
+  `connectrpc::PeerAddr` stamp, the bind-time warning in the one TCP accept loop
+  and the pairing handler's plaintext warning; its private connection body now
+  names `connectrpc::ConnectRpcBody`, and `windows-named-pipe` inherits that
+  private shape unchanged.
   `serve_stream` stays the only connection path
   and the landed `serve_tcp_listener` is the shape a new accept loop copies:
   build the router once, wrap it in an `Arc`, and clone the `Arc` per accepted
@@ -4044,13 +4168,14 @@ the surfaces `local-identity-and-acl`, `state-store`, `pairing-and-tokens`,
   is closed. A front-end that resolves a non-default authority
   names it through a helper beside `local_authority` and `remote_authority`; new
   settings and bind failures join the non-exhaustive `ConfigError`. Because
-  `Client` builds its own transport and exposes no injection point, each of
-  these tickets extends `client` with a constructor for its own transport
+  `Client` builds its own transport and exposes no injection point,
+  `windows-named-pipe` extends `client` with a constructor for its own transport
   instead of injecting one from outside; on non-Unix there is no local
   constructor and no `serve_uds`
   ACL until `windows-named-pipe` lands, because the landed socket rule is
   Unix-only and a named pipe carries its own access rule rather than
-  `METIS_SOCKET_GROUP`. Both inherit the cursor refusal unchanged: it is an
+  `METIS_SOCKET_GROUP`. `windows-named-pipe` inherits the cursor refusal
+  unchanged: it is an
   ordinary Connect error raised by `Ring::stream` at stream establishment, so a
   front-end carries it without a line of its own.
 - `pairing-and-tokens` landed the credential path this bullet reserved, and
@@ -4255,6 +4380,20 @@ the surfaces `local-identity-and-acl`, `state-store`, `pairing-and-tokens`,
   unchanged: cancellation is a handler-level RPC and the drop is an ordinary
   handler-level stream failure. The earlier notes in this section carry the pending
   set at their own landing moment, and this note carries the current set.
+- `reverse-proxy-mode` landed as the merge commit `2d87824` on
+  `task/reverse-proxy-mode`, parents `a81ec4f` (the landing branch, created at
+  `main`'s tip because it did not exist before this landing) and `7927f61` (the
+  working branch `ticket/reverse-proxy-mode`, eight `wip:` commits off `main` at
+  `a81ec4f`, deleted after the merge), with the ticket note and the committed
+  deviation report in the docs commit `b89942d`. It adds the trusted-proxy rule,
+  the per-connection peer stamp and the two plaintext warnings beside the landed
+  transport, and it leaves the wire contract, the generated trees, the ABI, the
+  plugin crates and the local socket path untouched, so the one ticket still
+  pending in the effort, `windows-named-pipe`, reads the same `serve_stream` and
+  `serve_tcp_listener_service` seams it read before. Its working branch carried one
+  out-of-scope hunk, the `docs/tasks/state.yaml` pointer in commit `d069baa`, which
+  the landing commit does not touch. The earlier notes in this section carry the
+  pending set at their own landing moment, and this note carries the current set.
 
 ---
 
