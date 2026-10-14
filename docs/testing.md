@@ -348,6 +348,15 @@ effort:
   target with `cargo +nightly check -p api-contracts -p daemon --all-targets`.
   That compiles the pipe front-end, the connector, the descriptor and token
   calls, and the pipe test binary, and runs nothing.
+- Reproducing that check on this Linux host needs the rustup nightly toolchain
+  first on `PATH`, because the `rustc` inside `devenv shell` has no Windows std:
+  `devenv shell -- bash -c 'export PATH="$HOME/.rustup/toolchains/nightly-2026-10-12-x86_64-unknown-linux-gnu/bin:$PATH"; cargo check -p api-contracts --all-targets --target x86_64-pc-windows-msvc'`.
+  From `devenv shell` alone the same command fails `E0463` with "can't find crate
+  for `std`". Measured at finalize: `-p api-contracts` and `-p client` both pass
+  for the Windows target, and `-p daemon` stops in `plugin-contract`'s C build
+  script, where the nix-wrapped clang cannot target `x86_64-pc-windows-msvc`. A
+  native Windows runner with MSVC is expected to pass that step, and the job's
+  first run is what proves it.
 
 Gaps, each with the check that would close it. Nothing below was executed on
 Windows in this effort, so the pipe is proven by construction, by compilation
@@ -372,9 +381,10 @@ for the Windows target, and by the platform-independent rules tested on Linux:
   same machine, or a client on a second host, closes it, and the error it
   observes replaces the current inference.
 - No client reaches the pipe yet. `Client::local` and `Client::with_endpoint`
-  are Unix-only and the credential store is Unix-only, so the wrapper has no
-  Windows constructor: `pipe_transport` is the connector a follow-up ticket
-  wraps, and a Windows credential path closes this gap.
+  are Unix-only, so the wrapper has no Windows constructor: `pipe_transport` is
+  the connector a follow-up ticket wraps. The client crate itself does compile
+  for the Windows target, measured at finalize, so the missing constructor is
+  the whole gap.
 
 ## CI
 

@@ -171,7 +171,14 @@ streaming assumptions before anything is built on top.
   token queries and no `interprocess` dependency. The pipe descriptor is
   `D:P(D;;GA;;;NU)(A;;GA;;;<daemon-user-SID>)(A;;GA;;;SY)`, mirroring Unix mode
   0700, with the residual that any same-user process can connect. The endpoint
-  override is validated to start with the local pipe prefix.
+  override is validated to start with the local pipe prefix. Landed as
+  `windows-named-pipe`: `PipeName` with its default and prefix rule, the
+  descriptor string built from the daemon's own token SID, `serve_pipe` and
+  `serve_pipe_service` over the same shared `serve_connection` the other
+  front-ends use, `pipe_transport` as the connector, and a `windows` CI job that
+  compiles the path for the Windows target and runs nothing. The pipe itself has
+  never executed anywhere in this effort, which is the boundary `docs/testing.md`
+  records as seven gaps with their closing checks.
 - `plugin-contract` holds the primitives, the payload types, the authoring
   trait, and both adapters, with the authoring side feature-gated;
   `metis-plugin-sdk` re-exports them and owns the async executor, helpers, core
@@ -355,10 +362,12 @@ streaming assumptions before anything is built on top.
   `remote-pairing` recorded it, no ticket owns it yet, and it matters most once
   the remote listener runs behind a proxy, which is when the listener becomes
   reachable by anything the proxy exposes.
-- Windows pipe verification, from the `windows-pipe-security` findings: the exact
-  error a remote client observes, whether a low-integrity same-user process is
-  denied, and the Windows runner needed for the descriptor and pipe-mode
-  assertions.
+- Closed by `windows-named-pipe` for the code and still open for the evidence:
+  the runner exists now, as the `windows` CI job, but it compiles and runs
+  nothing, so the exact error a remote client observes, whether a low-integrity
+  same-user process is denied, and the descriptor and pipe-mode read-backs all
+  stay unmeasured. `docs/testing.md` lists all seven gaps with the check that
+  would close each.
 - Closed by ADR 0004: the daemon does not terminate TLS, so the unverified
   rustls-over-Connect handshake no longer blocks anything. The spike's static musl
   build without TLS is the daemon's shape, and what a client should verify about

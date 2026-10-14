@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Windows named pipe transport
 status: stable
-workflow_state: ready
-blocked_by: [local-transport-rpc-skeleton]
+workflow_state: done
+blocked_by:
+- local-transport-rpc-skeleton
 size: s
 ---
 
@@ -124,3 +125,32 @@ the knowledge harvest can carry that line.
 not touched by this landing commit, which holds only this ticket doc and the
 deviation report. Its final value stays with `finalize-task` together with the
 ticket's `workflow_state` and the archive.
+
+Knowledge harvested at finalize. The toolchain line the landing asked for is now
+in `docs/testing.md`, together with what the harvest measured about the CI job's
+own command. Measured with the rustup `nightly-2026-10-12` toolchain on `PATH`
+inside `devenv shell`: `cargo check -p api-contracts --all-targets --target
+x86_64-pc-windows-msvc` passes, and so does `-p client` with the same flags,
+which corrects the approved section's rationale for keeping the client out of
+scope. The client crate is Windows-ready today; the client constructor stayed
+out because the operator scoped the change to `api-contracts`, not because the
+crate cannot compile there. `-p daemon` stops in `plugin-contract`'s C build
+script, where the nix-wrapped clang cannot target `x86_64-pc-windows-msvc`; a
+native Windows runner with MSVC is expected to pass that step, and the `windows`
+CI job's first run is the experiment that proves it. If that run is red, the
+one-line fix is to drop `-p daemon` from the job's command until the daemon
+effort lands its listener.
+
+Two records were corrected rather than extended. The approved section named
+`ConvertSidToStringW`, which does not exist; the landed call is
+`ConvertSidToStringSidW`, and the arch spec now says so, because a later reader
+would otherwise search for the wrong function. The approved section also placed
+the pipe tests in the module's own test block, while the `#[cfg(windows)]`
+serve-and-connect test and the `#[cfg(not(windows))]` skip test are a real
+integration test at `crates/api-contracts/tests/pipe.rs`; the arch spec now
+follows the seam that matches the invocation
+`cargo test -p api-contracts --test pipe`.
+
+The effort's frontier is empty as of this landing: all 18 tickets have landed
+sections in the arch spec, and the end-of-effort review, the coherence refactor
+and the archive are what remain.
