@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Pairing over the remote listener
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - pairing-and-tokens

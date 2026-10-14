@@ -2,7 +2,7 @@
 type: task
 subtype: research
 title: Which contract generators to use, where generated code lives, and how CI proves it is current
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 ---

@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Plugin version tolerance across compiled versions
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - plugin-abi-core

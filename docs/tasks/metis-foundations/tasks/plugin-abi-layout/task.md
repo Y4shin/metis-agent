@@ -2,7 +2,7 @@
 type: task
 subtype: grilling
 title: Source of truth for the plugin C ABI structs
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 mode: human

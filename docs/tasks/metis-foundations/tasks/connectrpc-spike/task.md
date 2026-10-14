@@ -2,7 +2,7 @@
 type: task
 subtype: prototype
 title: Does the Connect and Protobuf path work here, and what does it cost?
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 ---

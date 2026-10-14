@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Local access control and surface identity
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - local-transport-rpc-skeleton

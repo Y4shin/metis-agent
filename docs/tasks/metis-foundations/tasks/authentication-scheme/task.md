@@ -2,7 +2,7 @@
 type: task
 subtype: grilling
 title: Authentication scheme and credential transport between surfaces and the daemon
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 mode: human

@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Stream resume and expired cursors
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - event-stream

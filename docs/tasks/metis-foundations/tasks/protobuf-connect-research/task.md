@@ -2,7 +2,7 @@
 type: task
 subtype: research
 title: Is Protobuf with Connect or gRPC a better fit than OpenAPI with a JSON and SSE API?
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 ---

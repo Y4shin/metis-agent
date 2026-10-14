@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Local transport and the echo RPC skeleton
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - contract-pipeline

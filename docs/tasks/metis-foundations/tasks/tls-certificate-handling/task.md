@@ -2,7 +2,7 @@
 type: task
 subtype: grilling
 title: Certificate and key handling for the optional TCP/TLS listener
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 mode: human

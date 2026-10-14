@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Remote TCP listener, off by default
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - local-transport-rpc-skeleton

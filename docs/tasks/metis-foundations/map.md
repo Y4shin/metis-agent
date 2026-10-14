@@ -1,7 +1,7 @@
 ---
 type: map
 title: Metis foundations
-status: stable
+status: deprecated
 blocked_by: []
 ---
 

@@ -2,7 +2,7 @@
 type: task
 subtype: prototype
 title: Does a plausible authoring trait map cleanly onto the primitive ABI?
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 ---

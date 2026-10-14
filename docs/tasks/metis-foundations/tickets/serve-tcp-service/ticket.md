@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Service-taking TCP front-end
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 size: s

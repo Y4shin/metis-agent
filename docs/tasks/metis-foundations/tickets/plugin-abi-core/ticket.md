@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Plugin ABI primitives proven by a fixture plugin
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 size: m

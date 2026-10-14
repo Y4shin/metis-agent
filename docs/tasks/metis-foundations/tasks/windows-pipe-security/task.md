@@ -2,7 +2,7 @@
 type: task
 subtype: research
 title: Windows named pipe security descriptor and the exact remote-client rejection path
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 ---

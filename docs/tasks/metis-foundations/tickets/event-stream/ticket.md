@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Event stream with snapshot and identifier
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - local-transport-rpc-skeleton

@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Reverse-proxy mode and the plaintext warning
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - tls-and-client-trust

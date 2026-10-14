@@ -2,7 +2,7 @@
 type: task
 subtype: grilling
 title: Realtime protocol semantics for the WebSocket channel
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 mode: human

@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Daemon state store on SQLite
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 size: m

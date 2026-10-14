@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Pairing, per-surface tokens, and client credential storage
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - local-identity-and-acl

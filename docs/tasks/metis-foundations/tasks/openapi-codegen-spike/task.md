@@ -2,7 +2,7 @@
 type: task
 subtype: prototype
 title: Does spec-first generated server and client code work well enough?
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by: []
 ---

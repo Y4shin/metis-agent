@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Contract gates read one configuration and authenticate to the BSR
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - contract-pipeline

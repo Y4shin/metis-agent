@@ -2,7 +2,7 @@
 type: ticket
 subtype: feature
 title: Cancellation and slow-consumer handling
-status: stable
+status: deprecated
 workflow_state: done
 blocked_by:
 - event-stream
