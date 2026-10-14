@@ -377,7 +377,7 @@ const PIPE_NAME_MAX_CHARS: usize = 256;
 /// a caller cannot reach the transport with a name that is not a local pipe
 /// path. Windows pipe names are not case sensitive, so the prefix is compared
 /// case-insensitively and the operator's own spelling is kept.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PipeName(String);
 
 impl PipeName {
@@ -401,6 +401,8 @@ impl PipeName {
         if !prefix.is_some_and(|prefix| prefix.eq_ignore_ascii_case(PIPE_PREFIX)) {
             return Err(refuse());
         }
+        // The name is compared in characters, which is the unit
+        // `CreateNamedPipeW` documents, not in UTF-8 bytes.
         if value.chars().count() > PIPE_NAME_MAX_CHARS {
             return Err(refuse());
         }
@@ -471,8 +473,8 @@ pub fn pipe_descriptor_sddl(user_sid: &str) -> String {
 
 /// Serve a Connect router over a named pipe.
 ///
-/// This is the Windows local front-end, beside [`serve_uds`] and
-/// [`serve_tcp`]. The pipe is a duplex byte-mode pipe, and every accepted
+/// This is the Windows local front-end, beside `serve_uds` and `serve_tcp`.
+/// The pipe is a duplex byte-mode pipe, and every accepted
 /// instance is handed to the same private connection body the other front-ends
 /// use, so serving over a pipe is not a second connection path.
 ///
@@ -568,7 +570,7 @@ fn create_pipe_instance(
 
 /// Build an h2c client connection over a named pipe, lazily on first use.
 ///
-/// The connector is the shape [`uds_transport`] uses: a plain
+/// The connector is the shape `uds_transport` uses: a plain
 /// `tower::service_fn` that opens the pipe. The authority is the same
 /// [`local_authority`] the Unix socket transport names, because this is the
 /// same local IPC surface.
