@@ -119,7 +119,9 @@ mod pipe {
 
     /// Call echo over a freshly built connection, retrying while the listener
     /// creates its first instance: the listener is spawned, so the pipe does
-    /// not exist yet when the test starts.
+    /// not exist yet when the test starts. A failure is retried to the same
+    /// deadline rather than swallowed, so a served refusal ends the test with
+    /// that error named.
     async fn echo_over_the_pipe(name: &PipeName, message: &str) -> EchoResponse {
         let request = EchoRequest {
             message: message.to_owned(),

@@ -371,6 +371,10 @@ for the Windows target, and by the platform-independent rules tested on Linux:
 - No remote attempt has been recorded. A `\\HOSTNAME\pipe\name` attempt on the
   same machine, or a client on a second host, closes it, and the error it
   observes replaces the current inference.
+- No client reaches the pipe yet. `Client::local` and `Client::with_endpoint`
+  are Unix-only and the credential store is Unix-only, so the wrapper has no
+  Windows constructor: `pipe_transport` is the connector a follow-up ticket
+  wraps, and a Windows credential path closes this gap.
 
 ## CI
 
