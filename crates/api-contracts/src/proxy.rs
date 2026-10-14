@@ -256,7 +256,7 @@ impl fmt::Display for Warning {
             Self::PlaintextSecret { client } => {
                 let leg = match client {
                     Some(client) => client.to_string(),
-                    None => "no visible peer, so the local socket".to_owned(),
+                    None => "the local socket, which reports no peer".to_owned(),
                 };
                 write!(
                     f,
@@ -632,6 +632,10 @@ mod tests {
             message.contains(TRUSTED_PROXIES_ENV),
             "the warning names the remedy: {message}"
         );
+        assert!(
+            message.contains("serves plaintext and no proxy is named in"),
+            "the warning reads as one sentence: {message}"
+        );
 
         assert_eq!(
             listener_warning(exposed, &named),
@@ -668,6 +672,10 @@ mod tests {
         assert!(
             message.contains(TRUSTED_PROXIES_ENV),
             "the warning names the remedy: {message}"
+        );
+        assert!(
+            message.contains("carried the preshared key in its body"),
+            "the warning says what travelled: {message}"
         );
 
         assert_eq!(secret_warning(ClientScheme::Encrypted, Some(client)), None);
