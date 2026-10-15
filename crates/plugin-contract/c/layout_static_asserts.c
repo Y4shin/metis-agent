@@ -13,6 +13,20 @@
  * `size_of`, `align_of` and `offset_of`: that catches a stale formula here as
  * well as a layout change.
  *
+ * Every check below is written with `METIS_C_LAYOUT_ASSERT`, and every
+ * alignment is read with `__alignof`, because `cl.exe` compiles `.c` files in
+ * its legacy C mode unless a `/std:` flag asks for more, and the recorded MSVC
+ * invocation carries no such flag
+ * (`docs/bugs/archive/plugin-contract-c-static-assert-msvc.md`). That mode
+ * rejects the C11 `_Static_assert` message form and the C11 `_Alignof`
+ * operator, which is how the Windows build of `plugin-runtime` failed in this
+ * file before it type-checked any Rust. The forms here are valid C89 onwards,
+ * so the same source compiles in whatever mode a compiler defaults to and the
+ * check cannot be skipped: `scripts/check-c-layout-asserts.sh` compiles this
+ * file in strict ISO C89 under gcc and clang with warnings denied, and compiles
+ * a deliberately broken copy of it to prove that a mismatch still fails the
+ * build.
+ *
  * The only include is the generated header, because the header is the artifact
  * a non-Rust implementer compiles against. The presence predicates are written
  * here in the C form the header documents: a `size` compared against the
@@ -24,160 +38,168 @@
 
 #include "metis_plugin_abi.h"
 
+/* --- the check every assertion below is written with -------------------- */
+
+/* A false condition makes the array's length negative, which gcc, clang and
+ * cl.exe all reject as an error rather than as a warning, so a mismatch fails
+ * the build. `name` identifies the check in the compiler's diagnostic. */
+#define METIS_C_LAYOUT_ASSERT(condition, name) \
+    typedef char metis_c_layout_assert_##name[(condition) ? 1 : -1]
+
 /* --- the assumption every pointer-sized number below rests on ------------ */
 
-_Static_assert(sizeof(size_t) == sizeof(void *), "size_t and object pointers are the same size");
-_Static_assert(sizeof(MetisInvokeFutureFn) == sizeof(void *), "function pointers are the size of object pointers");
+METIS_C_LAYOUT_ASSERT(sizeof(size_t) == sizeof(void *), size_t_matches_object_pointers);
+METIS_C_LAYOUT_ASSERT(sizeof(MetisInvokeFutureFn) == sizeof(void *), function_pointers_match_object_pointers);
 
 /* --- status ------------------------------------------------------------- */
 
-_Static_assert(sizeof(MetisStatus) == sizeof(uint32_t), "MetisStatus is one 32-bit word");
-_Static_assert(_Alignof(MetisStatus) == _Alignof(uint32_t), "MetisStatus alignment");
-_Static_assert(METIS_STATUS_OK == 0, "frozen status ok");
-_Static_assert(METIS_STATUS_INVALID_ARGUMENT == 1, "frozen status invalid argument");
-_Static_assert(METIS_STATUS_NOT_FOUND == 2, "frozen status not found");
-_Static_assert(METIS_STATUS_PERMISSION_DENIED == 3, "frozen status permission denied");
-_Static_assert(METIS_STATUS_CANCELLED == 4, "frozen status cancelled");
-_Static_assert(METIS_STATUS_INTERNAL == 5, "frozen status internal");
-_Static_assert(METIS_STATUS_UNSUPPORTED == 6, "frozen status unsupported");
-_Static_assert(METIS_STATUS_PENDING == 7, "pending joins the frozen status space");
+METIS_C_LAYOUT_ASSERT(sizeof(MetisStatus) == sizeof(uint32_t), MetisStatus_size);
+METIS_C_LAYOUT_ASSERT(__alignof(MetisStatus) == __alignof(uint32_t), MetisStatus_align);
+METIS_C_LAYOUT_ASSERT(METIS_STATUS_OK == 0, frozen_status_ok);
+METIS_C_LAYOUT_ASSERT(METIS_STATUS_INVALID_ARGUMENT == 1, frozen_status_invalid_argument);
+METIS_C_LAYOUT_ASSERT(METIS_STATUS_NOT_FOUND == 2, frozen_status_not_found);
+METIS_C_LAYOUT_ASSERT(METIS_STATUS_PERMISSION_DENIED == 3, frozen_status_permission_denied);
+METIS_C_LAYOUT_ASSERT(METIS_STATUS_CANCELLED == 4, frozen_status_cancelled);
+METIS_C_LAYOUT_ASSERT(METIS_STATUS_INTERNAL == 5, frozen_status_internal);
+METIS_C_LAYOUT_ASSERT(METIS_STATUS_UNSUPPORTED == 6, frozen_status_unsupported);
+METIS_C_LAYOUT_ASSERT(METIS_STATUS_PENDING == 7, pending_joins_the_frozen_status_space);
 
 /* --- buffer owner tags -------------------------------------------------- */
 
-_Static_assert(METIS_BUFFER_OWNER_NONE == 0, "owner tag none");
-_Static_assert(METIS_BUFFER_OWNER_HOST == 1, "owner tag host");
-_Static_assert(METIS_BUFFER_OWNER_PLUGIN == 2, "owner tag plugin");
+METIS_C_LAYOUT_ASSERT(METIS_BUFFER_OWNER_NONE == 0, owner_tag_none);
+METIS_C_LAYOUT_ASSERT(METIS_BUFFER_OWNER_HOST == 1, owner_tag_host);
+METIS_C_LAYOUT_ASSERT(METIS_BUFFER_OWNER_PLUGIN == 2, owner_tag_plugin);
 
 /* --- ABI version ------------------------------------------------------- */
 
-_Static_assert(METIS_ABI_MAJOR == 1, "major 1 is the versioned entry symbol");
+METIS_C_LAYOUT_ASSERT(METIS_ABI_MAJOR == 1, major_1_is_the_versioned_entry_symbol);
 /* The revision replaced instance creation with the asynchronous initialisation
  * entry under the unchanged symbol and major, so the minor moved to 2. A reader
  * compares the minor additively: this minor and any newer one are accepted, an
  * older one is refused. */
-_Static_assert(METIS_ABI_MINOR == 2, "minor 2 is the asynchronous initialisation entry");
+METIS_C_LAYOUT_ASSERT(METIS_ABI_MINOR == 2, minor_2_is_the_asynchronous_initialisation_entry);
 
 /* --- the payload envelope, now in the header --------------------------- */
 
-_Static_assert(METIS_PAYLOAD_VERSION_MASK == 0x0f, "the low nibble is the format version");
-_Static_assert(METIS_PAYLOAD_CODEC_BIT == 0x10, "bit 4 selects the codec");
-_Static_assert(METIS_PAYLOAD_RESERVED_MASK == 0xe0, "bits 5 to 7 are reserved");
-_Static_assert(METIS_PAYLOAD_FORMAT_VERSION == 1, "format version 1");
-_Static_assert(METIS_CODEC_JSON == 0, "codec 0 is JSON");
-_Static_assert(METIS_CODEC_MESSAGEPACK == 1, "codec 1 is MessagePack");
+METIS_C_LAYOUT_ASSERT(METIS_PAYLOAD_VERSION_MASK == 0x0f, low_nibble_is_the_format_version);
+METIS_C_LAYOUT_ASSERT(METIS_PAYLOAD_CODEC_BIT == 0x10, bit_4_selects_the_codec);
+METIS_C_LAYOUT_ASSERT(METIS_PAYLOAD_RESERVED_MASK == 0xe0, bits_5_to_7_are_reserved);
+METIS_C_LAYOUT_ASSERT(METIS_PAYLOAD_FORMAT_VERSION == 1, format_version_1);
+METIS_C_LAYOUT_ASSERT(METIS_CODEC_JSON == 0, codec_0_is_json);
+METIS_C_LAYOUT_ASSERT(METIS_CODEC_MESSAGEPACK == 1, codec_1_is_messagepack);
 
 /* --- MetisBuffer ------------------------------------------------------- */
 
-_Static_assert(sizeof(MetisBuffer) == 3 * sizeof(void *) + 2 * sizeof(uint32_t), "MetisBuffer size");
-_Static_assert(_Alignof(MetisBuffer) == _Alignof(void *), "MetisBuffer alignment");
-_Static_assert(offsetof(MetisBuffer, ptr) == 0, "MetisBuffer.ptr offset");
-_Static_assert(offsetof(MetisBuffer, len) == sizeof(void *), "MetisBuffer.len offset");
-_Static_assert(offsetof(MetisBuffer, cap) == 2 * sizeof(void *), "MetisBuffer.cap offset");
-_Static_assert(offsetof(MetisBuffer, owner) == 3 * sizeof(void *), "MetisBuffer.owner offset");
-_Static_assert(offsetof(MetisBuffer, reserved) == 3 * sizeof(void *) + sizeof(uint32_t),
-               "MetisBuffer.reserved offset");
+METIS_C_LAYOUT_ASSERT(sizeof(MetisBuffer) == 3 * sizeof(void *) + 2 * sizeof(uint32_t), MetisBuffer_size);
+METIS_C_LAYOUT_ASSERT(__alignof(MetisBuffer) == __alignof(void *), MetisBuffer_align);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisBuffer, ptr) == 0, MetisBuffer_ptr_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisBuffer, len) == sizeof(void *), MetisBuffer_len_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisBuffer, cap) == 2 * sizeof(void *), MetisBuffer_cap_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisBuffer, owner) == 3 * sizeof(void *), MetisBuffer_owner_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisBuffer, reserved) == 3 * sizeof(void *) + sizeof(uint32_t),
+                      MetisBuffer_reserved_offset);
 
 /* --- MetisTablePrefix -------------------------------------------------- */
 
-_Static_assert(sizeof(MetisTablePrefix) == sizeof(size_t) + 2 * sizeof(uint32_t),
-               "MetisTablePrefix size");
-_Static_assert(_Alignof(MetisTablePrefix) == _Alignof(size_t), "MetisTablePrefix alignment");
-_Static_assert(offsetof(MetisTablePrefix, size) == 0, "prefix.size offset");
-_Static_assert(offsetof(MetisTablePrefix, abi_major) == sizeof(size_t), "prefix.abi_major offset");
-_Static_assert(offsetof(MetisTablePrefix, abi_minor) == sizeof(size_t) + sizeof(uint32_t),
-               "prefix.abi_minor offset");
+METIS_C_LAYOUT_ASSERT(sizeof(MetisTablePrefix) == sizeof(size_t) + 2 * sizeof(uint32_t),
+                      MetisTablePrefix_size);
+METIS_C_LAYOUT_ASSERT(__alignof(MetisTablePrefix) == __alignof(size_t), MetisTablePrefix_align);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisTablePrefix, size) == 0, MetisTablePrefix_size_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisTablePrefix, abi_major) == sizeof(size_t),
+                      MetisTablePrefix_abi_major_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisTablePrefix, abi_minor) == sizeof(size_t) + sizeof(uint32_t),
+                      MetisTablePrefix_abi_minor_offset);
 
 /* --- the future and the waker (neither vtable carries a size) ---------- */
 
-_Static_assert(sizeof(MetisFutureVtable) == 2 * sizeof(void *),
-               "the future vtable is poll and drop, and nothing else");
-_Static_assert(_Alignof(MetisFutureVtable) == _Alignof(void *), "MetisFutureVtable alignment");
-_Static_assert(offsetof(MetisFutureVtable, poll) == 0, "future vtable poll offset");
-_Static_assert(offsetof(MetisFutureVtable, drop) == sizeof(void *), "future vtable drop offset");
+METIS_C_LAYOUT_ASSERT(sizeof(MetisFutureVtable) == 2 * sizeof(void *), future_vtable_is_poll_and_drop);
+METIS_C_LAYOUT_ASSERT(__alignof(MetisFutureVtable) == __alignof(void *), MetisFutureVtable_align);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisFutureVtable, poll) == 0, MetisFutureVtable_poll_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisFutureVtable, drop) == sizeof(void *), MetisFutureVtable_drop_offset);
 
-_Static_assert(sizeof(MetisFutureHandle) == 2 * sizeof(void *),
-               "the handle is a context pointer and a vtable pointer");
-_Static_assert(_Alignof(MetisFutureHandle) == _Alignof(void *), "MetisFutureHandle alignment");
-_Static_assert(offsetof(MetisFutureHandle, ctx) == 0, "future handle ctx offset");
-_Static_assert(offsetof(MetisFutureHandle, vtable) == sizeof(void *), "future handle vtable offset");
+METIS_C_LAYOUT_ASSERT(sizeof(MetisFutureHandle) == 2 * sizeof(void *), future_handle_is_ctx_and_vtable);
+METIS_C_LAYOUT_ASSERT(__alignof(MetisFutureHandle) == __alignof(void *), MetisFutureHandle_align);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisFutureHandle, ctx) == 0, MetisFutureHandle_ctx_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisFutureHandle, vtable) == sizeof(void *), MetisFutureHandle_vtable_offset);
 
-_Static_assert(sizeof(MetisWakerVtable) == 4 * sizeof(void *),
-               "the waker vtable is clone, wake, wake_by_ref and drop");
-_Static_assert(_Alignof(MetisWakerVtable) == _Alignof(void *), "MetisWakerVtable alignment");
-_Static_assert(offsetof(MetisWakerVtable, clone) == 0, "waker vtable clone offset");
-_Static_assert(offsetof(MetisWakerVtable, wake) == sizeof(void *), "waker vtable wake offset");
-_Static_assert(offsetof(MetisWakerVtable, wake_by_ref) == 2 * sizeof(void *),
-               "waker vtable wake_by_ref offset");
-_Static_assert(offsetof(MetisWakerVtable, drop) == 3 * sizeof(void *), "waker vtable drop offset");
+METIS_C_LAYOUT_ASSERT(sizeof(MetisWakerVtable) == 4 * sizeof(void *), waker_vtable_is_four_entries);
+METIS_C_LAYOUT_ASSERT(__alignof(MetisWakerVtable) == __alignof(void *), MetisWakerVtable_align);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisWakerVtable, clone) == 0, MetisWakerVtable_clone_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisWakerVtable, wake) == sizeof(void *), MetisWakerVtable_wake_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisWakerVtable, wake_by_ref) == 2 * sizeof(void *),
+                      MetisWakerVtable_wake_by_ref_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisWakerVtable, drop) == 3 * sizeof(void *),
+                      MetisWakerVtable_drop_offset);
 
-_Static_assert(sizeof(MetisWaker) == 2 * sizeof(void *),
-               "the waker is a data pointer and a vtable pointer");
-_Static_assert(_Alignof(MetisWaker) == _Alignof(void *), "MetisWaker alignment");
-_Static_assert(offsetof(MetisWaker, data) == 0, "waker data offset");
-_Static_assert(offsetof(MetisWaker, vtable) == sizeof(void *), "waker vtable offset");
+METIS_C_LAYOUT_ASSERT(sizeof(MetisWaker) == 2 * sizeof(void *), waker_is_data_and_vtable);
+METIS_C_LAYOUT_ASSERT(__alignof(MetisWaker) == __alignof(void *), MetisWaker_align);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisWaker, data) == 0, MetisWaker_data_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisWaker, vtable) == sizeof(void *), MetisWaker_vtable_offset);
 
 /* --- MetisPluginTableV1 ------------------------------------------------ */
 
-_Static_assert(sizeof(MetisPluginTableV1) == sizeof(MetisTablePrefix) + 8 * sizeof(void *),
-               "the plugin table is the prefix plus eight entries");
-_Static_assert(_Alignof(MetisPluginTableV1) == _Alignof(void *), "MetisPluginTableV1 alignment");
-_Static_assert(offsetof(MetisPluginTableV1, size) == 0, "table.size offset");
-_Static_assert(offsetof(MetisPluginTableV1, abi_major) == sizeof(size_t), "table.abi_major offset");
-_Static_assert(offsetof(MetisPluginTableV1, abi_minor) == sizeof(size_t) + sizeof(uint32_t),
-               "table.abi_minor offset");
-_Static_assert(offsetof(MetisPluginTableV1, init_plugin) == sizeof(MetisTablePrefix),
-               "table.init_plugin offset");
-_Static_assert(offsetof(MetisPluginTableV1, destroy_instance) == sizeof(MetisTablePrefix) + sizeof(void *),
-               "table.destroy_instance offset");
-_Static_assert(offsetof(MetisPluginTableV1, list_capabilities) == sizeof(MetisTablePrefix) + 2 * sizeof(void *),
-               "table.list_capabilities offset");
-_Static_assert(offsetof(MetisPluginTableV1, invoke_future) == sizeof(MetisTablePrefix) + 3 * sizeof(void *),
-               "table.invoke_future offset");
-_Static_assert(offsetof(MetisPluginTableV1, cancel) == sizeof(MetisTablePrefix) + 4 * sizeof(void *),
-               "table.cancel offset");
-_Static_assert(offsetof(MetisPluginTableV1, release_buffer) == sizeof(MetisTablePrefix) + 5 * sizeof(void *),
-               "table.release_buffer offset");
-_Static_assert(offsetof(MetisPluginTableV1, shutdown) == sizeof(MetisTablePrefix) + 6 * sizeof(void *),
-               "table.shutdown offset");
-_Static_assert(offsetof(MetisPluginTableV1, service_complete) == sizeof(MetisTablePrefix) + 7 * sizeof(void *),
-               "table.service_complete offset");
+METIS_C_LAYOUT_ASSERT(sizeof(MetisPluginTableV1) == sizeof(MetisTablePrefix) + 8 * sizeof(void *),
+                      plugin_table_is_the_prefix_plus_eight_entries);
+METIS_C_LAYOUT_ASSERT(__alignof(MetisPluginTableV1) == __alignof(void *), MetisPluginTableV1_align);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, size) == 0, MetisPluginTableV1_size_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, abi_major) == sizeof(size_t),
+                      MetisPluginTableV1_abi_major_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, abi_minor) == sizeof(size_t) + sizeof(uint32_t),
+                      MetisPluginTableV1_abi_minor_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, init_plugin) == sizeof(MetisTablePrefix),
+                      MetisPluginTableV1_init_plugin_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, destroy_instance) == sizeof(MetisTablePrefix) + sizeof(void *),
+                      MetisPluginTableV1_destroy_instance_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, list_capabilities) == sizeof(MetisTablePrefix) + 2 * sizeof(void *),
+                      MetisPluginTableV1_list_capabilities_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, invoke_future) == sizeof(MetisTablePrefix) + 3 * sizeof(void *),
+                      MetisPluginTableV1_invoke_future_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, cancel) == sizeof(MetisTablePrefix) + 4 * sizeof(void *),
+                      MetisPluginTableV1_cancel_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, release_buffer) == sizeof(MetisTablePrefix) + 5 * sizeof(void *),
+                      MetisPluginTableV1_release_buffer_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, shutdown) == sizeof(MetisTablePrefix) + 6 * sizeof(void *),
+                      MetisPluginTableV1_shutdown_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, service_complete) == sizeof(MetisTablePrefix) + 7 * sizeof(void *),
+                      MetisPluginTableV1_service_complete_offset);
 /* Append-only: the next entry lands exactly after the current tail, so no
  * padding sits between the table a host knows and the entry it does not. */
-_Static_assert(offsetof(MetisPluginTableV1, service_complete) + sizeof(void *) == sizeof(MetisPluginTableV1),
-               "no padding after the last table entry");
+METIS_C_LAYOUT_ASSERT(offsetof(MetisPluginTableV1, service_complete) + sizeof(void *) == sizeof(MetisPluginTableV1),
+                      no_padding_after_the_last_table_entry);
 
 /* The slot constants the header carries are the offsets above divided by the
  * pointer size, which is what makes the C presence predicate possible. */
-_Static_assert(METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT * sizeof(void *) + sizeof(MetisTablePrefix)
-                   == offsetof(MetisPluginTableV1, init_plugin),
-               "init_plugin slot constant");
-_Static_assert(METIS_PLUGIN_TABLE_V1_INVOKE_FUTURE_SLOT * sizeof(void *) + sizeof(MetisTablePrefix)
-                   == offsetof(MetisPluginTableV1, invoke_future),
-               "invoke_future slot constant");
-_Static_assert(METIS_PLUGIN_TABLE_V1_SERVICE_COMPLETE_SLOT * sizeof(void *) + sizeof(MetisTablePrefix)
-                   == offsetof(MetisPluginTableV1, service_complete),
-               "service_complete slot constant");
-_Static_assert(METIS_PLUGIN_TABLE_V1_SLOTS == 8, "the plugin table has eight pointer slots");
+METIS_C_LAYOUT_ASSERT(METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT * sizeof(void *) + sizeof(MetisTablePrefix)
+                          == offsetof(MetisPluginTableV1, init_plugin),
+                      init_plugin_slot_constant);
+METIS_C_LAYOUT_ASSERT(METIS_PLUGIN_TABLE_V1_INVOKE_FUTURE_SLOT * sizeof(void *) + sizeof(MetisTablePrefix)
+                          == offsetof(MetisPluginTableV1, invoke_future),
+                      invoke_future_slot_constant);
+METIS_C_LAYOUT_ASSERT(METIS_PLUGIN_TABLE_V1_SERVICE_COMPLETE_SLOT * sizeof(void *) + sizeof(MetisTablePrefix)
+                          == offsetof(MetisPluginTableV1, service_complete),
+                      service_complete_slot_constant);
+METIS_C_LAYOUT_ASSERT(METIS_PLUGIN_TABLE_V1_SLOTS == 8, plugin_table_has_eight_pointer_slots);
 
 /* --- MetisHostApiV1 --------------------------------------------------- */
 
-_Static_assert(sizeof(MetisHostApiV1) == sizeof(size_t) + 5 * sizeof(void *), "MetisHostApiV1 size");
-_Static_assert(_Alignof(MetisHostApiV1) == _Alignof(void *), "MetisHostApiV1 alignment");
-_Static_assert(offsetof(MetisHostApiV1, size) == 0, "host.size offset");
-_Static_assert(offsetof(MetisHostApiV1, user_data) == sizeof(size_t), "host.user_data offset");
-_Static_assert(offsetof(MetisHostApiV1, progress) == sizeof(size_t) + sizeof(void *),
-               "host.progress offset");
-_Static_assert(offsetof(MetisHostApiV1, emit_event) == sizeof(size_t) + 2 * sizeof(void *),
-               "host.emit_event offset");
-_Static_assert(offsetof(MetisHostApiV1, log) == sizeof(size_t) + 3 * sizeof(void *), "host.log offset");
-_Static_assert(offsetof(MetisHostApiV1, service_request) == sizeof(size_t) + 4 * sizeof(void *),
-               "host.service_request offset");
-_Static_assert(offsetof(MetisHostApiV1, service_request) + sizeof(void *) == sizeof(MetisHostApiV1),
-               "no padding after the last callback");
-_Static_assert(METIS_HOST_API_V1_SERVICE_REQUEST_SLOT * sizeof(void *) + sizeof(size_t)
-                   == offsetof(MetisHostApiV1, service_request),
-               "service_request slot constant");
-_Static_assert(METIS_HOST_API_V1_SLOTS == 5, "the host table has five pointer slots");
+METIS_C_LAYOUT_ASSERT(sizeof(MetisHostApiV1) == sizeof(size_t) + 5 * sizeof(void *), MetisHostApiV1_size);
+METIS_C_LAYOUT_ASSERT(__alignof(MetisHostApiV1) == __alignof(void *), MetisHostApiV1_align);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisHostApiV1, size) == 0, MetisHostApiV1_size_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisHostApiV1, user_data) == sizeof(size_t), MetisHostApiV1_user_data_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisHostApiV1, progress) == sizeof(size_t) + sizeof(void *),
+                      MetisHostApiV1_progress_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisHostApiV1, emit_event) == sizeof(size_t) + 2 * sizeof(void *),
+                      MetisHostApiV1_emit_event_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisHostApiV1, log) == sizeof(size_t) + 3 * sizeof(void *),
+                      MetisHostApiV1_log_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisHostApiV1, service_request) == sizeof(size_t) + 4 * sizeof(void *),
+                      MetisHostApiV1_service_request_offset);
+METIS_C_LAYOUT_ASSERT(offsetof(MetisHostApiV1, service_request) + sizeof(void *) == sizeof(MetisHostApiV1),
+                      no_padding_after_the_last_callback);
+METIS_C_LAYOUT_ASSERT(METIS_HOST_API_V1_SERVICE_REQUEST_SLOT * sizeof(void *) + sizeof(size_t)
+                          == offsetof(MetisHostApiV1, service_request),
+                      service_request_slot_constant);
+METIS_C_LAYOUT_ASSERT(METIS_HOST_API_V1_SLOTS == 5, host_table_has_five_pointer_slots);
 
 /* --- the presence rule, in the form the header documents --------------- */
 
@@ -185,12 +207,12 @@ _Static_assert(METIS_HOST_API_V1_SLOTS == 5, "the host table has five pointer sl
     ((size) >= sizeof(MetisTablePrefix) + ((slot) + 1) * sizeof(void *))
 #define METIS_HOST_API_COVERS(size, slot) ((size) >= sizeof(size_t) + ((slot) + 1) * sizeof(void *))
 
-_Static_assert(METIS_PLUGIN_TABLE_COVERS(sizeof(MetisPluginTableV1), METIS_PLUGIN_TABLE_V1_SERVICE_COMPLETE_SLOT),
-               "the full plugin table covers every slot");
-_Static_assert(METIS_HOST_API_COVERS(sizeof(MetisHostApiV1), METIS_HOST_API_V1_SERVICE_REQUEST_SLOT),
-               "the full host table covers every slot");
-_Static_assert(!METIS_PLUGIN_TABLE_COVERS(sizeof(MetisTablePrefix), METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT),
-               "the bare prefix covers no entry");
+METIS_C_LAYOUT_ASSERT(METIS_PLUGIN_TABLE_COVERS(sizeof(MetisPluginTableV1), METIS_PLUGIN_TABLE_V1_SERVICE_COMPLETE_SLOT),
+                      full_plugin_table_covers_every_slot);
+METIS_C_LAYOUT_ASSERT(METIS_HOST_API_COVERS(sizeof(MetisHostApiV1), METIS_HOST_API_V1_SERVICE_REQUEST_SLOT),
+                      full_host_table_covers_every_slot);
+METIS_C_LAYOUT_ASSERT(!METIS_PLUGIN_TABLE_COVERS(sizeof(MetisTablePrefix), METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT),
+                      bare_prefix_covers_no_entry);
 
 /* --- the measurements Rust compares against ---------------------------- */
 
@@ -198,7 +220,7 @@ _Static_assert(!METIS_PLUGIN_TABLE_COVERS(sizeof(MetisTablePrefix), METIS_PLUGIN
  * asserted, so `tests/c_layout.rs` can compare both sides. */
 
 #define METIS_C_MEASURE_SIZE(type) const size_t metis_c_size_##type = sizeof(type)
-#define METIS_C_MEASURE_ALIGN(type) const size_t metis_c_align_##type = _Alignof(type)
+#define METIS_C_MEASURE_ALIGN(type) const size_t metis_c_align_##type = __alignof(type)
 #define METIS_C_MEASURE_OFFSET(type, field) const size_t metis_c_offset_##type##_##field = offsetof(type, field)
 
 METIS_C_MEASURE_SIZE(MetisStatus);
