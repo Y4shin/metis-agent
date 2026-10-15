@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use plugin_contract::abi::MetisStatus;
+use plugin_contract::capability::CapabilityDescriptor;
 use serde_json::{Value, json};
 
 use crate::bundle::{BundleError, StageError, TrustStore, extract, verify_bundle};
@@ -175,7 +176,7 @@ impl From<ManifestError> for LoadError {
 pub struct Serving {
     name: String,
     instance: Arc<Instance>,
-    capabilities: Vec<plugin_contract::capability::CapabilityDescriptor>,
+    capabilities: Vec<CapabilityDescriptor>,
     registry: Registry,
 }
 
@@ -191,7 +192,7 @@ impl Serving {
     }
 
     /// The capability descriptors that were registered.
-    pub fn capabilities(&self) -> &[plugin_contract::capability::CapabilityDescriptor] {
+    pub fn capabilities(&self) -> &[CapabilityDescriptor] {
         &self.capabilities
     }
 
@@ -255,8 +256,8 @@ pub async fn load_bundle(
     let instance = init
         .await
         .map_err(|error| initialisation_refusal(&name, error))?;
-    let capabilities = instance.capabilities().to_vec();
     cross_check(&manifest, &instance)?;
+    let capabilities = instance.capabilities().to_vec();
     let mut registry = Registry::new();
     registry
         .register(&name, Arc::clone(&instance))
