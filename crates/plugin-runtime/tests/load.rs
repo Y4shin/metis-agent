@@ -15,6 +15,8 @@
 
 mod support;
 
+use plugin_contract::abi::MetisStatus;
+use plugin_fixture::DEFECTIVE_INITIALISATION;
 use plugin_runtime::Host;
 use plugin_runtime::bundle::TrustStore;
 use plugin_runtime::load::{LoadError, Serving, load_bundle};
@@ -99,6 +101,12 @@ fn refusal(result: Result<Serving, LoadError>, what: &str) -> LoadError {
         Err(error) => error,
         Ok(_) => panic!("{what}"),
     }
+}
+
+/// The configuration and the host context of one load, matched: the
+/// configuration names the instance the host context names.
+fn matched(instance: &str) -> (Value, Value) {
+    (config(instance), host_context(instance))
 }
 
 #[test]
@@ -224,4 +232,123 @@ fn a_trusted_bundle_with_no_manifest_is_refused_by_the_manifest_step() {
             panic!("an absent manifest is the manifest step's refusal, and this one is {other}")
         }
     }
+}
+
+#[test]
+fn the_plugin_receives_the_configuration_and_the_host_context_before_it_is_registered() {
+    let host = Host::new();
+    let (file, trust) = bundle::bundle_file(Some(&hand_written(&CAPABILITIES)));
+    let (config, context) = matched("loaded");
+
+    let serving = block_on(load_bundle(&host, file.path(), &config, &context, &trust))
+        .expect("the fixture's own bundle loads");
+
+    // The plugin read both parts of the one payload: it refuses an
+    // initialisation whose configuration names another instance, which is a
+    // comparison against the host context, and it logs the context's name, so
+    // the one line proves the other part arrived.
+    assert!(
+        host.logs()
+            .iter()
+            .any(|line| line.ends_with("fixture: initialised for loaded")),
+        "the plugin saw the host context's instance name: {:?}",
+        host.logs()
+    );
+    // The plugin's own constructor ran to completion before the load returned,
+    // and the load returns only after registering the instance, so the plugin
+    // was initialised before it was registered.
+    let ordering = host.ordering();
+    assert!(
+        ordering
+            .iter()
+            .any(|line| line.starts_with("initialisation started from")),
+        "initialisation started on the host: {ordering:?}"
+    );
+    assert!(
+        ordering
+            .iter()
+            .any(|line| line.starts_with("initialisation resolved")),
+        "the plugin's own constructor resolved before the load returned: {ordering:?}"
+    );
+    assert_eq!(
+        serving.name(),
+        NAME,
+        "the registered instance is the one that just initialised"
+    );
+}
+
+#[test]
+fn a_configuration_the_plugin_cannot_read_is_refused_as_the_configuration_class() {
+    let host = Host::new();
+    let (file, trust) = bundle::bundle_file(Some(&hand_written(&CAPABILITIES)));
+    // The configuration was resolved for another instance, which is the
+    // fixture's own way of saying that what it was handed does not match what
+    // it declared.
+    let (config, context) = (self::config("someone-else"), host_context("loaded"));
+
+    let error = refusal(
+        block_on(load_bundle(&host, file.path(), &config, &context, &trust)),
+        "a configuration the plugin cannot read cannot load",
+    );
+
+    match error {
+        LoadError::ConfigurationRefused { plugin, status } => {
+            assert_eq!(plugin, NAME, "the refusal names the plugin that refused it");
+            assert_eq!(
+                status,
+                MetisStatus::InvalidArgument,
+                "invalid_argument is the one status that speaks about the configuration"
+            );
+        }
+        other => panic!(
+            "a configuration the plugin cannot read is the configuration's class, and this refusal is {other}"
+        ),
+    }
+}
+
+#[test]
+fn the_plugins_own_setup_failure_is_refused_as_the_plugins_defect() {
+    let host = Host::new();
+    let (file, trust) = bundle::bundle_file(Some(&hand_written(&CAPABILITIES)));
+    // The configuration and the host context agree, so the failure that
+    // follows is the plugin's own and not the configuration's.
+    let (config, context) = matched(DEFECTIVE_INITIALISATION);
+
+    let error = refusal(
+        block_on(load_bundle(&host, file.path(), &config, &context, &trust)),
+        "a plugin whose own setup fails cannot load",
+    );
+
+    match error {
+        LoadError::PluginDefect { plugin, status } => {
+            assert_eq!(plugin, NAME, "the refusal names the plugin that failed");
+            assert_eq!(
+                status,
+                MetisStatus::Internal,
+                "the plugin's own failure keeps its own status"
+            );
+        }
+        other => {
+            panic!(
+                "a plugin whose own setup fails is the plugin's defect, and this refusal is {other}"
+            )
+        }
+    }
+
+    // The contract's failure ordering, at the seam where the caller drives the
+    // hand-off: the plugin's future is dropped, and then the instance pointer
+    // the entry handed out is destroyed.
+    let ordering = host.ordering();
+    assert!(
+        ordering
+            .iter()
+            .any(|line| line.starts_with("instance destroyed after a failed initialisation")),
+        "the failed initialisation destroyed the instance after dropping its future: {ordering:?}"
+    );
+    assert!(
+        !ordering
+            .iter()
+            .any(|line| line.starts_with("initialisation resolved")),
+        "a failed initialisation never resolves Ok, so nothing was registered: {ordering:?}"
+    );
 }

@@ -227,10 +227,14 @@ pub async fn load_bundle(
     // archive that signature covers, so it is code this host has decided to
     // trust.
     let loaded = Arc::new(unsafe { Loaded::open(&library, &manifest) }.map_err(LoadError::Call)?);
-    let body = initialisation_body(config, host_context);
-    let init = loaded.init_plugin(host, &body).map_err(LoadError::Call)?;
-    let instance = init.await.map_err(LoadError::Call)?;
     let name = manifest.name().to_string();
+    let body = initialisation_body(config, host_context);
+    let init = loaded
+        .init_plugin(host, &body)
+        .map_err(|error| initialisation_refusal(&name, error))?;
+    let instance = init
+        .await
+        .map_err(|error| initialisation_refusal(&name, error))?;
     let capabilities = instance.capabilities().to_vec();
     let mut registry = Registry::new();
     registry
@@ -242,6 +246,35 @@ pub async fn load_bundle(
         capabilities,
         registry,
     })
+}
+
+/// Classifies a failure of the initialisation hand-off.
+///
+/// A terminal status of `invalid_argument` is the plugin telling the host that
+/// what it was handed does not match what it declared, which is the
+/// configuration's class; every other terminal status is the plugin's own
+/// defect. The entry refusing to start at all is classified by the same status,
+/// because its refusal speaks about the same hand-off. Anything that is not a
+/// terminal status, such as a library that could not be mapped or a capability
+/// declaration that could not be read, stays the load-and-dispatch partition's
+/// own refusal.
+fn initialisation_refusal(plugin: &str, error: CallError) -> LoadError {
+    match error {
+        CallError::Init(status) | CallError::Status(status) => {
+            if status == MetisStatus::InvalidArgument {
+                LoadError::ConfigurationRefused {
+                    plugin: plugin.to_string(),
+                    status,
+                }
+            } else {
+                LoadError::PluginDefect {
+                    plugin: plugin.to_string(),
+                    status,
+                }
+            }
+        }
+        other => LoadError::Call(other),
+    }
 }
 
 /// This host's target, spelled the way contract 17.8 fixes it.
