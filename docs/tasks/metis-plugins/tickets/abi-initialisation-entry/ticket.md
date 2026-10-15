@@ -42,3 +42,59 @@ plugin as a real host.
 ## Blocked by
 
 - `waker-lifecycle-fix`
+
+## Implementation notes
+
+Landed on `task/abi-initialisation-entry` as the merge commit `9c9fd2a`
+("ticket(abi-initialisation-entry): Replace instance creation with asynchronous
+initialisation in the plugin table"), parents `ae96284` (the landing branch tip,
+`docs(ticket): land bundle-extraction`) and `c6666ff` (the working branch,
+`wip: abi-initialisation-entry the format gate and the recorded harness revision
+passing`). The merge was clean with no conflicts, and `git diff c6666ff HEAD` is
+empty, so the landed tree is byte-identical to the verified tip. The branch
+`ticket/abi-initialisation-entry` was deleted after the merge, and no source,
+test or config file was changed by the landing step. `docs/tasks/state.yaml` is
+left uncommitted, matching the `475f1c0` precedent, because `finalize-task` owns
+the workflow state.
+
+The implementation is 25 files, 1733 insertions and 351 deletions against
+`ae96284`, over four `wip:` commits. The verifier ran against `c6666ff`: `cargo
+fmt --check` and `cargo clippy --all-targets -- -D warnings` clean, `cargo test`
+293 passed with 0 failed and 8 ignored, the ABI harness `[result] PASS` with 82
+checks and no `[fail]` line, `scripts/regenerate-abi-header.sh --check` reporting
+no drift, and `scripts/build-c-plugin.sh` accepting the committed header under
+gcc and clang. The six acceptance criteria were read against the source, not
+only against the run log: `METIS_ABI_MAJOR` is 1, `METIS_ABI_MINOR` is 2 and
+`metis_plugin_entry_v1` is unchanged; `init_plugin` is slot 0 of the table and no
+counter member, slot constant, contract row or generated define survives; the
+C static assertions and `tests/c_layout.rs` measure the new layout; both the
+fixture and the C plugin refuse a configuration that does not match what they
+declared with `invalid_argument`; and the harness hand-drives the entry through
+`init.entry_starts`, `init.future_resolves`, `init.configuration_delivered`,
+`init.configuration_mismatch_refused` and
+`init.failed_initialisation_instance_destroyed`.
+
+The deviation report lives at
+`docs/tasks/metis-plugins/tickets/abi-initialisation-entry/deviation-reports/abi-initialisation-entry.md`
+and records six divergences from the arch spec. The consequential ones: the
+runtime gained a public hand-off (`Loaded::init_plugin` and a public `PluginInit`
+future, plus `CallError::Create` renamed `CallError::Init`) that the spec had
+assigned to `async-initialisation`; the published authoring `Plugin` trait broke
+for consumers (`Default` and `started` removed, a fallible asynchronous `init`
+added); `HostContext` and `Initialisation` sit behind the crate's `authoring`
+feature, which `plugin-runtime` deliberately keeps off, so
+`async-initialisation` must either build the `{"config", "host_context"}` body
+itself or change the dependency posture; and the fixture gained
+`FixtureConfig`, its own configuration declaration.
+
+The carried risk from `waker-lifecycle-fix` is closed here: the harness now
+releases the owning waker reference as soon as each poll returns, asserts
+handed-out equals released, and records a late wake as a request id rather than a
+count. Residual risks carried into the effort: the runtime failure path (a
+future that never resolves `Ok`, so the host drops it and then destroys the
+instance) has no test at the runtime seam and is covered only at the raw ABI
+seams, with `async-initialisation` the natural owner; two foreign runtime tests
+were adapted (`tests/registry.rs` expects ABI `(1, 2)`, `tests/waker.rs` measures
+the call's waker references as a delta after initialisation, still pinning the
+call's own two); and nothing here gates the minor bump at bundle-load time, so
+`manifest-and-library` owns the `min_abi_minor` refusal.
