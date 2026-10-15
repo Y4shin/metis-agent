@@ -1,5 +1,6 @@
-//! The bundle verifier: the container, the certificate chain and the payload
-//! signature.
+//! The bundle's two halves: the verifier, which turns a file into a borrowed
+//! view of it or a typed refusal, and the extractor, which turns that view into
+//! a staging directory this host's load reads.
 //!
 //! A bundle is a file, and verifying one turns the file into either a borrowed
 //! view of it or a typed refusal. Nothing is extracted and nothing is copied:
@@ -24,6 +25,13 @@ use x509_cert::der::oid::AssociatedOid;
 use x509_cert::der::{Decode, Encode, ErrorKind, Reader, SliceReader};
 use x509_cert::ext::pkix::BasicConstraints;
 use x509_cert::time::Time;
+
+mod extract;
+
+// The extractor is reached as `bundle::extract`, next to the verifier it takes
+// its input from, so a caller names one module for both halves of the bundle
+// path.
+pub use extract::{STAGING_PREFIX, StageError, StagedBundle, extract};
 
 /// The container's magic, at offset 0.
 pub const CONTAINER_MAGIC: [u8; 8] = *b"METISBND";

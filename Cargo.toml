@@ -90,6 +90,15 @@ getrandom = "0.4"
 sha2 = "0.11"
 subtle = "2"
 
+# The bundle extractor reads a bundle's archive with `zip`. Its default feature
+# set pulls in bzip2, zstd, lzma, ppmd and AES, each of which brings a C or a
+# crypto dependency into the path that reads untrusted bytes, so they are off.
+# The one compressor left is pure-Rust `zlib-rs`, which `zip` reaches through
+# its `deflate-flate2-zlib-rs` feature; `stored` entries need no backend at all.
+zip = { version = "9", default-features = false, features = [
+    "deflate-flate2-zlib-rs",
+] }
+
 # The bundle verifier's trusted parse path. `ed25519-dalek` verifies the
 # payload signature over the key the chain carries, `x509-cert` reads the
 # certificate chain through `der`'s strict decoder, and `sha2` computes a key
