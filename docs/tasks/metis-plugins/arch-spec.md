@@ -20,7 +20,7 @@ applies here too: no em-dashes, plain vocabulary, the glossary's terms.
 - Effort destination, decisions, fog: `docs/tasks/metis-plugins/map.md`.
 - Effort spec, the user story set and the implementation decisions:
   `docs/tasks/metis-plugins/spec.md`.
-- Contract text, amended by two tickets in this effort:
+- Contract text, amended by the landed tickets in this effort:
   `docs/plugin-contract.md`.
 - Hazard measurements that the two level-0 tickets act on:
   `docs/tasks/metis-plugins/tasks/abi-hazard-fixtures/findings.md`.
@@ -61,34 +61,41 @@ applies here too: no em-dashes, plain vocabulary, the glossary's terms.
 
 What exists today, and therefore what every ticket below builds on.
 
-- `crates/plugin-contract`: the versioned C ABI. ABI major 1, minor 1.
-  `MetisPluginTableV1` carries eight slots, `create_instance` first and
+- `crates/plugin-contract`: the versioned C ABI. ABI major 1, minor 2.
+  `MetisPluginTableV1` carries eight slots, `init_plugin` first and
   `service_complete` last, with the slot constants, thresholds and layout
   assertions in `src/abi/layout.rs`. `METIS_PLUGIN_ENTRY_V1` names the entry
   symbol. `src/payload.rs` writes and reads the UTF-8 JSON envelope.
   `src/authoring/` holds the Rust authoring surface behind the `authoring`
-  feature: the `Plugin` trait, the export adapter, the call and waker bridge,
-  and the buffer ownership helpers.
+  feature: the `Plugin` trait with its asynchronous fallible `init` and no
+  `Default` bound, the export adapter, the call and waker bridge, and the buffer
+  ownership helpers. `Initialisation` and `HostContext`, the two named parts of
+  the initialisation payload, live there too, so they sit behind that gate.
 - `crates/plugin-runtime`: the host side. `Loaded` maps a cdylib and reads the
   table through the version gate, `Host` carries the host table plus the
   recorded callbacks, `Instance` owns one instance and its in-flight set,
   `PluginCall` is the polled future, `registry::{Registry, Entry, RouteError,
-  RegistryError}` routes and validates. Its error surface is settled: one type
+  RegistryError}` routes and validates. `Loaded::init_plugin` starts one
+  instance's initialisation and returns the public `PluginInit` future, which
+  the caller drives. Its error surface is settled: one type
   each for load and dispatch (`CallError`), routing and validation
   (`RouteError`) and registration (`RegistryError`). The
   `bundle::{BundleHeader, VerifiedBundle, BundleError, TrustStore, RootKey,
   KeyId, verify_bundle}` surface verifies a signed bundle out of one file,
-  `src/bundle.rs`, reached as `plugin_runtime::bundle`, and the host waker
+  `src/bundle.rs`, reached as `plugin_runtime::bundle`, `bundle::extract` stages
+  that archive for one host target into a `StagedBundle`, and the host waker
   accounting is `Host::waker_counts()` plus the new `Host::wakes_after_drop()`.
 - `crates/plugin-fixture`: the Rust fixture with its ten capabilities, its
   hand-written C twin (`c/c-plugin.c`), the other-major plugin, and the ABI
   harness (`src/bin/abi-harness.rs`) that hand-drives a real host.
-- `docs/plugin-contract.md` is v1 text with two of this effort's amendments
-  already in it: the waker rule, in section 8 and section 11 rule 4, and the
-  bundle container, chain, profile, key id, revocation and refusal rules, in
-  section 17. It still names `create_instance` and a counters entry that this
-  effort's spec removes, and `abi-initialisation-entry` lands the amendment
-  that removes them. No other ticket edits that file.
+- `docs/plugin-contract.md` is v1 text with this effort's amendments already in
+  it: the waker rule, in section 8 and section 11 rule 4; the bundle container,
+  chain, profile, key id, revocation and refusal rules, in section 17; the
+  archive and extraction rules, in section 17.8; and the asynchronous
+  initialisation entry, in section 18 with sections 5, 11, 12, 14 and 15
+  rewritten around it. `init_plugin` is the table's first slot and the counters
+  entry is gone, so nothing there names `create_instance` any more. No other
+  ticket edits that file.
 - `docs/testing.md` is the command protocol. Tickets that add a command or close
   a recorded gap edit it in the same commit.
 
@@ -99,9 +106,10 @@ consumes exactly the surface its predecessor exported, and nothing else.
 
 ```text
 verify_bundle(bytes, &TrustStore) -> Result<VerifiedBundle, BundleError>   bundle-verification
-staged = extract(verified, host_target) -> Result<StagedBundle, StageError> bundle-extraction
+staged = extract(verified, target: &str) -> Result<StagedBundle, StageError> bundle-extraction
 manifest = Manifest::parse(text, &CapabilityList) -> Result<Manifest, ..>   manifest-and-library
 loaded = Loaded::open(lib_path, &Manifest)                                  manifest-and-library
+init = loaded.init_plugin(&host, body) -> Result<PluginInit, CallError>     abi-initialisation-entry
 serving = load_bundle(path, config, ctx, trust) -> Result<Serving, ..>      async-initialisation
 instance.cancel_all(deadline) -> CancelReport                               call-cancellation
 Host::with_sink(sink)                                                       callback-sink
@@ -157,7 +165,8 @@ table, and the first `wake` or `drop` of a token takes the entry out, so a
 second use of one consumed clone finds nothing left to release and is refused
 rather than acted on, which is what makes a double release impossible. The ABI
 is unchanged: the field stays opaque, the layout does not move,
-`METIS_ABI_MINOR` stays 1, and the corrected lifetime claim is in the doc
+`METIS_ABI_MINOR` stayed 1 until `abi-initialisation-entry` moved it to 2, and
+the corrected lifetime claim is in the doc
 comment in `crates/plugin-contract/src/abi/mod.rs` and in the regenerated
 header.
 
@@ -170,17 +179,20 @@ The fixture now exposes ten capabilities, the two new ones being `tool.deferred`
 and `tool.wake_deferred`, and the ABI harness's expected list grew with them.
 The double wake is provoked by a `#[cfg(test)]` unit test in
 `crates/plugin-runtime/src/lib.rs`, because the authoring surface cannot express
-it. `abi-initialisation-entry` inherits one host obligation from this fix,
-because the ABI harness does not yet release the waker reference its own poll
-hands out; see the carried risks below.
+it. `abi-initialisation-entry` inherited one host obligation from this fix,
+because the ABI harness did not yet release the waker reference its own poll
+hands out; it closed that obligation in the harness, and the record is in the
+Level 1 landed state below.
 
 #### `bundle-verification` (feature, l)
 
 **Exports.** A new `plugin_runtime::bundle` module, landed as one file,
 `crates/plugin-runtime/src/bundle.rs`, declared as `pub mod bundle` and reached
 as `plugin_runtime::bundle::...`. The crate root does not re-export its items.
-Splitting the file into a `bundle/` directory is left to `bundle-extraction` if
-the module grows.
+Splitting the file into a `bundle/` directory was left to `bundle-extraction`,
+which did split it: `crates/plugin-runtime/src/bundle.rs` stays the verifier and
+`crates/plugin-runtime/src/bundle/extract.rs` holds the extractor, re-exported
+so it is reached as `bundle::extract`.
 
 - `TrustStore`: the trust policy as a plain value the daemon constructs. It
   holds the roots as `RootKey` values, each a recomputed key id with the raw
@@ -347,91 +359,256 @@ and the refusal rules, and the dependency paragraph records the measured count.
 
 ## Level 1
 
+**Landed state.** Both level-1 tickets landed, and a level-2 chain starts from
+`8655751`, the last commit of the `abi-initialisation-entry` landing line.
+`bundle-extraction` landed on the landing branch `task/bundle-extraction`: its
+merge commit is `d318f65`, from the working branch tip `475f1c0` over the
+landing branch tip `bfb27bf`, and the landing line carries on to `ae96284`,
+which records the ticket. `abi-initialisation-entry` landed on
+`task/abi-initialisation-entry`: its merge commit is `9c9fd2a`, from the working
+branch tip `c6666ff` over the landing branch tip `ae96284`, which is the
+`bundle-extraction` landing, and the landing line carries on to `8655751`. That
+base therefore carries the `bundle` module split with the extractor in
+`crates/plugin-runtime/src/bundle/extract.rs`,
+reached as `plugin_runtime::bundle::extract`; the public `Loaded::init_plugin`
+hand-off with its `PluginInit` future and `CallError::Init`; the amended table
+with `init_plugin` in slot 0 and `METIS_ABI_MINOR` 2; the rewritten contract
+sections 5, 11, 12, 14 and 15 plus the new sections 17.8 and 18; and the
+authoring trait's new shape. Nothing else lands between these two tickets and
+the level-2 tickets.
+
 ### `bundle-extraction` (feature, m)
 
-**Exports.** `plugin_runtime::bundle::extract`: a function that takes an
-accepted `VerifiedBundle` plus this host's target and returns a `StagedBundle`,
-or a `StageError`. The verifier module is one file,
-`crates/plugin-runtime/src/bundle.rs`; splitting it into a `bundle/` directory is
-left to this ticket if the module grows. `StagedBundle` owns a temporary
-directory and removes it when dropped, so a failed load leaves nothing behind.
-It exposes the staged root, the manifest's path and this host's library path.
+**Exports.**
+`plugin_runtime::bundle::extract(verified: &VerifiedBundle<'_>, target: &str) ->
+Result<StagedBundle, StageError>`, landed as
+`crates/plugin-runtime/src/bundle/extract.rs`, declared as a private
+`mod extract` in `crates/plugin-runtime/src/bundle.rs` and re-exported, so the
+function is reached as `bundle::extract` next to the verifier and the split is
+the `bundle/` directory the plan left to this ticket. `StagedBundle` owns a
+staging directory and removes it when dropped, so a refused extraction and a
+finished load both leave nothing behind. It exposes `root()`, `manifest_path()`
+and `library_path()`, and implements `Drop`. The module also exports
+`STAGING_PREFIX` and the three limit constants, and its error is `StageError`
+with 15 variants: `ArchiveUnreadable`, `TooManyEntries`, `EntryTooLarge`,
+`ArchiveTooLarge`, `AbsoluteEntryName`, `ParentEntryName`, `UnusableEntryName`,
+`EntryIsSymlink`, `EntryIsDirectory`, `EntryIsNotRegularFile`,
+`EntryModeRefused`, `EntryUnreadable`, `MissingTargetLibrary`,
+`AmbiguousTargetLibrary` and `Io`.
 
-**Targets.** A target is one string, operating system and architecture joined
-by a hyphen, such as `linux-x86_64`, derived from `std::env::consts::OS` and
-`ARCH`. A bundle's library path per target is `lib/<target>/<file name>`. The
-archive root carries `manifest.toml` plus one directory per target.
+**Limits.** The landed numbers are `MAX_ENTRIES` 256, `MAX_ENTRY_SIZE` 64 MiB
+and `MAX_UNCOMPRESSED_SIZE` 256 MiB, four times the numbers the approved plan
+proposed (64, 32 MiB and 64 MiB). They are what contract 17.8 records and what a
+producer has to respect, so the approved figures are superseded:
+`sample-bundle-ci` and the SDK signing CLI adopt 256, 64 MiB and 256 MiB. The
+three constants are imported from `plugin_runtime::bundle`. The per-entry limit
+is checked first and the archive total answers for an archive whose entries are
+each inside their own limit, and the limits are enforced on declared entry sizes
+rather than on decompressed output, so a target this host does not load is never
+decompressed. No dependent broke, because nothing was built against the limits
+before this ticket.
 
-**Rules the ticket enforces and records in the contract.** Refuse an absolute
-entry name; refuse an entry name carrying `..`; refuse a symlink, hardlink or
-directory entry; refuse an entry that declares a Unix mode other than the one
-the host itself writes; refuse an archive above the entry count, the total
-uncompressed size or the per-entry size limit. Every entry is validated, even
-when its target is not this host's, and only the root manifest and this host's
-target directory are written to disk.
+**Targets.** A target is one string, the operating system and the architecture
+joined by a hyphen, such as `linux-x86_64`, spelled exactly as
+`std::env::consts::OS` and `std::env::consts::ARCH` spell them. `extract` takes
+it as a plain `&str`, and nothing in `plugin-runtime` exports its derivation:
+the tests pass explicit target strings, and `async-initialisation` owns the
+helper that derives this host's target. The loader that selects a library and
+the producer that writes a bundle must spell it the same way, because two
+derivations that disagree would refuse a bundle that carries the library the
+host needs. A bundle's library path per target is `lib/<target>/<file name>`,
+the archive root carries `manifest.toml` plus one directory per target, and a
+target directory holds exactly one file.
 
-**Existing abstractions to use.** The `zip` crate for the archive reader, with
-default features off and only pure-Rust deflate on, so no C dependency enters
-the path. `std::fs` with the host's own fixed modes, rather than applying the
-archive's. `StagedBundle`'s `Drop` for the cleanup rule, matching the ordering
-discipline the rest of the runtime uses.
+**Rules the landed ticket enforces and records in contract 17.8, in the order it
+decides them.** Refuse an archive this build cannot read; refuse an archive
+above the entry count limit; refuse an absolute entry name (a leading separator
+or a Windows volume), a name carrying `..`, a name that is empty once its
+separators are removed, or a name carrying a NUL byte; refuse a symlink, a
+directory, or any other entry that is not a regular file, which covers a
+hardlink, a device, a socket and a FIFO; refuse an entry that declares
+permission bits other than `0600`, the mode the host itself writes, which is the
+strict form of the declared-mode rule, since an entry that declares no mode is
+accepted and no other mode is; refuse an entry above 64 MiB declared or an
+archive above 256 MiB declared between its entries; refuse an entry this host
+stages whose bytes or checksum do not read; and refuse an archive with no file
+directly under `lib/<target>/`, or with more than one. Every entry is validated,
+even when its target is not this host's, and only the root manifest and this
+host's target directory are written to disk.
+
+The one-file-per-target rule and the strict declared-mode rule narrow two of the
+map's open fog items: the permission bits extraction accepts are fixed at `0600`,
+and a v1 bundle carries no assets beside the manifest and the one library per
+target, which a later ticket can relax.
+
+Two refusals moved a ticket earlier than the plan placed them.
+`MissingTargetLibrary` and `AmbiguousTargetLibrary` are extraction's, because
+`library_path()` returns one path and only the archive can say whether one file
+is there. `manifest-and-library` keeps its own refusal for a manifest that
+declares no library for this host, so the two stay distinguishable and
+`startup-policy` maps all three to its disable reason rather than collapsing
+them.
+
+`manifest_path()` may name a file that is not there: a bundle with no root
+manifest still stages, and the refusal is deliberately left to
+`manifest-and-library`, which tests existence rather than assuming the path
+resolves, so its absent-manifest refusal stays reachable.
+
+**Staging.** The directory is
+`std::env::temp_dir()/metis-plugin-stage-<pid>-<nanos>-<counter>`, named with the
+exported `STAGING_PREFIX`, mode `0700`, staged files `0600`, and no mode an entry
+declares ever reaches the filesystem. A refusal removes the directory before it
+is answered, and `Drop` removes it on the success path. Contract 17.8 names two
+of the three name components, the process id and a counter, and not the
+timestamp, which is an inaccuracy in the contract text rather than in the code;
+no dependent reads the name, and a crash sweep globs the exported prefix.
+
+**Existing abstractions to use.** `zip` 9, added once to the workspace
+dependency table with `default-features = false` and only the
+`deflate-flate2-zlib-rs` feature, so the pure-Rust deflate backend is reached
+through `flate2` and no C zlib path enters the reader. `std::fs` with the host's
+own fixed modes, rather than applying the archive's. `StagedBundle`'s `Drop` for
+the cleanup rule, matching the ordering discipline the rest of the runtime uses.
+`StageError` follows the crate's existing error style. `docs/testing.md` gained
+the command bullet the protocol rule requires for a new test file.
 
 **Do not reimplement.** Do not hand-roll the ZIP reader; do not enable
-`zip`'s `bzip2`, `zstd` or `aes` features, all of which bring C or crypto
-dependencies into the trusted path; do not re-verify the signature (already
-done); do not parse the manifest here.
+`zip`'s `bzip2`, `zstd`, `lzma`, `ppmd` or `aes` features, all of which bring C
+or crypto dependencies into the trusted path; do not re-verify the signature
+(already done); do not parse the manifest here. The do-not list held in full,
+and the only difference from the plan's letter is the backend's name: the plan
+said pure-Rust deflate and the landed reader reaches it through `flate2`'s
+`zlib-rs` backend, which is the same guarantee.
 
 **Seams.** One product seam: `extract(verified, target)` -> `StagedBundle`,
-tested from `crates/plugin-runtime/tests/bundle_extraction.rs` against both a
-well-formed bundle and a hostile archive built inside the test. Cleanup is
-asserted by the filesystem after the `Drop`.
+tested from `crates/plugin-runtime/tests/bundle_extraction.rs` against a
+well-formed bundle and hostile archives built, signed and byte-patched inside
+the test. Eleven refusal tests assert the exact `StageError` variant and an
+unchanged staging-directory set, target selection is exercised over three
+targets, the three limits are exercised at their edges, and cleanup is asserted
+by the filesystem after a refusal and after the `Drop`.
 
 **Interface contract.** `StagedBundle::root()`, `::manifest_path()`,
 `::library_path()`, and a `Drop` that removes the staging directory. Both
-`manifest-and-library` and `async-initialisation` consume it.
+`manifest-and-library` and `async-initialisation` consume it, and both classify
+`StageError` as a value rather than matching it exhaustively, because the landed
+variant set is wider than the ticket's refusal list, exactly as the verifier
+ticket's report says of `BundleError`'s 26 variants.
 
 ### `abi-initialisation-entry` (feature, l)
 
-**Exports.** The amended plugin table in `plugin-contract`: the
-`create_instance` slot becomes the asynchronous `init_plugin` slot, and the
-counters slot does not exist anywhere in the table. `METIS_ABI_MINOR` is bumped
-because the table changed; the entry symbol keeps major 1, so
-`metis_plugin_entry_v1` is unchanged. The new entry receives one envelope
-payload carrying the configuration and the host context, and returns two out
-parameters: the instance and a future that must resolve successfully before the
-instance is valid. The host-side driver for that future lands in
-`async-initialisation`, not here.
+**Exports.** The amended plugin table in `plugin-contract`, landed:
+`init_plugin` is slot 0, the counters slot does not exist anywhere in the table,
+and the additive surface is `METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT`, the
+matching threshold, the presence predicate
+`metis_plugin_table_has_init_plugin(size)` and the type alias
+`MetisInitPluginFn`. The removed names are gone with no compatibility flag:
+`MetisCreateInstanceFn`, `METIS_PLUGIN_TABLE_V1_CREATE_INSTANCE_SLOT`,
+`Loaded::create_instance`, `CallError::Create` and the `cbindgen.toml` include
+entry for the old alias.
 
-Everything that describes the table moves in this one ticket and in one commit:
-the contract text in `docs/plugin-contract.md`, the generated C header, the slot
-constants and thresholds in `src/abi/layout.rs`, the static assertions in
-`c/layout_static_asserts.c`, the Rust fixture, the C plugin and the ABI harness.
+**The ABI revision, as landed.** `METIS_ABI_MAJOR` stays 1 and
+`metis_plugin_entry_v1` is unchanged, because the symbol carries only the major
+and no plugin exists in the wild. `METIS_ABI_MINOR` is 2, so an older minor is
+refused before any entry is read and a newer one is read up to this build's
+layout. The table still carries eight pointer slots, so its `size` does not
+move: 80 bytes on a 64-bit target, the prefix plus eight pointer slots, which
+`src/abi/layout.rs` and `c/layout_static_asserts.c` assert and
+`tests/c_layout.rs` compares on both sides. The regenerated header carries
+`METIS_ABI_MINOR 2`, `METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT 0` and the
+`init_plugin` member. The new entry receives one host-owned envelope payload
+carrying the configuration and the host context, and returns two out
+parameters: the instance and a plugin-owned future that must resolve `Ok`
+before the instance is valid.
+
+**The host-side hand-off landed here, not in `async-initialisation`.**
+`plugin-runtime` replaced `Loaded::create_instance(&host) ->
+Result<Arc<Instance>, CallError>` with `Loaded::init_plugin(&host, body: &[u8])
+-> Result<PluginInit, CallError>`, and `PluginInit` is a public
+`Future<Output = Result<Arc<Instance>, CallError>>` that owns the plugin's
+initialisation future, reads the capability declaration once that future
+resolves, and destroys the instance pointer on drop when it never resolved `Ok`.
+`CallError::Create(MetisStatus)` was renamed `CallError::Init(MetisStatus)`. The
+table change could not leave the runtime compiling against a deleted slot, so
+the work was necessary, and it is public rather than private. A driver that
+never resolves `Ok` is dropped and then destroyed in that order, which is the
+contract's failure ordering. Two private details came with it: the
+ordering-ledger marker `initialisation started from <path>`, and
+`INITIALISATION_REQUEST_ID = 0`, the id a late wake from an initialisation is
+recorded against. `async-initialisation` consumes `Loaded::init_plugin` and
+`PluginInit` rather than reaching the raw table, and confirms that failure
+ordering at its own seam.
+
+**The authoring trait broke.** `Plugin` now requires one asynchronous, fallible
+constructor, `fn init(host: Host, initialisation: Initialisation) ->
+impl Future<Output = Result<Self, PluginError>> + Send where Self: Sized`, and
+the adapter installs `init_plugin::<P>` in slot 0 and calls
+`P::init(host, initialisation).await`. `Default` is gone, so an uninitialised
+plugin value is not representable; `started` is removed; `stopped` stays.
+`Initialisation` and `HostContext` are new public types in
+`plugin_contract::authoring::traits`, behind the plugin-side `authoring` feature
+gate, with `Initialisation::{new, body, decode, config, host_context}` and the
+field constants `CONFIG_FIELD` and `HOST_CONTEXT_FIELD`. Nothing of the old
+shape is reachable behind a flag. This is a break of a published authoring
+surface that the `metis-plugin-sdk` effort consumes, and no ticket in this
+effort's graph owns the migration: the SDK inherits the new shape wholesale.
+
+**Everything that describes the table moved in this one ticket and in one
+commit:** the contract text in `docs/plugin-contract.md` (sections 5, 11, 12, 14
+and 15 rewritten around the new entry, section 18 new), the generated C header,
+the slot constants and thresholds in `src/abi/layout.rs`, the static assertions
+in `c/layout_static_asserts.c`, the Rust fixture, the C plugin and the ABI
+harness. The payload is fixed in contract 18: one JSON object with `config` and
+`host_context`, whose host context fields this build carries are
+`instance_name`, `data_dir` (optional) and `capability_version`. A configuration
+the plugin cannot read is `invalid_argument`; every other terminal status is the
+plugin's own defect; on either, the host drops the future and then calls
+`destroy_instance`. `manifest-and-library` supplies the configuration schema
+this payload carries. The fixture gained `FixtureConfig`, its own configuration
+declaration, and the C plugin checks the same configuration by its literal
+bytes, which is what makes a configuration declaration checkable without a JSON
+parser.
 
 **Existing abstractions to use.** The size-prefixed, append-only table rule and
-`MetisAbiError`'s version gate as they are. The `authoring` feature gate and
-`plugin_adapter` for the Rust side of the new entry. `payload.rs` for the
-configuration and host context envelope. The header regeneration script and the
-`no_plugin_thread` and `feature_gate` tests as they are.
+`MetisAbiError`'s version gate were used unchanged. The `authoring` feature gate
+and `plugin_adapter` carry the Rust side of the new entry. `payload.rs` carries
+the initialisation body inside the envelope. The header regeneration script, the
+`no_plugin_thread` and `feature_gate` tests, and the C plugin build are the
+gates they were.
 
 **Do not reimplement.** No second table type and no per-version entry wrapper.
-No async runtime and no executor: the entry returns a table-defined future and
-the host polls it. No serde types across the boundary, only the JSON envelope.
-Do not keep the counters entry behind a flag for compatibility: the spec removes
-it. Do not fix the MSVC static assertion form here; that is its own ticket and
-it is blocked by this one.
+No async runtime and no executor: the entry returns a table-defined future, the
+host polls it, and `no_plugin_thread` now measures the thread count across
+initialisation too. No serde types across the boundary, only the JSON envelope.
+The counters entry is deleted rather than flagged off. The MSVC static assertion
+form is untouched, so `c-static-assert-msvc` still owns that fix. The do-not
+list held in full, and no dependency changed at all.
 
 **Seams.** Two. The ABI harness
 (`cargo run -p plugin-fixture --bin abi-harness`), which hand-drives
 initialisation with a configuration and host context payload, observes an
-instance and a resolved future, and prints one line per check. The contract
-tests (`crates/plugin-contract/tests/abi.rs`, `c_layout.rs`,
-`no_plugin_thread.rs`) plus the C plugin build
-(`bash scripts/build-c-plugin.sh`) and the header regeneration check.
+instance and a resolved future, and prints one line per check. It now drives 82
+checks, through `init.entry_starts`, `init.future_resolves`,
+`init.configuration_delivered`, `init.configuration_mismatch_refused` and
+`init.failed_initialisation_instance_destroyed` among them. The contract tests
+(`crates/plugin-contract/tests/abi.rs`, `c_layout.rs`, `no_plugin_thread.rs`)
+plus the C plugin build (`bash scripts/build-c-plugin.sh`) and the header
+regeneration check. Two foreign runtime tests were adapted mechanically,
+`tests/registry.rs` expecting ABI `(1, 2)` and `tests/waker.rs` measuring the
+call's waker references as a delta, which is outside the named seam list.
 
-**Interface contract.** The new slot's constant and name, the initialisation
-payload's fields, and the two out-parameters. `manifest-and-library` resolves
-the entry symbol and reads the amended table; `async-initialisation` calls the
-entry and drives the returned future; the SDK effort consumes the same surface.
+**The carried waker obligation is closed here.** The harness now releases the
+one owning waker reference it hands each poll as soon as that poll returns, at
+all three poll sites, asserts handed-out equals released, and records a wake
+after a drop as a request id in a list rather than as a count. It grew from 73
+to 82 checks.
+
+**Interface contract.** The slot's constant and name, the predicate that decides
+its presence, the initialisation payload's fields, and the two out-parameters.
+`manifest-and-library` resolves the entry symbol and reads the amended table, so
+it uses the renamed slot constant and the predicate; `async-initialisation`
+calls `Loaded::init_plugin` and drives the returned `PluginInit`; the SDK effort
+consumes the same table and the new authoring shape.
 
 ## Level 2
 
@@ -466,6 +643,25 @@ The refusals are distinguishable: absent manifest, invalid manifest naming what
 is wrong, no library for this target, a missing entry symbol, a major mismatch,
 an older minor refused before any entry is read, and a table too short for an
 entry this build needs.
+
+Two of those refusals are narrower than the plan placed them, because extraction
+landed first. `StageError::MissingTargetLibrary` (the archive holds no file under
+`lib/<target>/`) and `StageError::AmbiguousTargetLibrary` (it holds more than
+one) are extraction's, so this ticket's "no library for this target" refusal is
+the manifest's own case: a manifest that declares no library for this host. The
+two stay distinguishable, and `startup-policy` maps both to its disable reason
+rather than collapsing them. `StagedBundle::manifest_path()` may name a file
+that is not there, because extraction deliberately stages a bundle with no root
+manifest, so this ticket tests existence rather than assuming the path resolves,
+which is what keeps its absent-manifest refusal reachable.
+
+The mapping step reads the amended table, so it uses
+`METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT` and
+`metis_plugin_table_has_init_plugin(size)` in place of the create-instance
+names, and it checks the manifest's `min_abi_minor` against the landed
+`METIS_ABI_MINOR` 2. That check is this ticket's only bundle-load gate on the
+minor bump, and it spells this host's target the one way contract 17.8 fixes,
+because extraction matches the string literally.
 
 **Existing abstractions to use.** `toml` for the text format, added to the
 workspace dependency table. `plugin_contract::capability::CapabilityDescriptor`
@@ -504,16 +700,43 @@ initialisation call, the capability cross-check and registration. `Serving`
 carries the registered instance name, the `Arc<Instance>`, and the descriptor
 list it registered.
 
-The configuration and the host context are the runtime's own value types, built
-by the daemon and delivered in one payload. The plugin's setup failure falls
-into two classes the caller can tell apart: the plugin is defective, or the
-configuration does not match what the plugin declared. The capability
-cross-check refuses with the name of the capability that differed.
+The configuration and the host context are built by the daemon and delivered in
+one payload, and `plugin-runtime` does not own their value types: the landed
+`Initialisation` and `HostContext` live behind `plugin-contract`'s `authoring`
+feature gate, which the dependency posture keeps off for this crate. The
+plugin's setup failure falls into two classes the caller can tell apart: the
+plugin is defective, or the configuration does not match what the plugin
+declared. The capability cross-check refuses with the name of the capability
+that differed.
+
+Three landed facts shape this ticket. The initialisation call is
+`Loaded::init_plugin(&host, body) -> Result<PluginInit, CallError>` plus the
+public `PluginInit` future and `CallError::Init`, which was `CallError::Create`,
+so this ticket drives that surface rather than reaching the raw table. It
+confirms at its own seam that the failure ordering is the contract's: a
+`PluginInit` that never resolves `Ok` drops the plugin's future and then calls
+`destroy_instance` on the instance pointer. That runtime-seam test is this
+ticket's, because the landed tickets cover the path only at the raw ABI seams,
+in `crates/plugin-contract/src/authoring/` and in the ABI harness against the C
+plugin. The derivation of this host's target is this ticket's too, because
+`bundle::extract` takes a plain `&str` and nothing exports a helper: the string
+is `<os>-<arch>` as contract 17.8 fixes it, and the producer that writes a
+bundle has to spell it the same way.
+
+The initialisation body is this ticket's to build, because `Initialisation` and
+`HostContext` sit behind that gate. The body is one JSON object with the two named parts
+`config` and `host_context`, and `serde_json` is already a runtime dependency,
+so the body is written by hand and `HostContext`'s field set is kept in step
+with the contract by hand. Changing the dependency posture instead is the
+alternative, and the choice is this ticket's.
 
 **Existing abstractions to use.** `Registry::register`, `Instance`, `Host` and
 the payload envelope as they are. `LoadError` composes `BundleError`,
 `StageError` and `ManifestError` rather than restating them, and folds into the
-existing partition of load and dispatch, routing and registration.
+existing partition of load and dispatch, routing and registration. It classifies
+`StageError` as a value rather than matching it exhaustively, because the landed
+variant set is wider than the plan named, and the initialisation call is the
+landed `Loaded::init_plugin` plus `PluginInit`.
 
 **Do not reimplement.** No runtime and no thread, still. No second registration
 path. No schema validation changes: `Registry::validate_request` and
@@ -594,9 +817,16 @@ documented there as the only place the assertion holds.
 **Exports.** `plugin_runtime::startup`: `start_plugins(dir, config, trust) ->
 StartupReport` over a directory of bundles, applying the documented outcomes.
 A trust failure, an absent or invalid manifest and a refused unload stop
-start-up. An extraction refusal, a missing target library, an ABI mismatch, a
-manifest that disagrees with the library, and an unknown container version
-disable that one plugin and leave the daemon running. `StartupReport` lists the
+start-up. An extraction refusal, a missing or ambiguous target library, a
+manifest that declares no library for this host, an ABI mismatch, a manifest
+that disagrees with the library, and an unknown container version disable that
+one plugin and leave the daemon running. The missing and ambiguous refusals
+are extraction's, `StageError::MissingTargetLibrary` and
+`StageError::AmbiguousTargetLibrary`, and the manifest's own no-library refusal
+is `ManifestError`'s, so the three stay distinguishable even though they share
+one disable reason and the report names which one refused. `StageError` is
+classified as a value rather than matched exhaustively, because its landed
+variant set is wider than the plan named. `StartupReport` lists the
 serving instances and the disabled placeholders, each with its name and reason,
 and a placeholder is built from the manifest when one was readable, otherwise
 from the bundle's file name with no capabilities. Placeholders are listable, are
@@ -670,6 +900,17 @@ altered or when the chain is signed by a key that is not a configured root.
 `docs/testing.md` and `.github/workflows/ci.yml` gain the step, and the
 daemon's compiled-in root set stays empty.
 
+Four landed rules constrain the packaging step. Every entry declares mode
+`0600`, because the extractor refuses any other declared mode and the `zip`
+writer writes `0o644` when a producer chooses none, so the step calls
+`unix_permissions(0o600)` on every entry. The archive holds exactly one file per
+target directory and no directory entries, which much ZIP tooling writes by
+default and the extractor refuses. The entry count, per-entry and total limits
+are the landed ones, 256, 64 MiB and 256 MiB, four times the numbers the
+approved plan proposed. And the target directory is named `<os>-<arch>` exactly
+as the extracting host derives it, because extraction matches the string
+literally.
+
 **Existing abstractions to use.** The test signer, the vectors and the
 packaging helper the earlier tickets built, the C fixture and its hand-written
 manifest, the ABI harness's one-line-per-check style, and the runtime's support
@@ -687,7 +928,10 @@ sink plus the release entry. The CI step is the gate.
 
 - `verify_bundle(bytes, &TrustStore)` in `bundle-verification`, with committed
   byte vectors and a test signer.
-- `extract(verified, target) -> StagedBundle` in `bundle-extraction`.
+- `extract(verified, target: &str) -> StagedBundle` in `bundle-extraction`,
+  with `StageError` classified rather than matched exhaustively.
+- `Loaded::init_plugin` and `PluginInit` in `abi-initialisation-entry`,
+  consumed and closed at `async-initialisation`'s load seam.
 - `Manifest::parse` plus `Loaded::open` in `manifest-and-library`.
 - `load_bundle(...) -> Serving` in `async-initialisation`.
 - The instance and call API, plus the ledger, in `call-cancellation`.
@@ -702,53 +946,95 @@ sink plus the release entry. The CI step is the gate.
 
 ## Dependency posture
 
-- `plugin-runtime` gains the signature, certificate and archive readers:
+- `plugin-runtime` gained the signature, certificate and archive readers:
   `ed25519-dalek` 3, `x509-cert` 0.3, `der` 0.8 and `sha2` 0.11 for the trusted
-  parse path, and `zip` with pure-Rust deflate only for extraction. All of them
-  are pure Rust, none has a build script that compiles C, and none is
-  feature-enabled beyond what the ticket needs.
+  parse path, and `zip` 9 for extraction, with its default features off and only
+  `deflate-flate2-zlib-rs` on, so the pure-Rust deflate backend is reached
+  through `flate2`. All of them are pure Rust, none has a build script that
+  compiles C, and none is feature-enabled beyond what the tickets need.
 - `plugin-contract` gains nothing. Its `authoring` feature stays off for
   `plugin-runtime`, so the host sees the primitives and the envelope alone.
 - The daemon's own dependencies are out of scope here.
 - The measured dependency count for `plugin-runtime` is recorded by
   `bundle-verification`: 66 crates before and 85 after for normal edges, so the
   trusted parse path adds 19, and 76 before and 101 after when the test-only
-  signer's dev-dependencies are counted. The pipeline is `cargo tree -p
-  plugin-runtime --edges normal --prefix none | grep -v '(*)' | sort -u |
-  wc -l`, and the `grep` filter is needed because `cargo tree` prints a repeated
-  subtree as a marker line that survives `sort -u`. No later ticket adds a
-  dependency without the same measurement.
+  signer's dev-dependencies are counted. `bundle-extraction` then measured 85
+  crates before and 91 after for normal edges, six added with `zip` the only
+  direct one beside `flate2`, `zlib-rs`, `crc32fast`, `indexmap` and
+  `typed-path`, and 101 before and 107 after with the dev edges counted.
+  `crc32fast` is the only added crate with a build script, and its script reads
+  `rustc --version` to select cfg flags and compiles nothing. The pipeline is
+  `cargo tree -p plugin-runtime --edges normal --prefix none | grep -v '(*)' |
+  sort -u | wc -l`, and the `grep` filter is needed because `cargo tree` prints
+  a repeated subtree as a marker line that survives `sort -u`. No later ticket
+  adds a dependency without the same measurement.
 
-## Carried risks from the landed level-0 tickets
+## Carried risks from the landed tickets
 
-Known defects the two landings left, recorded so a level-1 chain absorbs them
-instead of rediscovering them. None of them is spec content.
+Known defects and residuals the landed tickets left, recorded so a later chain
+absorbs them instead of rediscovering them. None of them is spec content.
+
+Closed by the level-1 landings:
 
 - The dependency-count pipeline in `docs/plugin-contract.md` section 17.7
   over-counts. `cargo tree` prints a repeated subtree as a marker line,
   `name vX.Y.Z (*)`, and those lines survive `sort -u`. Run literally, the pipe
   prints 77 crates before and 101 after, against the recorded 66 and 85. The
-  recorded figures are the correct distinct-crate counts, so the claim holds,
-  and the pipeline needs `| grep -v '(*)'` before any number is quoted again.
+  recorded figures are the correct distinct-crate counts, so the claim holds.
+  Closed: section 17.7 and section 17.8 now carry `| grep -v '(*)'` and each one
+  names what the pipe prints without the filter.
+- The amended host obligation, release the one owning waker reference a poll is
+  given when that poll returns, was implemented in `plugin-runtime` and not in
+  the ABI harness at `crates/plugin-fixture/src/bin/abi-harness.rs`, which is
+  the second host implementation and must keep passing. Closed by
+  `abi-initialisation-entry`: the harness releases the reference it hands each
+  poll as soon as that poll returns, at all three poll sites, asserts handed-out
+  equals released, and records a late wake as a request id rather than an
+  ordering line.
+
+Still open:
+
 - `docs/tasks/metis-plugins/tasks/abi-hazard-fixtures/findings.md` line 74 still
   says `Host::waker_counts()` is `(cloned, released, wakes_after_drop)`, which is
   the pre-fix meaning of the first element. The measurements below that line were
   taken against the prototype and stay valid, but the first element now counts
-  every owning waker reference the host handed out.
-- The amended host obligation, release the one owning waker reference a poll is
-  given when that poll returns, is implemented in `plugin-runtime` and not in
-  the ABI harness at `crates/plugin-fixture/src/bin/abi-harness.rs`, which is
-  the second host implementation and must keep passing. Its poll never releases
-  the reference it hands out, and its `waker_wake` still prints an ordering line
-  for a dead slot, which contract section 11 rule 4 forbids.
-  `abi-initialisation-entry` rewrites that harness, so the obligation belongs
-  with it.
+  every owning waker reference the host handed out, and the correction sits in
+  the post-fix note a few lines below it rather than on line 74 itself.
 - The two landing notes do not agree on the waker landing's commit: the ticket
   note records the merge commit `dd7e1bf`, and the review and the bundle landing
   record the tip of `task/waker-lifecycle-fix` as `b30efde`. Confirm which
   commit landed the waker fix before the effort is archived. No code or contract
   fact depends on the difference, because every level-1 chain builds on
   `7306244`.
+
+Added by the level-1 landings:
+
+- The runtime seam has no test for an initialisation future that never resolves
+  `Ok`, so the host drops it and then destroys the instance pointer. The path is
+  covered only at the raw ABI seams, in
+  `crates/plugin-contract/src/authoring/` and in the ABI harness against the C
+  plugin. `async-initialisation` owns that test, and it is the one place the
+  drop-then-destroy ordering is confirmed where the caller drives the hand-off.
+- `manifest-and-library` has no bundle-load gate on the ABI minor bump: nothing
+  in the landed code refuses a bundle at load time for a manifest whose
+  `min_abi_minor` is older than `METIS_ABI_MINOR` 2. That refusal is that
+  ticket's, and it is the only gate on the bump at that stage.
+- The extraction residuals: `StageError::Io` has no test, because provoking a
+  real filesystem failure needs mocking; the size limits are enforced on
+  declared entry sizes rather than on decompressed output; the
+  staging-directory count assertion is process-global and holds only because
+  every staging test in that binary takes one file-wide mutex; and two error
+  mapping branches are unreachable in practice.
+- The initialisation payload's value types, `Initialisation` and `HostContext`,
+  sit behind `plugin-contract`'s `authoring` feature, which the dependency
+  posture keeps off for `plugin-runtime`. Either the next ticket writes the
+  `{"config", "host_context"}` body itself, keeping the names and
+  `HostContext`'s field set in step by hand, or the posture changes. That is a
+  deliberate choice for the ticket that needs the body, not a settled fact.
+- Contract 17.8 describes the staging directory's name as the process id and a
+  counter and omits the timestamp component the code writes, so a second
+  implementation reproducing the name exactly would not match until the contract
+  names all three.
 
 ## Out of scope for this effort
 
