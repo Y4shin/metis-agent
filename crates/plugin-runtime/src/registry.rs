@@ -342,9 +342,13 @@ impl Registry {
         if !entry.enabled {
             return Err(RouteError::Disabled(qualified.to_string()));
         }
+        // The owner is the routing map's own answer for this exact key, so the
+        // tool half is what follows the owner and its separator. Splitting on
+        // the first dot instead would read an instance name that carries a dot
+        // as the instance plus part of its own name.
         let tool = qualified
-            .split_once('.')
-            .map(|(_, tool)| tool)
+            .strip_prefix(owner.as_str())
+            .and_then(|rest| rest.strip_prefix('.'))
             .unwrap_or(qualified);
         let capability = entry
             .instance
