@@ -351,3 +351,63 @@ fn a_shutdown_that_answers_a_non_ok_status_leaves_the_library_mapped() {
         "nothing here unloads a library: {ledger:#?}"
     );
 }
+
+#[test]
+fn an_unload_refused_for_another_reason_leaves_the_library_mapped() {
+    let host = Host::new();
+    let serving = serving(&host);
+    let name = serving.name().to_string();
+    // A caller that still holds the instance is exactly what the landed unload
+    // guard refuses: the release reaches the unload step and the guard answers.
+    let held = Arc::clone(serving.instance());
+
+    let report = block_on(serving.release(deadline()));
+
+    assert_eq!(report.name(), name, "the report names the instance");
+    assert!(
+        !report.released(),
+        "an instance whose unload was refused was not released"
+    );
+    match report.refusal() {
+        Some(ReleaseRefusal::Unload(error)) => assert!(
+            error.to_string().contains("a call still holds the instance"),
+            "the refusal is the landed guard's own error: {error}"
+        ),
+        other => panic!("the unload guard refused, and this is the outcome: {other:?}"),
+    }
+    assert_eq!(
+        report.refusal().map(ReleaseRefusal::step),
+        Some("unload"),
+        "the report names the step that refused"
+    );
+
+    let resident = report
+        .resident()
+        .expect("an instance that could not be released keeps its library mapped");
+    assert!(
+        resident.has_service_complete(),
+        "the library is still mapped after a refused unload"
+    );
+    assert!(
+        Arc::ptr_eq(resident, held.loaded()),
+        "the kept reference is the library the unreleased instance came from"
+    );
+
+    // The plugin quiesced before the unload was attempted, and the refusal is
+    // the guard's own line rather than a restatement of it.
+    let ledger = report.ledger();
+    assert!(
+        ledger.iter().any(|line| line.contains("instance quiesced")),
+        "the plugin quiesced first: {ledger:#?}"
+    );
+    assert!(
+        ledger
+            .iter()
+            .any(|line| line.contains("unload refused: a call still holds the instance")),
+        "the guard's refusal is recorded rather than inferred: {ledger:#?}"
+    );
+    assert!(
+        !ledger.iter().any(|line| line.contains("library unloaded")),
+        "nothing here unloads a library: {ledger:#?}"
+    );
+}
