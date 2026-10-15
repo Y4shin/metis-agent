@@ -46,13 +46,19 @@ use sink::{LogLevel, RecordingSink, Records, Sink};
 
 /// Locks a mutex and takes its contents whatever happened to it before.
 ///
-/// The host's callbacks are frames a plugin calls into, so a panic raised there
-/// costs more than a value another thread left mid-update: the poison is taken
-/// rather than refused. It is also what keeps the poisoning path of
-/// `Mutex::lock` out of the frames the `no-panic-check` feature asserts are
-/// panic-free.
-// rule: no-panic-check: the frames this helper serves are asserted panic-free,
-// so `Mutex::lock`'s poisoning path is not one of them.
+/// Every host-side lock is taken this way rather than with the standard
+/// `unwrap`, because a poisoned lock would turn a panic the host has already
+/// contained into a second panic on the next read of the same state. The
+/// delivery catches a panicking sink and records it on the ordering ledger, and
+/// the daemon then reads that ledger; a poisoned ledger lock would make the
+/// record unreadable, which is the opposite of what the record is for. The
+/// frames a plugin calls into are also reached from the plugin's own poll, so a
+/// panic raised there crosses into plugin code rather than staying in the
+/// daemon. The trade is deliberate: the host's state is records, the ownership
+/// of each one is documented, and a stale record is cheaper than a second
+/// panic.
+// rule: lock-poisoning: the crate's host-side locks take the poison rather than
+// refusing it, for the reason above.
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -361,7 +367,7 @@ impl Future for PluginInit {
         });
         match status {
             MetisStatus::Pending => {
-                *this.state.waker.lock().unwrap() = Some(context.waker().clone());
+                *lock(&this.state.waker) = Some(context.waker().clone());
                 Poll::Pending
             }
             MetisStatus::Ok => {
@@ -657,7 +663,7 @@ impl Host {
     /// loudly rather than silently overwriting the first, because a host that
     /// freed a buffer through another plugin's allocator would corrupt both.
     pub fn bind_release(&self, release: MetisReleaseBufferFn) {
-        let mut bound = self.inner.release_buffer.lock().unwrap();
+        let mut bound = lock(&self.inner.release_buffer);
         match *bound {
             Some(existing) if !std::ptr::fn_addr_eq(existing, release) => {
                 eprintln!("[runtime] refusing to rebind release_buffer to a second library");
@@ -883,7 +889,7 @@ impl Instance {
 
     /// The request ids this instance still holds a future for.
     pub fn in_flight(&self) -> HashSet<u64> {
-        self.in_flight.lock().unwrap().clone()
+        lock(&self.in_flight).clone()
     }
 
     /// Whether the plugin accepted a cancel for this id, clearing the record.
@@ -892,7 +898,7 @@ impl Instance {
     /// resolved as cancelled again: what it returns is whether the plugin was
     /// asked to cancel a call it left unacknowledged.
     fn take_cancel(&self, request_id: u64) -> bool {
-        self.accepted_cancels.lock().unwrap().remove(&request_id)
+        lock(&self.accepted_cancels).remove(&request_id)
     }
 
     /// Starts one call and returns the future the host polls.
@@ -939,7 +945,7 @@ impl Instance {
         if status != MetisStatus::Ok {
             return Err(CallError::Status(status));
         }
-        self.in_flight.lock().unwrap().insert(request_id);
+        lock(&self.in_flight).insert(request_id);
         self.host
             .order(format!("call {request_id} started on {capability}"));
         Ok(PluginCall {
@@ -975,7 +981,7 @@ impl Instance {
     /// id that left the in-flight set between the loop reading it and the token
     /// being marked is the frozen `NotFound`.
     fn mark_cancel(&self, request_id: u64) -> Result<(), MetisStatus> {
-        if !self.in_flight.lock().unwrap().contains(&request_id) {
+        if !lock(&self.in_flight).contains(&request_id) {
             return Err(MetisStatus::NotFound);
         }
         // SAFETY: the instance is live and the function pointer is its own.
@@ -983,7 +989,7 @@ impl Instance {
         if status != MetisStatus::Ok {
             return Err(status);
         }
-        self.accepted_cancels.lock().unwrap().insert(request_id);
+        lock(&self.accepted_cancels).insert(request_id);
         Ok(())
     }
 
@@ -1030,7 +1036,7 @@ impl Instance {
         status: MetisStatus,
         body: &[u8],
     ) -> Result<(), CallError> {
-        if !self.in_flight.lock().unwrap().contains(&request_id) {
+        if !lock(&self.in_flight).contains(&request_id) {
             return Err(CallError::Status(MetisStatus::NotFound));
         }
         let encoded = if status == MetisStatus::Ok {
@@ -1064,7 +1070,7 @@ impl Instance {
     /// Quiesces the instance, which is only legal once every future it handed
     /// out has been dropped.
     pub fn shutdown(&self) -> Result<(), CallError> {
-        if !self.in_flight.lock().unwrap().is_empty() {
+        if !lock(&self.in_flight).is_empty() {
             self.host
                 .order("shutdown refused: futures are still in flight");
             return Err(CallError::Payload(
@@ -1089,7 +1095,7 @@ impl Instance {
     /// inside plugin code and no waker clone is outstanding. The refusals are
     /// recorded in the ordering ledger rather than inferred.
     pub fn unload(self: Arc<Self>) -> Result<(), CallError> {
-        if !self.in_flight.lock().unwrap().is_empty() {
+        if !lock(&self.in_flight).is_empty() {
             self.host
                 .order("unload refused: futures are still in flight");
             return Err(CallError::Payload(
@@ -1207,7 +1213,7 @@ impl Future for PluginCall {
         });
         match status {
             MetisStatus::Pending => {
-                *this.state.waker.lock().unwrap() = Some(context.waker().clone());
+                *lock(&this.state.waker) = Some(context.waker().clone());
                 Poll::Pending
             }
             MetisStatus::Ok => Poll::Ready(this.take_buffer(out)),
@@ -1254,11 +1260,7 @@ impl Drop for PluginCall {
             let vtable = &*self.handle.vtable;
             (vtable.drop)(self.handle.ctx)
         };
-        self.instance
-            .in_flight
-            .lock()
-            .unwrap()
-            .remove(&self.request_id);
+        lock(&self.instance.in_flight).remove(&self.request_id);
         self.instance.host.order(format!(
             "call {} dropped, context reclaimed (drop returned {})",
             self.request_id,
@@ -1307,10 +1309,7 @@ fn refuse_consumed_waker(what: &str) {
 /// exactly one `wake` or `drop`.
 fn owning_waker(state: &Arc<CallState>) -> MetisWaker {
     let token = next_waker_token();
-    live_wakers()
-        .lock()
-        .unwrap()
-        .insert(token, Arc::clone(state));
+    lock(live_wakers()).insert(token, Arc::clone(state));
     state.counts.wakers_handed_out.fetch_add(1, SeqCst);
     MetisWaker {
         data: token as *mut c_void,
@@ -1323,16 +1322,12 @@ fn owning_waker(state: &Arc<CallState>) -> MetisWaker {
 /// `None` means the reference was already consumed, or never handed out: either
 /// way there is nothing left to release.
 fn take_owned_waker(waker: MetisWaker) -> Option<Arc<CallState>> {
-    live_wakers().lock().unwrap().remove(&(waker.data as usize))
+    lock(live_wakers()).remove(&(waker.data as usize))
 }
 
 /// The state a borrowed waker names, left in the table for its owner.
 fn borrowed_waker(waker: &MetisWaker) -> Option<Arc<CallState>> {
-    live_wakers()
-        .lock()
-        .unwrap()
-        .get(&(waker.data as usize))
-        .cloned()
+    lock(live_wakers()).get(&(waker.data as usize)).cloned()
 }
 
 /// Records a wake that arrived after the call's future was dropped, naming the
@@ -1343,7 +1338,7 @@ fn borrowed_waker(waker: &MetisWaker) -> Option<Arc<CallState>> {
 /// the plugin kept depends on nothing. The call's id is what makes the record
 /// name something rather than just tally.
 fn record_late_wake(state: &CallState) {
-    let mut record = state.counts.wakes_after_drop.lock().unwrap();
+    let mut record = lock(&state.counts.wakes_after_drop);
     record.push(state.request_id);
 }
 
@@ -1357,7 +1352,7 @@ fn wake_or_record(state: &Arc<CallState>) {
         record_late_wake(state);
         return;
     }
-    if let Some(waker) = state.waker.lock().unwrap().take() {
+    if let Some(waker) = lock(&state.waker).take() {
         waker.wake();
     }
 }
