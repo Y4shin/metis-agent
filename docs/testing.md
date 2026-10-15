@@ -431,7 +431,10 @@ Plugin host, documented in `crates/plugin-runtime`:
   stops start-up, driven by a fault library the test compiles itself from
   `tests/fixtures/refusing_destroy.rs`; and that one broken bundle among several
   leaves the others loaded and serving, which a capability called through the
-  started plugin proves.
+  started plugin proves. It also asserts what a stop hands back: the plugins the
+  pass had already started, in the order they started, with nothing unloaded on
+  that path, so the caller releases one with its own deadline and reads the order
+  it performed on the ledger of the host the pass built.
 - `cargo test -p plugin-runtime --test teardown` -- the one release entry, at
   `Serving::release(deadline)`, with the ordering ledger as the assertion. Every
   plugin it releases is loaded from a real signed bundle built inside the test, and

@@ -208,6 +208,19 @@ pub struct Serving {
     registry: Registry,
 }
 
+impl std::fmt::Debug for Serving {
+    /// The instance is named rather than printed, because what a reader of a
+    /// report needs is which plugin this is and what it declared. A start-up
+    /// stop carries the servings it started, and its refusal is printed with
+    /// them.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Serving")
+            .field("name", &self.name)
+            .field("capabilities", &self.capabilities.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Serving {
     /// The instance name it is registered under, which is the manifest's name.
     pub fn name(&self) -> &str {
