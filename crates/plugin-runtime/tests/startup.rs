@@ -16,12 +16,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use plugin_runtime::bundle::TrustStore;
+use plugin_contract::abi::{METIS_ABI_MAJOR, MetisAbiError};
+use plugin_runtime::CallError;
+use plugin_runtime::bundle::{StageError, TrustStore};
 use plugin_runtime::load::LoadError;
 use plugin_runtime::manifest::ManifestError;
-use plugin_runtime::startup::{StartupReport, StartupStop, start_plugins};
-use serde_json::{Map, Value};
+use plugin_runtime::startup::{DisabledPlugin, StartupReport, StartupStop, start_plugins};
+use serde_json::{Map, Value, json};
 use support::block_on;
+use support::bundle;
 use support::signer::{self, TestChain};
 
 /// The manifest's name at the archive root, as the contract fixes it.
@@ -102,19 +105,32 @@ impl Plugins {
         &self.config
     }
 
-    /// Writes one bundle into the directory as `<name>.metisbnd`.
-    fn write(&mut self, name: &str, bundle: &Bundle) -> PathBuf {
-        self.write_signed(name, bundle, SEEDS)
+    /// Resolves the fixture's own configuration for a bundle file's stem: the
+    /// configuration names the instance the host context names, which is what
+    /// the fixture's constructor checks.
+    fn configure(&mut self, file: &str) {
+        self.config
+            .insert(file.to_string(), json!({ "instance": file }));
+    }
+
+    /// Writes one bundle as `<file>.metisbnd`, signed by a chain whose leaf, and
+    /// whose manifest, carry `name`.
+    ///
+    /// The two names are given separately so a test can tell the name a bundle
+    /// is known by before its manifest is read from the name the manifest
+    /// declares.
+    fn write(&mut self, file: &str, name: &str, bundle: &Bundle) -> PathBuf {
+        self.write_signed(file, name, bundle, SEEDS)
     }
 
     /// Writes one bundle signed by a chain this pass does not trust.
-    fn write_untrusted(&mut self, name: &str, bundle: &Bundle) -> PathBuf {
-        self.write_signed(name, bundle, UNTRUSTED_SEEDS)
+    fn write_untrusted(&mut self, file: &str, name: &str, bundle: &Bundle) -> PathBuf {
+        self.write_signed(file, name, bundle, UNTRUSTED_SEEDS)
     }
 
-    /// Writes one bundle signed by the chain built from `seeds` and carries
+    /// Writes one bundle signed by the chain built from `seeds`, carrying
     /// `bundle`'s entries.
-    fn write_signed(&mut self, name: &str, bundle: &Bundle, seeds: [u8; 3]) -> PathBuf {
+    fn write_signed(&mut self, file: &str, name: &str, bundle: &Bundle, seeds: [u8; 3]) -> PathBuf {
         let chain = signed_by(name, seeds);
         let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
         if let Some(manifest) = &bundle.manifest {
@@ -124,8 +140,9 @@ impl Plugins {
             let target = support::bundle::host_target();
             entries.push((support::bundle::library_path(&target, file), bytes.clone()));
         }
+        entries.extend(bundle.extra.iter().cloned());
         let bytes = signer::signed_bundle(&chain, &support::bundle::archive(&entries));
-        let path = self.dir.path.join(format!("{name}{SUFFIX}"));
+        let path = self.dir.path.join(format!("{file}{SUFFIX}"));
         std::fs::write(&path, &bytes)
             .unwrap_or_else(|error| panic!("{} writes: {error}", path.display()));
         path
@@ -144,6 +161,8 @@ struct Bundle {
     /// This host's library: its file name inside the target directory, and its
     /// bytes.
     library: Option<(String, Vec<u8>)>,
+    /// Entries beyond the manifest and this host's library.
+    extra: Vec<(String, Vec<u8>)>,
 }
 
 impl Bundle {
@@ -156,7 +175,20 @@ impl Bundle {
                 support::bundle::library_file_name(),
                 support::bundle::library_bytes(),
             )),
+            extra: Vec::new(),
         }
+    }
+
+    /// The same bundle with no library entry at all.
+    fn without_library(mut self) -> Bundle {
+        self.library = None;
+        self
+    }
+
+    /// The same bundle with one more archive entry.
+    fn with_entry(mut self, name: &str, bytes: &[u8]) -> Bundle {
+        self.extra.push((name.to_string(), bytes.to_vec()));
+        self
     }
 }
 
@@ -175,43 +207,52 @@ fn anchor(seeds: [u8; 3]) -> [u8; 32] {
 /// The manifest an author writes by hand: the fixture's library for this host,
 /// the capability names it is given, and the ABI this build speaks.
 fn manifest(name: &str, capabilities: &[&str]) -> String {
-    manifest_naming(
+    manifest_declaring(
         name,
         capabilities,
+        &support::bundle::host_target(),
         &support::bundle::library_file_name(),
         1,
         2,
     )
 }
 
-/// The same manifest, naming another library file and another ABI demand.
-fn manifest_naming(
+/// The same manifest, declaring another target, another library file and
+/// another ABI demand.
+fn manifest_declaring(
     name: &str,
     capabilities: &[&str],
+    target: &str,
     library_file: &str,
     abi_major: u32,
     min_abi_minor: u32,
 ) -> String {
-    let target = support::bundle::host_target();
-    let capabilities: String = capabilities
-        .iter()
-        .map(|capability| {
-            format!(
-                "\n[[capabilities]]\nname = \"{capability}\"\nkind = \"tool\"\nversion = 1\n\
-                 request_schema = {{ type = \"object\" }}\n\
-                 response_schema = {{ type = \"object\" }}\n"
-            )
-        })
-        .collect();
+    // The format carries a capability list as a field, so a manifest that
+    // declares none still has to carry the empty one. It has to sit before the
+    // first table, because a key written after one belongs to that table.
+    let declared = if capabilities.is_empty() {
+        "\ncapabilities = []".to_string()
+    } else {
+        capabilities
+            .iter()
+            .map(|capability| {
+                format!(
+                    "\n[[capabilities]]\nname = \"{capability}\"\nkind = \"tool\"\nversion = 1\n\
+                     request_schema = {{ type = \"object\" }}\n\
+                     response_schema = {{ type = \"object\" }}\n"
+                )
+            })
+            .collect()
+    };
     format!(
         r#"name = "{name}"
 version = "1.0.0"
 abi_major = {abi_major}
-min_abi_minor = {min_abi_minor}
+min_abi_minor = {min_abi_minor}{declared}
 
 [libraries]
 {target} = "lib/{target}/{library_file}"
-{capabilities}
+
 [config_schema]
 type = "object"
 "#
@@ -225,14 +266,22 @@ type = "object"
 fn refusal(result: Result<StartupReport, StartupStop>, what: &str) -> StartupStop {
     match result {
         Err(stop) => stop,
-        Ok(report) => panic!("{what}: {} plugins started instead", report.serving().len()),
+        Ok(report) => panic!(
+            "{what}: {} serving and {} disabled started instead",
+            report.serving().len(),
+            report.disabled().len()
+        ),
     }
 }
 
 #[test]
 fn a_trust_failure_stops_start_up() {
     let mut plugins = Plugins::new();
-    plugins.write_untrusted("forged", &Bundle::new(Some(manifest("forged", &[]))));
+    plugins.write_untrusted(
+        "forged",
+        "forged",
+        &Bundle::new(Some(manifest("forged", &[]))),
+    );
 
     let stop = refusal(
         plugins.start(),
@@ -256,7 +305,7 @@ fn a_trust_failure_stops_start_up() {
 #[test]
 fn an_absent_manifest_stops_start_up() {
     let mut plugins = Plugins::new();
-    plugins.write("nameless", &Bundle::new(None));
+    plugins.write("nameless", "nameless", &Bundle::new(None));
 
     let stop = refusal(
         plugins.start(),
@@ -277,6 +326,7 @@ fn an_absent_manifest_stops_start_up() {
 fn an_invalid_manifest_stops_start_up() {
     let mut plugins = Plugins::new();
     plugins.write(
+        "unreadable",
         "unreadable",
         &Bundle::new(Some("this is not the manifest format".to_string())),
     );
@@ -320,4 +370,223 @@ fn a_directory_that_cannot_be_listed_stops_start_up() {
         ),
         other => panic!("a directory that does not read stops start-up, and this is {other}"),
     }
+}
+
+/// The one plugin a pass disabled, and the one that stopped it when a test
+/// expected a stop.
+///
+/// A started report is not `Debug`, so the tests read a disabled plugin out by
+/// hand rather than through `expect_err`.
+fn disabled_plugin<'a>(report: &'a StartupReport, what: &str) -> &'a DisabledPlugin {
+    match report.disabled() {
+        [plugin] => plugin,
+        plugins => panic!("{what}: {} plugins were disabled instead", plugins.len()),
+    }
+}
+
+/// The plugins that started, as a pass with no refusal at all.
+fn report(plugins: &Plugins, what: &str) -> StartupReport {
+    match plugins.start() {
+        Ok(report) => report,
+        Err(stop) => panic!("{what}: {stop}"),
+    }
+}
+
+#[test]
+fn an_extraction_refusal_disables_that_one_plugin() {
+    let mut plugins = Plugins::new();
+    plugins.write(
+        "escaping",
+        "escaping",
+        &Bundle::new(Some(manifest("escaping", &[]))).with_entry("../escape", b"bytes"),
+    );
+
+    let report = report(&plugins, "one hostile archive does not stop start-up");
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    match plugin.reason() {
+        LoadError::Stage(StageError::ParentEntryName { name }) => assert_eq!(
+            name, "../escape",
+            "the refusal names the entry that would escape the staging root"
+        ),
+        other => panic!("an archive this build refuses disables one plugin, and this is {other}"),
+    }
+    assert!(
+        report.serving().is_empty(),
+        "the refused bundle did not start"
+    );
+}
+
+#[test]
+fn a_missing_target_library_disables_that_one_plugin() {
+    let mut plugins = Plugins::new();
+    plugins.write(
+        "libraryless",
+        "libraryless",
+        &Bundle::new(Some(manifest("libraryless", &[]))).without_library(),
+    );
+
+    let report = report(
+        &plugins,
+        "an archive with no library does not stop start-up",
+    );
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    match plugin.reason() {
+        LoadError::Stage(StageError::MissingTargetLibrary { target }) => assert_eq!(
+            target,
+            &support::bundle::host_target(),
+            "the refusal names the target this host asked for"
+        ),
+        other => {
+            panic!(
+                "an archive with no library for this host disables one plugin, and this is {other}"
+            )
+        }
+    }
+}
+
+#[test]
+fn a_manifest_that_declares_no_library_for_this_host_disables_that_one_plugin() {
+    let mut plugins = Plugins::new();
+    plugins.write(
+        "declared-elsewhere",
+        "declared-elsewhere",
+        &Bundle::new(Some(manifest_declaring(
+            "declared-elsewhere",
+            &[],
+            "macos-aarch64",
+            "libdeclared.so",
+            1,
+            2,
+        ))),
+    );
+
+    let report = report(
+        &plugins,
+        "a manifest for another host does not stop start-up",
+    );
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    match plugin.reason() {
+        LoadError::Manifest(ManifestError::NoTargetLibrary { target }) => assert_eq!(
+            target,
+            &support::bundle::host_target(),
+            "the refusal names the target this host asked for"
+        ),
+        other => panic!(
+            "a manifest that declares nothing for this host disables one plugin, and this is {other}"
+        ),
+    }
+}
+
+#[test]
+fn an_abi_mismatch_disables_that_one_plugin() {
+    let mut plugins = Plugins::new();
+    plugins.write(
+        "other-major",
+        "other-major",
+        &Bundle::new(Some(manifest_declaring(
+            "other-major",
+            &[],
+            &support::bundle::host_target(),
+            &support::bundle::library_file_name(),
+            METIS_ABI_MAJOR + 1,
+            2,
+        ))),
+    );
+
+    let report = report(
+        &plugins,
+        "a plugin built for another major does not stop start-up",
+    );
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    match plugin.reason() {
+        LoadError::Call(CallError::Version(MetisAbiError::MajorMismatch { expected, found })) => {
+            assert_eq!(*expected, METIS_ABI_MAJOR);
+            assert_eq!(*found, METIS_ABI_MAJOR + 1);
+        }
+        other => panic!("an ABI mismatch disables one plugin, and this is {other}"),
+    }
+    assert!(
+        report.serving().is_empty(),
+        "the refused bundle did not start"
+    );
+}
+
+#[test]
+fn a_manifest_that_disagrees_with_the_library_disables_that_one_plugin() {
+    let mut plugins = Plugins::new();
+    plugins.configure("disagreeing");
+    plugins.write(
+        "disagreeing",
+        "disagreeing",
+        &Bundle::new(Some(manifest(
+            "disagreeing",
+            &[bundle::CAPABILITIES[0], "tool.absent"],
+        ))),
+    );
+
+    let report = report(
+        &plugins,
+        "a manifest the library disagrees with does not stop start-up",
+    );
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    match plugin.reason() {
+        LoadError::CapabilityMismatch { capability, .. } => assert_eq!(
+            capability, "tool.absent",
+            "the refusal names the capability that differed"
+        ),
+        other => {
+            panic!("a manifest the library disagrees with disables one plugin, and this is {other}")
+        }
+    }
+}
+
+#[test]
+fn a_disabled_plugin_is_listable_with_its_name_its_reason_and_its_capabilities() {
+    let mut plugins = Plugins::new();
+    // The file's name and the manifest's name differ, so the name the report
+    // lists is the one the manifest declared: the manifest was read.
+    plugins.write(
+        "declared-elsewhere",
+        "other-host-plugin",
+        &Bundle::new(Some(manifest_declaring(
+            "other-host-plugin",
+            &["tool.echo", "tool.pending"],
+            "macos-aarch64",
+            "libdeclared.so",
+            1,
+            2,
+        ))),
+    );
+
+    let report = report(
+        &plugins,
+        "a manifest for another host does not stop start-up",
+    );
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    assert_eq!(
+        plugin.name(),
+        "other-host-plugin",
+        "the placeholder carries the name the manifest declares"
+    );
+    assert!(
+        matches!(plugin.reason(), LoadError::Manifest(_)),
+        "the placeholder carries the refusal that disabled it: {}",
+        plugin.reason()
+    );
+    let names: Vec<&str> = plugin
+        .capabilities()
+        .iter()
+        .map(|capability| capability.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["tool.echo", "tool.pending"],
+        "the placeholder lists the capabilities the manifest declared, in its order"
+    );
 }

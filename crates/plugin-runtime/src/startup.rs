@@ -26,11 +26,13 @@
 
 use std::path::{Path, PathBuf};
 
+use plugin_contract::capability::CapabilityDescriptor;
 use serde_json::{Map, Value, json};
 
 use crate::Host;
-use crate::bundle::TrustStore;
-use crate::load::{LoadError, Serving, load_bundle};
+use crate::bundle::{TrustStore, extract, verify_bundle};
+use crate::load::{LoadError, Serving, host_target, load_bundle};
+use crate::manifest::{Manifest, ManifestError};
 
 /// The host-context field naming the plugin's instance, fixed by contract 18.
 const INSTANCE_NAME_FIELD: &str = "instance_name";
@@ -70,6 +72,7 @@ pub async fn start_plugins(
     })?;
     let host = Host::new();
     let mut serving: Vec<Serving> = Vec::new();
+    let mut disabled: Vec<DisabledPlugin> = Vec::new();
     for path in files {
         let name = bundle_name(&path);
         let plugin_config = config.get(&name).cloned().unwrap_or(Value::Null);
@@ -77,16 +80,35 @@ pub async fn start_plugins(
         match load_bundle(&host, &path, &plugin_config, &context, trust).await {
             Ok(started) => serving.push(started),
             Err(error) if stops_startup(&error) => return Err(StartupStop { path, error }),
-            Err(_error) => todo!("a disable outcome, added by the next cycle"),
+            Err(error) => {
+                let placeholder = match describe(&path, trust) {
+                    Some((declared, capabilities)) => DisabledPlugin {
+                        name: declared,
+                        reason: error,
+                        capabilities,
+                    },
+                    None => DisabledPlugin {
+                        name,
+                        reason: error,
+                        capabilities: Vec::new(),
+                    },
+                };
+                disabled.push(placeholder);
+            }
         }
     }
-    Ok(StartupReport { host, serving })
+    Ok(StartupReport {
+        host,
+        serving,
+        disabled,
+    })
 }
 
 /// What one start-up pass produced.
 pub struct StartupReport {
     host: Host,
     serving: Vec<Serving>,
+    disabled: Vec<DisabledPlugin>,
 }
 
 impl StartupReport {
@@ -102,6 +124,48 @@ impl StartupReport {
     /// The plugins that started, in the order the directory names their files.
     pub fn serving(&self) -> &[Serving] {
         &self.serving
+    }
+
+    /// The plugins start-up disabled, in the same order.
+    ///
+    /// Each carries the name it is listed under, the refusal its load answered,
+    /// and the capabilities its manifest declared. A placeholder is listable
+    /// rather than absent, so a caller can tell a plugin that was turned off
+    /// from one that was never configured.
+    pub fn disabled(&self) -> &[DisabledPlugin] {
+        &self.disabled
+    }
+}
+
+/// One plugin start-up disabled, and why.
+pub struct DisabledPlugin {
+    name: String,
+    reason: LoadError,
+    capabilities: Vec<CapabilityDescriptor>,
+}
+
+impl DisabledPlugin {
+    /// The plugin's name: what its manifest declares, or the bundle file's stem
+    /// when no manifest was readable.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Why start-up disabled it, which is the refusal its load answered.
+    ///
+    /// It is the load's own typed error rather than a restatement of it, so a
+    /// caller reads the class of the refusal the same way a stop is read.
+    pub fn reason(&self) -> &LoadError {
+        &self.reason
+    }
+
+    /// The capabilities the manifest declared, which this plugin does not
+    /// serve.
+    ///
+    /// The list is empty when no manifest was readable: a plugin whose
+    /// declaration was never read declares nothing.
+    pub fn capabilities(&self) -> &[CapabilityDescriptor] {
+        &self.capabilities
     }
 }
 
@@ -184,6 +248,29 @@ fn host_context(name: &str) -> Value {
     })
 }
 
+/// The name and capabilities a bundle declares, read a second time.
+///
+/// A load that refused hands back no `Manifest`, so the placeholder path reads
+/// the bundle again: it verifies the bytes, stages the archive for this host and
+/// reads the manifest. Any refusal along the way answers `None`, which is the
+/// case of a bundle whose declaration was never readable, such as one whose
+/// container version this build does not know: the placeholder then carries the
+/// file's name and no capabilities.
+///
+/// The second read is the cost of leaving the load entry's landed surface as it
+/// is, and it runs only for a bundle that was disabled, never for one that
+/// started.
+fn describe(path: &Path, trust: &TrustStore) -> Option<(String, Vec<CapabilityDescriptor>)> {
+    let bytes = std::fs::read(path).ok()?;
+    let verified = verify_bundle(&bytes, trust).ok()?;
+    let staged = extract(&verified, &host_target()).ok()?;
+    let manifest = Manifest::read(&staged, verified.leaf_common_name()).ok()?;
+    Some((
+        manifest.name().to_string(),
+        manifest.capabilities().to_vec(),
+    ))
+}
+
 /// Whether a load outcome stops start-up rather than disabling one plugin.
 ///
 /// The split is one predicate and not a variant match where the bundle is
@@ -196,8 +283,21 @@ fn host_context(name: &str) -> Value {
 fn stops_startup(error: &LoadError) -> bool {
     match error {
         LoadError::Trust(failure) => failure.is_trust_failure(),
-        LoadError::Unreadable { .. } | LoadError::Manifest(_) => true,
-        LoadError::Stage(_)
+        LoadError::Unreadable { .. } => true,
+        LoadError::Manifest(
+            ManifestError::Absent { .. }
+            | ManifestError::Unreadable { .. }
+            | ManifestError::Invalid { .. }
+            | ManifestError::NameMismatch { .. },
+        ) => true,
+        // The manifest's two refusals about this host's library are the manifest
+        // side of the extractor's two, so all four are one disable reason with
+        // four names: a bundle that carries no library this host can use is a
+        // bundle that does not work here, not evidence that something is wrong.
+        LoadError::Manifest(
+            ManifestError::NoTargetLibrary { .. } | ManifestError::LibraryNotStaged { .. },
+        )
+        | LoadError::Stage(_)
         | LoadError::Call(_)
         | LoadError::ConfigurationRefused { .. }
         | LoadError::PluginDefect { .. }
