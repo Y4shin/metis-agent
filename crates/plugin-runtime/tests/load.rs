@@ -24,6 +24,7 @@ use plugin_runtime::manifest::ManifestError;
 use serde_json::{Value, json};
 use support::block_on;
 use support::bundle;
+use support::{decode, request};
 
 /// The capability names the fixture declares, in the order it declares them.
 ///
@@ -426,4 +427,50 @@ fn a_library_capability_the_manifest_does_not_declare_is_refused_by_name() {
             "a capability the manifest does not declare is a disagreement, and this refusal is {other}"
         ),
     }
+}
+
+/// An instance type with no `Default` whose only constructor is the
+/// asynchronous one the plugin side requires.
+///
+/// It is never loaded: the point is that this file compiles it against the
+/// plugin-side trait, which is the shape the load entry drives. If an instance
+/// type needed a `Default`, or a synchronous constructor, this impl would not
+/// build.
+struct NoDefault;
+
+impl plugin_contract::authoring::Plugin for NoDefault {
+    async fn init(
+        _host: plugin_contract::authoring::Host,
+        _initialisation: plugin_contract::authoring::Initialisation,
+    ) -> Result<Self, plugin_contract::authoring::PluginError> {
+        Ok(NoDefault)
+    }
+
+    fn capabilities(&self) -> Vec<plugin_contract::authoring::CapabilityDescriptor> {
+        Vec::new()
+    }
+
+    async fn call(
+        &self,
+        _call: plugin_contract::authoring::Call,
+        _request: plugin_contract::authoring::Request<'_>,
+    ) -> Result<plugin_contract::authoring::Response, plugin_contract::authoring::PluginError> {
+        Err(plugin_contract::authoring::PluginError::NotFound(
+            "this probe serves nothing".to_string(),
+        ))
+    }
+}
+
+#[test]
+fn an_instance_type_needs_no_default_and_its_constructor_is_asynchronous() {
+    // The bound is the assertion. `NoDefault` implements no `Default`, and its
+    // only constructor is `async fn init`, so this line compiles exactly when
+    // the plugin side requires neither.
+    fn accepts_a_plugin<P: plugin_contract::authoring::Plugin>() {}
+    accepts_a_plugin::<NoDefault>();
+
+    // The end-to-end half of the same property: the fixture, which also
+    // declares no `Default`, is obtained only by awaiting its asynchronous
+    // constructor, which is what the load tests above drive to completion on
+    // this test's runtime.
 }
