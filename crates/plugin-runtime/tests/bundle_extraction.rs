@@ -505,3 +505,80 @@ fn a_corrupt_entry_for_another_target_does_not_stop_this_hosts_load() {
         LIBRARY_BYTES
     );
 }
+
+#[test]
+fn a_successful_extraction_owns_its_staging_directory_until_it_is_dropped() {
+    let _guard = lock();
+    let before = staging_directories();
+    let staged =
+        extract_archive(&well_formed_archive(TARGET), TARGET).expect("a well-formed bundle stages");
+    let root = staged.root().to_path_buf();
+
+    assert!(
+        root.is_dir(),
+        "the staging directory exists while the bundle is held"
+    );
+    // The one directory that appeared is this bundle's, which is what pins the
+    // prefix the counts here rely on.
+    let during = staging_directories();
+    assert_eq!(
+        during.difference(&before).count(),
+        1,
+        "the extraction created one staging directory"
+    );
+
+    drop(staged);
+    assert!(
+        !root.exists(),
+        "the staging directory is removed with the bundle"
+    );
+    assert_eq!(staging_directories(), before);
+}
+
+#[test]
+fn a_refused_extraction_removes_its_staging_directory() {
+    // The hostile entry is the archive's last, so the manifest and the library
+    // were written into the staging directory before the walk reached it: the
+    // refusal has a directory of its own to remove.
+    let archive = archive_then(TARGET, |archive| archive.file("../escape", b"escaped"));
+    let _guard = lock();
+    let before = staging_directories();
+    let error = extract_archive(&archive, TARGET).expect_err("the traversal entry is refused");
+    assert_eq!(
+        error,
+        StageError::ParentEntryName {
+            name: "../escape".to_string()
+        }
+    );
+    assert_eq!(
+        staging_directories(),
+        before,
+        "the refused extraction left its staging directory behind"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_staged_file_and_its_directories_carry_the_hosts_own_modes() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path)
+            .expect("the staged path exists")
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    let _guard = lock();
+    let staged =
+        extract_archive(&well_formed_archive(TARGET), TARGET).expect("a well-formed bundle stages");
+    // The archive declares its own modes, and none of them reaches the
+    // filesystem: the host writes 0o700 for a directory and 0o600 for a file.
+    assert_eq!(mode(staged.root()), 0o700);
+    assert_eq!(mode(&staged.root().join("lib")), 0o700);
+    assert_eq!(mode(&staged.root().join("lib").join(TARGET)), 0o700);
+    assert_eq!(mode(staged.manifest_path()), 0o600);
+    assert_eq!(mode(staged.library_path()), 0o600);
+}
