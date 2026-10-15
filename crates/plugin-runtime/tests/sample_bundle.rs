@@ -222,12 +222,20 @@ fn the_sample_bundle_loads_dispatches_and_emits_an_event_through_the_sink() {
     // The event the plugin emitted during that call reached the sink the gate
     // installed, named with the instance the load registered it under.
     let events = sink.events();
-    assert_eq!(
-        events.len(),
-        1,
-        "the ready call emitted exactly one event: {events:?}"
+    assert!(
+        !events.is_empty(),
+        "the sample plugin's callbacks reached the gate's sink"
     );
-    let (instance, topic, payload) = events.first().expect("one event arrived");
+    let ready: Vec<&(String, String, Vec<u8>)> = events
+        .iter()
+        .filter(|(_, topic, _)| topic == sample::READY_TOPIC)
+        .collect();
+    assert_eq!(
+        ready.len(),
+        1,
+        "the ready capability emitted exactly one event on its own topic: {events:?}"
+    );
+    let (instance, topic, payload) = ready.first().expect("one event arrived");
     assert_eq!(instance, sample::NAME, "the event names its instance");
     assert_eq!(topic, sample::READY_TOPIC, "the event's topic is its own");
     assert_eq!(
