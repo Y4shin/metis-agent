@@ -122,6 +122,6 @@ jobs:
         # first run on a runner with MSVC is what proves it, because no local
         # invocation here can. Measured on the effort's Linux host with the
         # Windows target: `api-contracts` and `client` both check clean, while
-        # `daemon` stops in that C file, where the nix-wrapped clang cannot
-        # target `x86_64-pc-windows-msvc`.
+        # `daemon` stops in the nix-wrapped clang, which refuses that target
+        # itself, for this C file and for `libsqlite3-sys`'s `sqlite3.c`.
         run: cargo +nightly check -p api-contracts -p daemon --all-targets
