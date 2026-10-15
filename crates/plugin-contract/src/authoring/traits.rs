@@ -188,9 +188,7 @@ impl Initialisation {
             PluginError::InvalidArgument(format!("the initialisation payload is not JSON: {err}"))
         })?;
         let object = value.as_object().ok_or_else(|| {
-            PluginError::InvalidArgument(
-                "the initialisation payload is not one object".to_string(),
-            )
+            PluginError::InvalidArgument("the initialisation payload is not one object".to_string())
         })?;
         let part = |field: &str| {
             object.get(field).cloned().ok_or_else(|| {
@@ -218,17 +216,6 @@ impl Initialisation {
     pub fn host_context(&self) -> Result<HostContext, PluginError> {
         serde_json::from_value(self.host_context.clone())
             .map_err(|err| PluginError::InvalidArgument(format!("the host context: {err}")))
-    }
-
-    /// The configuration as it arrived, for a plugin that reads it by field
-    /// name rather than through a type.
-    pub fn config_value(&self) -> &serde_json::Value {
-        &self.config
-    }
-
-    /// The host context as it arrived.
-    pub fn host_context_value(&self) -> &serde_json::Value {
-        &self.host_context
     }
 }
 

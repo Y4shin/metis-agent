@@ -413,10 +413,8 @@ const TABLE_ENTRIES: [&str; 8] = [
 
 /// The generated header, which is the artifact a non-Rust implementer uses.
 fn generated_header() -> String {
-    std::fs::read_to_string(
-        repo_root().join("crates/plugin-contract/include/metis_plugin_abi.h"),
-    )
-    .expect("the generated header is committed")
+    std::fs::read_to_string(repo_root().join("crates/plugin-contract/include/metis_plugin_abi.h"))
+        .expect("the generated header is committed")
 }
 
 /// The contract text's plugin-table section, which is the table's description.

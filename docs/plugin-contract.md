@@ -76,9 +76,6 @@ The symbol and the ABI major stay `v1` and 1, because this revision lands before
 | --- | --- | --- |
 | `size` | `usize` | Bytes of the table the plugin provides. Read first, always. |
 | `abi_major`, `abi_minor` | `u32` | Major is part of the symbol name; minor is compared additively, so a newer minor is tolerated and an older one is refused. |
-
-Eight entries and no more. There is no counters entry and no counter of any kind
-is reachable through the table.
 | `init_plugin` | `(host: *const MetisHostApiV1, payload: MetisBuffer, out_instance: **mut c_void, out_future: *mut MetisFutureHandle) -> MetisStatus` | Constructs and initialises an instance. The one payload is host-owned and carries the plugin's own configuration and the host context (section 18); on `Ok` both out parameters are filled, the instance and a plugin-owned future that must resolve `Ok` before the instance is valid. There is no separate instance-creation entry. |
 | `destroy_instance` | `(instance) -> MetisStatus` | Releases the instance. Only valid after `shutdown`. |
 | `list_capabilities` | `(instance, out_payload: *mut MetisBuffer) -> MetisStatus` | Returns a plugin-allocated payload listing capabilities, each with its name, version, and request and response schemas. |
@@ -87,6 +84,9 @@ is reachable through the table.
 | `release_buffer` | `(buffer: MetisBuffer) -> MetisStatus` | The host frees a plugin-allocated buffer by calling this. The host never frees plugin memory itself. |
 | `shutdown` | `(instance) -> MetisStatus` | Quiesces the instance. The host drops every future before calling it, so nothing may arrive after it returns. |
 | `service_complete` | `(instance, request_id: u64, status: MetisStatus, payload: MetisBuffer) -> MetisStatus` | The host's answer to an earlier `service_request`. The plugin wakes its future's waker from here. |
+
+Eight entries and no more. There is no counters entry and no counter of any kind
+is reachable through the table.
 
 ## 6. The host table
 

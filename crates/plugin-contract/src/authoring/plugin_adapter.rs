@@ -242,7 +242,7 @@ unsafe extern "C" fn destroy_instance<P: Plugin>(instance: *mut c_void) -> Metis
         {
             return MetisStatus::NotFound;
         }
-        // SAFETY: the handle came from `create_instance`, and the insert above
+        // SAFETY: the handle came from `init_plugin`, and the insert above
         // makes this path run exactly once per handle.
         let state = unsafe { Box::from_raw(instance as *mut Instance<P>) };
         state

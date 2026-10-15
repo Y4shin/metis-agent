@@ -106,8 +106,7 @@ const _: () = assert!(align_of::<MetisPluginTableV1>() == align_of::<*const core
 const _: () = assert!(offset_of!(MetisPluginTableV1, size) == 0);
 const _: () = assert!(offset_of!(MetisPluginTableV1, abi_major) == SIZE_T);
 const _: () = assert!(offset_of!(MetisPluginTableV1, abi_minor) == SIZE_T + U32);
-const _: () =
-    assert!(offset_of!(MetisPluginTableV1, init_plugin) == size_of::<MetisTablePrefix>());
+const _: () = assert!(offset_of!(MetisPluginTableV1, init_plugin) == size_of::<MetisTablePrefix>());
 const _: () = assert!(
     offset_of!(MetisPluginTableV1, destroy_instance) == size_of::<MetisTablePrefix>() + PTR
 );

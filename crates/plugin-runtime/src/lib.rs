@@ -235,7 +235,10 @@ impl Loaded {
     /// Records that initialisation started, which is the step the ordering
     /// ledger has to show before anything is registered.
     fn host_marker(&self, host: &Host) {
-        host.order(format!("initialisation started from {}", self.path.display()));
+        host.order(format!(
+            "initialisation started from {}",
+            self.path.display()
+        ));
     }
 }
 

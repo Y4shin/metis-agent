@@ -200,7 +200,10 @@ fn main() -> ExitCode {
     checks.check(
         matches!(
             unsafe { metis_read_table(&probe) },
-            Err(MetisAbiError::MinorMismatch { known: METIS_ABI_MINOR, found: 0 })
+            Err(MetisAbiError::MinorMismatch {
+                known: METIS_ABI_MINOR,
+                found: 0
+            })
         ),
         "table.stale_minor_refused",
         "a plugin reporting minor 0 is refused before its entries are read",
@@ -2517,11 +2520,7 @@ unsafe extern "C" fn waker_wake(waker: MetisWaker) {
     if !slot.live.load(SeqCst) {
         // A wake after the future was dropped is a counted violation that names
         // the call it belongs to, not a step in the ordering ledger.
-        state
-            .wakes_after_drop
-            .lock()
-            .unwrap()
-            .push(slot.request_id);
+        state.wakes_after_drop.lock().unwrap().push(slot.request_id);
     }
 }
 
@@ -2532,11 +2531,7 @@ unsafe extern "C" fn waker_wake_by_ref(waker: *const MetisWaker) {
     let slot = unsafe { &*(data as *const WakerSlot) };
     let state = unsafe { &*slot.state };
     if !slot.live.load(SeqCst) {
-        state
-            .wakes_after_drop
-            .lock()
-            .unwrap()
-            .push(slot.request_id);
+        state.wakes_after_drop.lock().unwrap().push(slot.request_id);
     }
 }
 

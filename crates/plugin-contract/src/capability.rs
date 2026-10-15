@@ -13,7 +13,7 @@
 //! in the host, because it needs `jsonschema` and this crate does not.
 //!
 //! The schemas are inline rather than a reference to be fetched. The listing
-//! carries both, so `create_instance` never needs a second call to learn what a
+//! carries both, so a host never needs a second call to learn what a
 //! capability accepts, and a host validates in both directions without a cache
 //! or a fetch-failure path.
 //!

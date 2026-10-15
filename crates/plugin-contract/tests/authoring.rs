@@ -578,9 +578,16 @@ fn finished(state: &HostState, outcome: InitOutcome) {
 /// The instance of an initialisation that resolved `Ok`, with the future
 /// dropped.
 fn ok_instance(_state: &HostState, outcome: InitOutcome) -> *mut c_void {
-    assert_eq!(outcome.entry, MetisStatus::Ok, "the entry starts the future");
+    assert_eq!(
+        outcome.entry,
+        MetisStatus::Ok,
+        "the entry starts the future"
+    );
     assert_eq!(outcome.future, MetisStatus::Ok, "initialisation resolved");
-    assert!(!outcome.instance.is_null(), "an initialised instance exists");
+    assert!(
+        !outcome.instance.is_null(),
+        "an initialised instance exists"
+    );
     let instance = outcome.instance;
     // SAFETY: the handle came from this table's `init_plugin`.
     assert_eq!(
@@ -653,10 +660,10 @@ fn more_than_four_capabilities_dispatch_by_name() {
     let status = drive(&MANY, &state, instance, 1_099, "tool.absent");
     assert_eq!(status, MetisStatus::NotFound);
 
-    // SAFETY: the instance came from `create_instance`.
+    // SAFETY: the instance came from `init_plugin`.
     let status = unsafe { (MANY.shutdown)(instance) };
     assert_eq!(status, MetisStatus::Ok);
-    // SAFETY: the instance came from `create_instance` and has been shut down.
+    // SAFETY: the instance came from `init_plugin` and has been shut down.
     let status = unsafe { (MANY.destroy_instance)(instance) };
     assert_eq!(status, MetisStatus::Ok);
     assert_eq!(accounting().live, 0, "every plugin buffer was released");
@@ -998,12 +1005,7 @@ static INIT_FAILS: MetisPluginTableV1 = table::<InitFails>();
 fn a_failing_initialisation_yields_no_valid_instance() {
     let _guard = serial();
     let state = HostState::new(&raw const INIT_FAILS);
-    let outcome = initialise(
-        &INIT_FAILS,
-        &state,
-        serde_json::json!({}),
-        "init-fails",
-    );
+    let outcome = initialise(&INIT_FAILS, &state, serde_json::json!({}), "init-fails");
     assert_eq!(
         outcome.entry,
         MetisStatus::Ok,
@@ -1019,7 +1021,10 @@ fn a_failing_initialisation_yields_no_valid_instance() {
         "the entry handed out a pointer, because the host destroys it after a failure"
     );
     finished(&state, outcome);
-    assert_eq!(state.waker_clones.load(Ordering::SeqCst), state.waker_drops.load(Ordering::SeqCst));
+    assert_eq!(
+        state.waker_clones.load(Ordering::SeqCst),
+        state.waker_drops.load(Ordering::SeqCst)
+    );
 }
 
 /// A plugin that reads its configuration, so a configuration it cannot read is
@@ -1070,7 +1075,11 @@ fn a_configuration_the_plugin_cannot_read_is_its_own_class() {
         "configured",
     );
     assert_eq!(outcome.entry, MetisStatus::Ok);
-    assert_eq!(outcome.future, MetisStatus::Ok, "the declared configuration is read");
+    assert_eq!(
+        outcome.future,
+        MetisStatus::Ok,
+        "the declared configuration is read"
+    );
     let instance = ok_instance(&state, outcome);
     let mut listed = MetisBuffer::empty();
     // SAFETY: the instance is live.
@@ -1080,9 +1089,15 @@ fn a_configuration_the_plugin_cannot_read_is_its_own_class() {
     );
     let _ = state.read_and_release(listed);
     // SAFETY: the instance is live and has been shut down below.
-    assert_eq!(unsafe { (CONFIG_READER.shutdown)(instance) }, MetisStatus::Ok);
+    assert_eq!(
+        unsafe { (CONFIG_READER.shutdown)(instance) },
+        MetisStatus::Ok
+    );
     // SAFETY: the instance is live.
-    assert_eq!(unsafe { (CONFIG_READER.destroy_instance)(instance) }, MetisStatus::Ok);
+    assert_eq!(
+        unsafe { (CONFIG_READER.destroy_instance)(instance) },
+        MetisStatus::Ok
+    );
 
     // A configuration that does not match what the plugin declared. The class
     // is `invalid_argument`, which is what tells a caller that the

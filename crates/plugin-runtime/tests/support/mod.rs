@@ -21,7 +21,9 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use plugin_fixture::payload::{EchoRequest, EchoResponse, FixtureConfig, HostContext, Initialisation};
+use plugin_fixture::payload::{
+    EchoRequest, EchoResponse, FixtureConfig, HostContext, Initialisation,
+};
 use plugin_runtime::{Host, Loaded};
 
 pub mod signer;
