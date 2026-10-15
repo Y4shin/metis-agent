@@ -121,6 +121,17 @@ impl Recording {
         self.delivered.lock().unwrap().push(delivered);
     }
 
+    /// A sink that refuses every service request with `answer`.
+    ///
+    /// The status is the frozen callback's return value, which is what makes a
+    /// refusal synchronous: the plugin learns it from the call it made.
+    fn refusing(answer: MetisStatus) -> Recording {
+        Recording {
+            answer,
+            ..Recording::new()
+        }
+    }
+
     /// A sink that panics inside the given callback kind.
     fn panicking_on(kind: Kind) -> Recording {
         Recording {
@@ -707,5 +718,96 @@ fn callbacks_from_different_instances_are_not_ordered_against_each_other() {
     assert!(
         instances.contains(&"a".to_string()) && instances.contains(&"b".to_string()),
         "both instances delivered their callbacks: {instances:?}"
+    );
+}
+
+#[test]
+fn an_accepted_service_request_is_answered_later_through_the_completion_entry() {
+    let _guard = one_at_a_time();
+    let sink = Recording::new();
+    let (_host, instance) = named_instance(&sink, "fixture");
+
+    let mut call = instance
+        .invoke("tool.pending", 1, &request("wait"))
+        .expect("the future starts");
+    assert!(
+        matches!(poll_once(&mut call), Poll::Pending),
+        "the capability parks on the answer it asked for"
+    );
+
+    let asked: Vec<(String, u64, Vec<u8>)> = sink
+        .of_kind("service")
+        .into_iter()
+        .filter_map(|delivered| match delivered {
+            Delivered::Service {
+                service,
+                request_id,
+                payload,
+                ..
+            } => Some((service, request_id, payload)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked.len(), 1, "one service request: {asked:?}");
+    let (service, request_id, payload) = asked.into_iter().next().expect("the ask is there");
+    assert_eq!(service, "timer");
+    assert_eq!(
+        request_id, 1,
+        "the answer is addressed with the id the request carried"
+    );
+    assert_eq!(
+        serde_json::from_slice::<TimerAnswer>(&payload).expect("the ask is JSON"),
+        TimerAnswer { delay_ms: 5 }
+    );
+
+    // Nothing is answered until the sink's answer arrives through the existing
+    // completion entry, which is the whole protocol: the sink accepted the
+    // request and the daemon answers it later.
+    assert!(
+        matches!(poll_once(&mut call), Poll::Pending),
+        "no poll resolves the call before the completion"
+    );
+    let answer = serde_json::to_vec(&TimerAnswer { delay_ms: 7 }).expect("the answer serialises");
+    instance
+        .complete_service(request_id, MetisStatus::Ok, &answer)
+        .expect("the instance still holds the call");
+
+    match poll_once(&mut call) {
+        Poll::Ready(Ok(body)) => {
+            assert_eq!(
+                support::decode(&body).echo,
+                "timer 7",
+                "the plugin's own answer"
+            );
+        }
+        other => panic!("the call resolves once the completion arrives: {other:?}"),
+    }
+}
+
+#[test]
+fn a_refused_service_request_is_refused_synchronously() {
+    let _guard = one_at_a_time();
+    let sink = Recording::refusing(MetisStatus::Unsupported);
+    let (_host, instance) = named_instance(&sink, "fixture");
+
+    let mut call = instance
+        .invoke("tool.pending", 1, &request("wait"))
+        .expect("the future starts");
+
+    // The refusal is the callback's return value, so the plugin learns it from
+    // the call it made: the future resolves with that status and nothing is
+    // answered later.
+    match poll_once(&mut call) {
+        Poll::Ready(Err(CallError::Status(status))) => assert_eq!(
+            status,
+            MetisStatus::Unsupported,
+            "the refusal reaches the plugin as the status the sink returned"
+        ),
+        other => panic!("the refused request fails the call: {other:?}"),
+    }
+    assert_eq!(
+        sink.of_kind("service").len(),
+        1,
+        "the request was delivered once and refused once"
     );
 }
