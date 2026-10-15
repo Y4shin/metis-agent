@@ -123,7 +123,7 @@ fn the_registry_refuses_duplicates_and_toggles_entries() {
         .route("fixture.tool.echo")
         .map(|(entry, capability)| (entry.instance_name.clone(), capability.name.clone()))
     {
-        Err(RouteError::Disabled(name)) => assert_eq!(name, "fixture.tool.echo"),
+        Err(RouteError::Disabled { name, .. }) => assert_eq!(name, "fixture.tool.echo"),
         other => panic!("a disabled entry is reported as disabled, got {other:?}"),
     }
     assert!(registry.enable("fixture", true));
