@@ -343,7 +343,12 @@ impl Serving {
                             host.order(format!("library unloaded: {}", path.display()));
                         }
                     }
-                    Err(error) => refusal = Some(ReleaseRefusal::Unload(error)),
+                    Err(error) => {
+                        // The guard's own line is already on the ledger; this is
+                        // the release's record of the step it refused.
+                        host.order(format!("release refused: the unload refused: {error}"));
+                        refusal = Some(ReleaseRefusal::Unload(error));
+                    }
                 },
             }
         }

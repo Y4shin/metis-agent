@@ -468,6 +468,12 @@ fn an_unload_refused_for_another_reason_leaves_the_library_mapped() {
         "the guard's refusal is recorded rather than inferred: {ledger:#?}"
     );
     assert!(
+        ledger
+            .iter()
+            .any(|line| line.contains("release refused: the unload refused")),
+        "the release records the step it refused: {ledger:#?}"
+    );
+    assert!(
         !ledger.iter().any(|line| line.contains("library unloaded")),
         "nothing here unloads a library: {ledger:#?}"
     );
