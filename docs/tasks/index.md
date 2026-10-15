@@ -11,10 +11,10 @@ title: docs/tasks
 - metis-agent-core
 - metis-daemon
 - metis-plugin-sdk
-- metis-plugins
 - metis-surfaces
 
 ## Archived
 
 - metis-bootstrap
 - metis-foundations
+- metis-plugins
