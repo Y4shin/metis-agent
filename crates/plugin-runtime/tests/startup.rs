@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use plugin_contract::abi::{METIS_ABI_MAJOR, MetisAbiError};
 use plugin_runtime::CallError;
-use plugin_runtime::bundle::{StageError, TrustStore};
+use plugin_runtime::bundle::{BundleError, CONTAINER_VERSION, StageError, TrustStore};
 use plugin_runtime::load::LoadError;
 use plugin_runtime::manifest::ManifestError;
 use plugin_runtime::startup::{DisabledPlugin, StartupReport, StartupStop, start_plugins};
@@ -141,7 +141,12 @@ impl Plugins {
             entries.push((support::bundle::library_path(&target, file), bytes.clone()));
         }
         entries.extend(bundle.extra.iter().cloned());
-        let bytes = signer::signed_bundle(&chain, &support::bundle::archive(&entries));
+        let mut bytes = signer::signed_bundle(&chain, &support::bundle::archive(&entries));
+        if let Some(version) = bundle.container_version {
+            // The container version is the header's second field, so it is
+            // patched after signing: the file is then one no verifier accepted.
+            bytes[8..10].copy_from_slice(&version.to_be_bytes());
+        }
         let path = self.dir.path.join(format!("{file}{SUFFIX}"));
         std::fs::write(&path, &bytes)
             .unwrap_or_else(|error| panic!("{} writes: {error}", path.display()));
@@ -163,6 +168,9 @@ struct Bundle {
     library: Option<(String, Vec<u8>)>,
     /// Entries beyond the manifest and this host's library.
     extra: Vec<(String, Vec<u8>)>,
+    /// The container version the written file declares, when a test wants one
+    /// this build does not read.
+    container_version: Option<u16>,
 }
 
 impl Bundle {
@@ -176,6 +184,7 @@ impl Bundle {
                 support::bundle::library_bytes(),
             )),
             extra: Vec::new(),
+            container_version: None,
         }
     }
 
@@ -188,6 +197,12 @@ impl Bundle {
     /// The same bundle with one more archive entry.
     fn with_entry(mut self, name: &str, bytes: &[u8]) -> Bundle {
         self.extra.push((name.to_string(), bytes.to_vec()));
+        self
+    }
+
+    /// The same bundle declaring a container version this build does not read.
+    fn container_version(mut self, version: u16) -> Bundle {
+        self.container_version = Some(version);
         self
     }
 }
@@ -588,5 +603,85 @@ fn a_disabled_plugin_is_listable_with_its_name_its_reason_and_its_capabilities()
         names,
         ["tool.echo", "tool.pending"],
         "the placeholder lists the capabilities the manifest declared, in its order"
+    );
+}
+
+#[test]
+fn an_unknown_container_version_disables_without_reading_the_manifest() {
+    let mut plugins = Plugins::new();
+    // The manifest declares another name and a capability, so a placeholder
+    // that carries neither proves the manifest was never read.
+    plugins.write(
+        "never-parsed",
+        "declared-by-manifest",
+        &Bundle::new(Some(manifest("declared-by-manifest", &["tool.echo"])))
+            .container_version(CONTAINER_VERSION + 1),
+    );
+
+    let report = report(
+        &plugins,
+        "a container version this build does not know does not stop start-up",
+    );
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    match plugin.reason() {
+        LoadError::Trust(failure) => {
+            assert!(
+                matches!(failure, BundleError::UnknownContainerVersion { .. }),
+                "the refusal is the container version: {failure}"
+            );
+            assert!(
+                !failure.is_trust_failure(),
+                "a container this build cannot read is not evidence of tampering"
+            );
+        }
+        other => panic!("an unknown container version disables one plugin, and this is {other}"),
+    }
+    assert_eq!(
+        plugin.name(),
+        "never-parsed",
+        "the placeholder falls back to the file's name, because no manifest was read"
+    );
+    assert!(
+        plugin.capabilities().is_empty(),
+        "a plugin whose declaration was never read declares nothing, and this one declares {:?}",
+        plugin.capabilities()
+    );
+    assert!(
+        report.serving().is_empty(),
+        "the refused bundle did not start"
+    );
+}
+
+#[test]
+fn a_disabled_plugin_without_a_readable_manifest_is_named_by_its_file_and_carries_no_capabilities()
+{
+    let mut plugins = Plugins::new();
+    // The archive verifies and does not extract, so the re-read that describes a
+    // placeholder gets as far as the archive and no further: the manifest is in
+    // the archive and never staged.
+    plugins.write(
+        "escaping",
+        "declared-by-manifest",
+        &Bundle::new(Some(manifest("declared-by-manifest", &["tool.echo"])))
+            .with_entry("../escape", b"bytes"),
+    );
+
+    let report = report(&plugins, "one hostile archive does not stop start-up");
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    assert!(
+        matches!(plugin.reason(), LoadError::Stage(_)),
+        "the placeholder carries the refusal that disabled it: {}",
+        plugin.reason()
+    );
+    assert_eq!(
+        plugin.name(),
+        "escaping",
+        "a placeholder with no readable manifest carries the bundle file's name"
+    );
+    assert!(
+        plugin.capabilities().is_empty(),
+        "a plugin whose manifest was never read carries no capabilities"
     );
 }
