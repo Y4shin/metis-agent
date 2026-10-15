@@ -411,3 +411,64 @@ fn an_unload_refused_for_another_reason_leaves_the_library_mapped() {
         "nothing here unloads a library: {ledger:#?}"
     );
 }
+
+#[test]
+fn a_quarantined_instance_keeps_its_library_resident() {
+    let host = Host::new();
+    let serving = serving(&host);
+    let name = serving.name().to_string();
+    // A poll this instance abandoned is still running: no new future is
+    // accepted, and nothing may unmap the library under it.
+    serving
+        .instance()
+        .quarantine("a poll was abandoned by the watchdog");
+
+    let report = block_on(serving.release(deadline()));
+
+    assert_eq!(report.name(), name, "the report names the instance");
+    assert!(
+        !report.released(),
+        "a quarantined instance is not released, and it is not forced"
+    );
+    assert_eq!(
+        report.refusal(),
+        Some(&ReleaseRefusal::Quarantined),
+        "the refusal is the quarantine, not a later consequence of it"
+    );
+    assert_eq!(
+        report.refusal().map(ReleaseRefusal::step),
+        Some("unload"),
+        "the step the quarantine refuses is the unload"
+    );
+
+    // Its library stays resident, which is what quarantine is for.
+    let resident = report
+        .resident()
+        .expect("a quarantined instance keeps its library mapped");
+    assert!(
+        resident.has_service_complete(),
+        "the library is still mapped after the refusal"
+    );
+
+    // The plugin was never asked to quiesce or destroy: an abandoned poll may
+    // still be running, and the instance stops accepting new futures instead.
+    let ledger = report.ledger();
+    assert!(
+        ledger
+            .iter()
+            .any(|line| line.contains("release refused: the instance is quarantined")),
+        "the refusal is recorded: {ledger:#?}"
+    );
+    assert!(
+        !ledger.iter().any(|line| line.contains("instance quiesced")),
+        "a quarantined instance is not asked to quiesce: {ledger:#?}"
+    );
+    assert!(
+        !ledger.iter().any(|line| line.contains("instance destroyed")),
+        "a quarantined instance is not destroyed: {ledger:#?}"
+    );
+    assert!(
+        !ledger.iter().any(|line| line.contains("library unloaded")),
+        "nothing here unloads a library: {ledger:#?}"
+    );
+}
