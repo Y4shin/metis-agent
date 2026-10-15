@@ -220,12 +220,16 @@ CI.
   loaded through `plugin-runtime` in an integration test, so the C plugin's
   hand-written manifest is exercised in the same gate. `sample-bundle-ci` owns
   it.
-- `docs/bugs/plugin-contract-c-static-assert-msvc.md` is open and sits in
+- `docs/bugs/plugin-contract-c-static-assert-msvc.md` was open and sat in
   this effort's territory: `plugin-contract`'s build script compiles a C
   translation unit whose `_Static_assert` message form MSVC rejects, so
-  `plugin-runtime` cannot be compiled for the Windows target and the
-  `windows` CI job is narrowed to `api-contracts`. It is a filed defect, not
-  a decision, and the tickets must absorb it.
+  `plugin-runtime` could not be compiled for the Windows target and the
+  `windows` CI job was narrowed to `api-contracts`. `c-static-assert-msvc` fixed
+  it and the record is archived as fixed at
+  `docs/bugs/archive/plugin-contract-c-static-assert-msvc.md` with its
+  `fix_commit` at the landing merge `e1099f5`. The one thing still unproven on
+  this host is the MSVC invocation itself, which the widened `windows` job
+  proves on its first run.
 - Three defects the hazard prototype found in the host waker lifecycle, measured
   in `docs/tasks/metis-plugins/tasks/abi-hazard-fixtures/findings.md`: the
   authoring bridge leaks one `Arc<CallState>` per call, because the `MetisWaker`

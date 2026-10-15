@@ -2,7 +2,7 @@
 //! (D13).
 //!
 //! `c/layout_static_asserts.c` is compiled by `build.rs` into this test binary.
-//! Its `_Static_assert`s already refuse to compile when the generated header
+//! Its layout assertions already refuse to compile when the generated header
 //! stops agreeing with the pointer-size formulas in `src/abi/layout.rs`. This
 //! test adds the other direction: it compares the values the C compiler
 //! actually measured with Rust's `size_of`, `align_of` and `offset_of`, so a
