@@ -383,3 +383,125 @@ fn a_bundle_without_a_root_manifest_still_stages() {
         LIBRARY_BYTES
     );
 }
+
+/// Every path the staging directory holds, relative to it and sorted, with a
+/// trailing separator on a directory so an empty one is visible.
+fn staged_paths(root: &std::path::Path) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(directory) = queue.pop() {
+        for entry in std::fs::read_dir(&directory).expect("the staging directory reads") {
+            let path = entry.expect("a staged entry reads").path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("a staged path is under the root");
+            let mut name = relative.to_string_lossy().into_owned();
+            if path.is_dir() {
+                name.push('/');
+                queue.push(path);
+            }
+            paths.push(name);
+        }
+    }
+    paths.sort();
+    paths
+}
+
+#[test]
+fn a_bundle_holding_several_targets_stages_only_this_hosts_target() {
+    let _guard = lock();
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.deflated_file(&library_entry(OTHER_TARGET, "other.so"), b"another target");
+    archive.deflated_file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    let staged = extract_archive(&archive.finish(), TARGET).expect("this host's target stages");
+
+    // The other target's directory is not created at all, not even empty.
+    assert_eq!(
+        staged_paths(staged.root()),
+        vec![
+            "lib/".to_string(),
+            format!("lib/{TARGET}/"),
+            library_entry(TARGET, LIBRARY_FILE),
+            MANIFEST.to_string(),
+        ]
+    );
+    assert_eq!(
+        std::fs::read(staged.library_path()).expect("the library is staged"),
+        LIBRARY_BYTES
+    );
+}
+
+#[test]
+fn another_target_holding_two_files_still_stages() {
+    let _guard = lock();
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file(&library_entry(OTHER_TARGET, "one.so"), b"one");
+    archive.file(&library_entry(OTHER_TARGET, "two.so"), b"two");
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    let staged = extract_archive(&archive.finish(), TARGET).expect("this host's target stages");
+    assert_eq!(
+        staged_paths(staged.root()),
+        vec![
+            "lib/".to_string(),
+            format!("lib/{TARGET}/"),
+            library_entry(TARGET, LIBRARY_FILE),
+            MANIFEST.to_string(),
+        ]
+    );
+}
+
+#[test]
+fn an_entry_outside_the_archive_layout_is_not_staged() {
+    let _guard = lock();
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file("notes.txt", b"an entry the layout does not name");
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    archive.file(&format!("lib/{TARGET}/nested/data.bin"), b"a deeper tree");
+    let staged = extract_archive(&archive.finish(), TARGET).expect("this host's target stages");
+    assert_eq!(
+        staged_paths(staged.root()),
+        vec![
+            "lib/".to_string(),
+            format!("lib/{TARGET}/"),
+            library_entry(TARGET, LIBRARY_FILE),
+            MANIFEST.to_string(),
+        ]
+    );
+}
+
+#[test]
+fn a_hostile_entry_belonging_to_another_target_is_still_refused() {
+    // Every entry is validated, whether or not this host's load needs it.
+    let archive = archive_then(TARGET, |archive| {
+        archive.symlink(&library_entry(OTHER_TARGET, "escape.so"), "/etc/passwd");
+    });
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::EntryIsSymlink {
+            name: library_entry(OTHER_TARGET, "escape.so")
+        }
+    );
+}
+
+#[test]
+fn a_corrupt_entry_for_another_target_does_not_stop_this_hosts_load() {
+    // An entry this host does not load is validated by its metadata, not by
+    // its bytes, so it is never decompressed: its own damage is not this
+    // host's problem.
+    const OTHER_BYTES: &[u8] = b"a stored entry for another target";
+    let _guard = lock();
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file(&library_entry(OTHER_TARGET, "other.so"), OTHER_BYTES);
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    let mut archive = archive.finish();
+    corrupt_stored_data(&mut archive, OTHER_BYTES);
+    let staged = extract_archive(&archive, TARGET).expect("this host's target stages");
+    assert_eq!(
+        std::fs::read(staged.library_path()).expect("the library is staged"),
+        LIBRARY_BYTES
+    );
+}
