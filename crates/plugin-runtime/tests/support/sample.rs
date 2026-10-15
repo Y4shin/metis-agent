@@ -140,16 +140,7 @@ pub fn trust() -> TrustStore {
 pub fn manifest(names: &[&str]) -> String {
     let target = bundle::host_target();
     let library = bundle::library_path(&target, LIBRARY_FILE);
-    let capabilities: String = names
-        .iter()
-        .map(|name| {
-            format!(
-                "\n[[capabilities]]\nname = \"{name}\"\nkind = \"tool\"\nversion = 1\n\
-                 request_schema = {{ type = \"object\" }}\n\
-                 response_schema = {{ type = \"object\" }}\n"
-            )
-        })
-        .collect();
+    let capabilities = bundle::capability_list(names);
     format!(
         r#"# A hand-written manifest: the C fixture is the proof that packaging a
 # plugin needs no generator. The host trusts this list for discovery, and the

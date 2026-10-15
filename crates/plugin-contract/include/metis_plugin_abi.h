@@ -380,14 +380,10 @@ typedef struct MetisWakerVtable {
 /**
  * The host's waker: how a plugin asks to be polled again.
  *
- * The waker the host passes to `poll` is one owning reference, and the host
- * releases it when the poll returns, so the plugin must not release it. The
- * plugin may clone it, each clone is one `clone` call and one owning reference,
- * and it must `drop` every clone. A clone is consumed by exactly one `wake` or
- * `drop`: a second use of one consumed clone is refused rather than acted on,
- * so it cannot release the call's state twice. `wake` may be called from any
- * thread, must be cheap and non-blocking, and may arrive after the future was
- * dropped, which the host records rather than crashing on.
+ * The waker's liveness rule, who owns each reference and when, is written once
+ * in `docs/plugin-contract.md` section 8. This type carries that rule and
+ * points at its one statement rather than repeating it, so there is a single
+ * wording to keep in step; the generated header carries this pointer with it.
  *
  * There is deliberately no `Copy`: duplicating this value in Rust would make a
  * second owning handle without a `clone` call, and every clone has to be

@@ -8,18 +8,15 @@
 //! under test is the format an author writes, not a format only a generator
 //! could produce.
 //!
-//! The target is derived here rather than imported, because the contract fixes
-//! it as the operating system and the architecture joined by a hyphen, and
-//! nothing in the runtime exports that derivation.
+//! The archive and the target come from the shared support module, which every
+//! integration test of this crate builds its bundles with.
 
 mod support;
 
 use std::ffi::c_void;
-use std::io::{Cursor, Write};
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::OnceLock;
 
 use plugin_contract::abi::{
     METIS_ABI_MAJOR, METIS_ABI_MINOR, MetisAbiError, MetisTablePrefix,
@@ -29,16 +26,12 @@ use plugin_runtime::bundle::{StagedBundle, TrustStore, extract, verify_bundle};
 use plugin_runtime::manifest::{Manifest, ManifestError};
 use plugin_runtime::{CallError, Loaded};
 use serde_json::json;
+use support::bundle;
 use support::signer::{self, TestChain};
-use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipWriter};
 
 /// The name the test chain's leaf-authorising certificate carries, which is the
 /// name every manifest here declares.
 const NAME: &str = signer::LEAF_COMMON_NAME;
-
-/// The manifest's name at the archive root, as the contract fixes it.
-const MANIFEST: &str = "manifest.toml";
 
 /// The entry symbol this build resolves, which is the frozen name for major 1.
 const ENTRY: &str = "metis_plugin_entry_v1";
@@ -47,92 +40,25 @@ const ENTRY: &str = "metis_plugin_entry_v1";
 /// cannot resolve at all.
 const OTHER_ENTRY: &str = "metis_plugin_entry_v2";
 
-/// This host's target, spelled the way the contract fixes it: the operating
-/// system and the architecture joined by a hyphen.
-fn host_target() -> String {
-    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
-}
-
-/// The fixture cdylib this test carries, built once however many bundles the
-/// run builds from it.
-fn fixture_library() -> &'static PathBuf {
-    static LIBRARY: OnceLock<PathBuf> = OnceLock::new();
-    LIBRARY.get_or_init(support::fixture_path)
-}
-
-/// The file name the fixture's own library carries.
-fn library_file_name() -> String {
-    fixture_library()
-        .file_name()
-        .expect("the fixture library has a file name")
-        .to_string_lossy()
-        .into_owned()
-}
-
-/// The bytes a bundle carries as this host's library: the fixture cdylib.
-fn library_bytes() -> Vec<u8> {
-    std::fs::read(fixture_library()).expect("the fixture library this test built reads")
-}
-
-/// The archive-relative path a library for `target` is carried at.
-fn library_path(target: &str, file_name: &str) -> String {
-    format!("lib/{target}/{file_name}")
-}
-
-/// One archive's entries: the root manifest when there is one, this host's
-/// library, and anything else the test adds.
-fn entries(
-    target: &str,
-    manifest: Option<&str>,
-    extra: &[(String, Vec<u8>)],
-) -> Vec<(String, Vec<u8>)> {
-    let mut entries = Vec::new();
-    if let Some(manifest) = manifest {
-        entries.push((MANIFEST.to_string(), manifest.as_bytes().to_vec()));
-    }
-    entries.push((library_path(target, &library_file_name()), library_bytes()));
-    entries.extend(extra.iter().cloned());
-    entries
-}
-
-/// Writes the entries into a ZIP archive, entry by entry.
-///
-/// Every entry declares the mode this host writes, because the extractor
-/// refuses any other declared mode, and stored rather than deflated, because
-/// compression is not what this step tests.
-fn archive(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    for (name, bytes) in entries {
-        let options = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Stored)
-            .unix_permissions(0o600);
-        writer
-            .start_file(name.as_str(), options)
-            .unwrap_or_else(|error| panic!("the entry {name} starts: {error}"));
-        writer
-            .write_all(bytes)
-            .unwrap_or_else(|error| panic!("the entry {name} writes: {error}"));
-    }
-    writer.finish().expect("the archive finishes").into_inner()
-}
-
-/// A verified bundle, extracted for `target`.
+/// A verified bundle, extracted for this host: `manifest` at the archive root
+/// when the test gives one, the fixture's own library, and `extra` beside them.
 ///
 /// The test chain's anchor is installed as a root explicitly: the runtime's
 /// compiled-in root set trusts nothing.
-fn staged(entries: &[(String, Vec<u8>)], target: &str) -> StagedBundle {
+fn staged(manifest: Option<&str>, extra: &[(String, Vec<u8>)]) -> StagedBundle {
+    let target = bundle::host_target();
     let chain = TestChain::standard(3);
-    let bytes = signer::signed_bundle(&chain, &archive(entries));
+    let entries = bundle::entries(manifest, extra);
+    let bytes = signer::signed_bundle(&chain, &bundle::archive(&entries));
     let trust = TrustStore::empty().with_root(chain.anchor().public_key());
     let verified = verify_bundle(&bytes, &trust).expect("the bundle this test signed verifies");
-    extract(&verified, target).expect("this archive carries the target it was built for")
+    extract(&verified, &target).expect("this archive carries the target it was built for")
 }
 
 /// A staged bundle for this host: `manifest` at the archive root when it is
 /// given, beside the fixture's own library.
 fn staged_with(manifest: Option<&str>) -> StagedBundle {
-    let target = host_target();
-    staged(&entries(&target, manifest, &[]), &target)
+    staged(manifest, &[])
 }
 
 /// The manifest an author writes by hand, which is what every bundle here
@@ -141,7 +67,7 @@ fn staged_with(manifest: Option<&str>) -> StagedBundle {
 /// The text is a literal, not a serialisation of any type in this tree: the
 /// format belongs to the author, and a hand-written manifest is what proves it.
 fn hand_written(name: &str) -> String {
-    hand_written_with(name, &declaration(&host_target()))
+    hand_written_with(name, &declaration(&bundle::host_target()))
 }
 
 /// The same hand-written manifest, with the given `[libraries]` declarations.
@@ -181,7 +107,7 @@ type = "object"
 /// A target that is not this host's, so a bundle can carry more than this host
 /// needs.
 fn other_target() -> String {
-    if host_target() == "linux-x86_64" {
+    if bundle::host_target() == "linux-x86_64" {
         "macos-aarch64".to_string()
     } else {
         "linux-x86_64".to_string()
@@ -192,7 +118,7 @@ fn other_target() -> String {
 fn declaration(target: &str) -> String {
     format!(
         "{target} = \"lib/{target}/{library}\"",
-        library = library_file_name()
+        library = bundle::library_file_name()
     )
 }
 
@@ -330,8 +256,8 @@ fn the_manifests_name_must_be_the_name_the_bundle_chain_carries() {
 
 #[test]
 fn a_hand_written_manifest_loads_with_every_declared_field() {
-    let target = host_target();
-    let library = format!("lib/{target}/{}", library_file_name());
+    let target = bundle::host_target();
+    let library = bundle::library_path(&target, &bundle::library_file_name());
     let text = hand_written(NAME);
 
     let manifest = Manifest::parse(&text).expect("a hand-written manifest is the format");
@@ -363,7 +289,7 @@ fn a_hand_written_manifest_loads_with_every_declared_field() {
 
 #[test]
 fn selection_chooses_this_hosts_library_and_leaves_the_other_targets_declaration_alone() {
-    let target = host_target();
+    let target = bundle::host_target();
     let other = other_target();
     // The bundle carries both targets' files, and the manifest declares both,
     // but the other target's declaration names a file this bundle does not
@@ -374,11 +300,11 @@ fn selection_chooses_this_hosts_library_and_leaves_the_other_targets_declaration
         &format!(
             "{target} = \"lib/{target}/{library}\"
 {other} = \"{other_entry}\"",
-            library = library_file_name()
+            library = bundle::library_file_name()
         ),
     );
     let extra = [(other_entry.clone(), b"another target's bytes".to_vec())];
-    let staged = staged(&entries(&target, Some(&manifest_text), &extra), &target);
+    let staged = staged(Some(&manifest_text), &extra);
     let manifest = Manifest::read(&staged, NAME).expect("the manifest loads");
 
     let selected = manifest
@@ -388,12 +314,12 @@ fn selection_chooses_this_hosts_library_and_leaves_the_other_targets_declaration
         selected,
         staged
             .root()
-            .join(library_path(&target, &library_file_name())),
+            .join(bundle::library_path(&target, &bundle::library_file_name())),
         "selection resolves this host's declaration against the staging root"
     );
     assert_eq!(
         std::fs::read(&selected).expect("the selected library is a file"),
-        library_bytes(),
+        bundle::library_bytes(),
         "the selected file is this host's library and nothing else"
     );
     assert!(
@@ -416,21 +342,17 @@ fn selection_chooses_this_hosts_library_and_leaves_the_other_targets_declaration
 
 #[test]
 fn selection_refuses_a_bundle_that_carries_no_library_for_this_host() {
-    let target = host_target();
+    let target = bundle::host_target();
     let other = other_target();
 
     // Nothing at all is declared for this host.
     let elsewhere = format!("lib/{other}/libother.dylib");
     let undeclared = staged(
-        &entries(
-            &target,
-            Some(&hand_written_with(
-                NAME,
-                &format!("{other} = \"{elsewhere}\""),
-            )),
-            &[],
-        ),
-        &target,
+        Some(&hand_written_with(
+            NAME,
+            &format!("{other} = \"{elsewhere}\""),
+        )),
+        &[],
     );
     let manifest = Manifest::read(&undeclared, NAME).expect("the manifest loads");
     assert_eq!(
@@ -445,15 +367,11 @@ fn selection_refuses_a_bundle_that_carries_no_library_for_this_host() {
     // the bundle carries.
     let declared = format!("lib/{target}/not-the-library.so");
     let wrong = staged(
-        &entries(
-            &target,
-            Some(&hand_written_with(
-                NAME,
-                &format!("{target} = \"{declared}\""),
-            )),
-            &[],
-        ),
-        &target,
+        Some(&hand_written_with(
+            NAME,
+            &format!("{target} = \"{declared}\""),
+        )),
+        &[],
     );
     let manifest = Manifest::read(&wrong, NAME).expect("the manifest loads");
     assert_eq!(
@@ -468,7 +386,7 @@ fn selection_refuses_a_bundle_that_carries_no_library_for_this_host() {
 
 #[test]
 fn a_library_mapped_from_a_bundle_yields_a_table_the_raw_abi_checks_accept() {
-    let target = host_target();
+    let target = bundle::host_target();
     let staged = staged_with(Some(&hand_written(NAME)));
     let manifest = Manifest::read(&staged, NAME).expect("the bundle's manifest loads");
     let selected = manifest
@@ -499,7 +417,7 @@ fn a_library_mapped_from_a_bundle_yields_a_table_the_raw_abi_checks_accept() {
 
 #[test]
 fn the_mapping_step_refuses_a_manifest_built_for_another_abi_major() {
-    let target = host_target();
+    let target = bundle::host_target();
     let text = manifest_needing(NAME, METIS_ABI_MAJOR + 1, METIS_ABI_MINOR);
     let staged = staged_with(Some(&text));
     let manifest = Manifest::read(&staged, NAME).expect("the manifest loads");
@@ -545,7 +463,7 @@ fn the_mapping_step_answers_this_builds_own_minor_demand_before_it_reads_a_libra
 
     // The other direction is served: a plugin that needs an older minor is read
     // by this build, which is newer than it asks for.
-    let target = host_target();
+    let target = bundle::host_target();
     let text = manifest_needing(NAME, METIS_ABI_MAJOR, METIS_ABI_MINOR - 1);
     let staged = staged_with(Some(&text));
     let manifest = Manifest::read(&staged, NAME).expect("the manifest loads");

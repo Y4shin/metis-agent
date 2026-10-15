@@ -134,6 +134,32 @@ pub const CAPABILITIES: [&str; 10] = [
     "tool.newer",
 ];
 
+/// One capability's manifest table, as an author writes it by hand: the name,
+/// the kind, the version and the two inline schemas.
+pub fn capability_table(name: &str) -> String {
+    format!(
+        "\n[[capabilities]]\nname = \"{name}\"\nkind = \"tool\"\nversion = 1\n\
+         request_schema = {{ type = \"object\" }}\n\
+         response_schema = {{ type = \"object\" }}\n"
+    )
+}
+
+/// The capability list a hand-written manifest carries: one table per name, in
+/// the order they are given, or the empty field when the list is empty.
+///
+/// The format carries a capability list as a field, so a manifest that declares
+/// none still has to carry the empty one, and it has to sit before the first
+/// table, because a key written after one belongs to that table.
+pub fn capability_list<S: AsRef<str>>(names: &[S]) -> String {
+    if names.is_empty() {
+        return "\ncapabilities = []".to_string();
+    }
+    names
+        .iter()
+        .map(|name| capability_table(name.as_ref()))
+        .collect()
+}
+
 /// The manifest an author writes by hand, declaring exactly the capability
 /// names it is given and this host's library.
 ///
@@ -141,17 +167,7 @@ pub const CAPABILITIES: [&str; 10] = [
 /// format belongs to the author, and a hand-written manifest is what proves it.
 pub fn manifest<S: AsRef<str>>(names: &[S]) -> String {
     let target = host_target();
-    let capabilities: String = names
-        .iter()
-        .map(|name| {
-            let name = name.as_ref();
-            format!(
-                "\n[[capabilities]]\nname = \"{name}\"\nkind = \"tool\"\nversion = 1\n\
-                 request_schema = {{ type = \"object\" }}\n\
-                 response_schema = {{ type = \"object\" }}\n"
-            )
-        })
-        .collect();
+    let capabilities = capability_list(names);
     format!(
         r#"# A hand-written manifest: the proof that packaging a plugin needs no
 # generator. The host trusts this list for discovery, and the library's own

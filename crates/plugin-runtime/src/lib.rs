@@ -1170,10 +1170,10 @@ impl Instance {
         // happened, and every future and waker clone is gone, so no plugin code
         // is running.
         let status = unsafe { (self.loaded.table().destroy_instance)(self.handle) };
-        self.host.order("instance destroyed");
         if status != MetisStatus::Ok {
             return Err(CallError::Status(status));
         }
+        self.host.order("instance destroyed");
         Ok(())
     }
 }

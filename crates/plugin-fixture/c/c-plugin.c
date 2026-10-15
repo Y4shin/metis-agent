@@ -199,9 +199,10 @@ static void ctx_park(ctx_t *ctx, MetisWaker borrowed) {
     if (ctx->has_waker || borrowed.vtable == NULL) {
         return;
     }
-    /* The waker the host passes to `poll` is one owning reference the host
-     * releases when the poll returns, so this plugin clones it and never
-     * releases the base. */
+    /* The waker's liveness rule is written once, in docs/plugin-contract.md
+     * section 8, and is read there rather than restated here. What this plugin
+     * does with it: it keeps a clone of the waker the poll was handed and never
+     * releases the borrowed base. */
     ctx->waker = borrowed.vtable->clone(&borrowed);
     ctx->has_waker = 1;
     g_ledger.waker_clones++;

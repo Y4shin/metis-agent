@@ -31,16 +31,17 @@ Run if asked (by number):
 Every command runs inside the devenv shell as `devenv shell -- <command>`, which
 is where `cargo`, `buf` and the rest exist. The three always-run commands are what
 `.github/workflows/ci.yml` gates on first, and numbers 1 to 8 and 11 to 12 are
-the contract, plugin ABI and plugin host checks it runs after them; numbers 3 and
-2 resolve their pinned
-plugins from the BSR, so they need the credential described in `docs/dev-env.md`.
-Numbers 9 and 10 are the two runnable walkthroughs, which CI does not run.
-Number 11 is the `no-panic` build check: it runs in a CI step of its own, it is
-the only place that assertion holds, and the block below records exactly what it
-proves and what it does not. Number 12 is the sample plugin's end-to-end gate:
-it runs as a CI step of its own beside the contract and ABI commands, and the
-block below records what one run of it proves. The `## Run commands` section
-below documents the same commands per area, with what each one proves.
+the contract, plugin ABI and plugin host checks it runs after them. Number 3
+resolves the two pinned BSR remote plugins that generate the wire contract, so it
+needs the `BUF_TOKEN` credential described in `contracts/README.md`; `buf lint`
+and `buf breaking` resolve no plugins, so neither takes one. Numbers 9 and 10 are
+the two runnable walkthroughs, which CI does not run. Number 11 is the `no-panic`
+build check: it runs in a CI step of its own, it is the only place that assertion
+holds, and the block below records exactly what it proves and what it does not.
+Number 12 is the sample plugin's end-to-end gate: it runs as a CI step of its own
+beside the contract and ABI commands, and the block below records what one run of
+it proves. The `## Run commands` section below documents the same commands per
+area, with what each one proves.
 
 ## Framework
 
@@ -296,6 +297,12 @@ Plugin ABI, documented in `crates/plugin-contract/src/abi` and
   and the no-executor check in `crates/plugin-contract/tests/no_plugin_thread.rs`,
   which has its own binary so the thread count it takes is not the harness's own
   threads.
+- `cargo check -p plugin-contract --no-default-features` -- the boundary check
+  the CI job runs: the `authoring` feature is off by default and the fixture
+  turns it on, so the workspace build unifies it in and never compiles the
+  feature-off path, and this command compiles the crate alone that way, which is
+  the only thing that proves the host's surface still stands on the primitives
+  and the payload envelope alone.
 
 Plugin host, documented in `crates/plugin-runtime`:
 

@@ -428,6 +428,14 @@ impl std::error::Error for ReleaseRefusal {}
 /// the deadline it was given, the cancellation pass it ran, the ledger entries
 /// it added, and, when the instance could not be released, the refusal and the
 /// library reference that keeps the library mapped.
+///
+/// The ledger entries are the host's shared ordering from this release's own
+/// start index, not a slice the host can prove belongs to this instance alone:
+/// the ordering carries no instance attribution, so a second release running
+/// concurrently on the same host can contribute lines to a report. The slice is
+/// exact on a host that runs one release at a time, which is what every test of
+/// this entry does, and a daemon that releases several instances on one host
+/// must not read it as one instance's own record.
 pub struct ReleaseReport {
     name: String,
     deadline: Instant,
@@ -477,6 +485,14 @@ impl ReleaseReport {
 
     /// The ordering-ledger entries this release added, in the order they were
     /// added.
+    ///
+    /// The host keeps one ordering for every instance it serves and records no
+    /// instance attribution, so this is the host's ordering from this release's
+    /// own start index: a second release running concurrently on the same host
+    /// can appear inside this slice. It is exact for a host that runs one
+    /// release at a time, and a caller that releases several instances on one
+    /// host reads [`ReleaseReport::name`] and each line's own wording rather
+    /// than treating the slice as one instance's.
     pub fn ledger(&self) -> &[String] {
         &self.ledger
     }

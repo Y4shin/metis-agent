@@ -60,22 +60,14 @@ fn context(instance: &str) -> Value {
 /// A hand-written manifest for the fixture library, under `name`.
 ///
 /// The text is a literal rather than a serialisation of any type in this tree,
-/// because the format belongs to the author. It is written here rather than read
-/// out of the shared support module because that module's manifest carries one
-/// fixed name, and a case here needs two instances that a report can tell apart.
+/// because the format belongs to the author. The capability tables come from the
+/// shared support module; the rest is written here because that module's
+/// manifest carries one fixed name, and a case here needs two instances that a
+/// report can tell apart.
 fn manifest(name: &str) -> String {
     let target = bundle::host_target();
     let library = bundle::library_path(&target, &bundle::library_file_name());
-    let declared: String = bundle::CAPABILITIES
-        .iter()
-        .map(|capability| {
-            format!(
-                "\n[[capabilities]]\nname = \"{capability}\"\nkind = \"tool\"\nversion = 1\n\
-                 request_schema = {{ type = \"object\" }}\n\
-                 response_schema = {{ type = \"object\" }}\n"
-            )
-        })
-        .collect();
+    let declared = bundle::capability_list(&bundle::CAPABILITIES);
     format!(
         r#"name = "{name}"
 version = "1.0.0"

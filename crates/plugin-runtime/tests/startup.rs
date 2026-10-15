@@ -250,23 +250,9 @@ fn manifest_declaring(
     abi_major: u32,
     min_abi_minor: u32,
 ) -> String {
-    // The format carries a capability list as a field, so a manifest that
-    // declares none still has to carry the empty one. It has to sit before the
-    // first table, because a key written after one belongs to that table.
-    let declared = if capabilities.is_empty() {
-        "\ncapabilities = []".to_string()
-    } else {
-        capabilities
-            .iter()
-            .map(|capability| {
-                format!(
-                    "\n[[capabilities]]\nname = \"{capability}\"\nkind = \"tool\"\nversion = 1\n\
-                     request_schema = {{ type = \"object\" }}\n\
-                     response_schema = {{ type = \"object\" }}\n"
-                )
-            })
-            .collect()
-    };
+    // The capability list, as the shared support module writes it: one table
+    // per name, or the empty field when the manifest declares none.
+    let declared = bundle::capability_list(capabilities);
     format!(
         r#"name = "{name}"
 version = "1.0.0"
