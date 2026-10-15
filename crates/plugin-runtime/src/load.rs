@@ -47,11 +47,11 @@ use crate::{CallError, Host, Instance, Loaded};
 
 /// What a bundle load can refuse.
 ///
-/// The variants are the refusals a caller acts on differently, and they are in
-/// the order the steps run: the file, the signature, the archive, the manifest,
-/// the library and its table, the initialisation, and finally the registration.
-/// A refusal names the first step that objected rather than a later consequence
-/// of it.
+/// The variants are the refusals a caller acts on differently, and most of them
+/// are in the order the steps run: the file, the signature, the archive, the
+/// manifest, the library and its table, the initialisation, the capability
+/// cross-check, and finally the registration. A refusal names the first step
+/// that objected rather than a later consequence of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
     /// The bundle file could not be read at all.
@@ -99,8 +99,6 @@ pub enum LoadError {
         /// The status the plugin's initialisation resolved with.
         status: MetisStatus,
     },
-    /// The registry refused the instance's declaration.
-    Registration(RegistryError),
     /// The manifest's capability list and the library's own declaration
     /// disagree.
     ///
@@ -117,6 +115,8 @@ pub enum LoadError {
         /// missing from.
         detail: String,
     },
+    /// The registry refused the instance's declaration.
+    Registration(RegistryError),
 }
 
 impl std::fmt::Display for LoadError {
@@ -143,11 +143,11 @@ impl std::fmt::Display for LoadError {
                 "{plugin}'s initialisation failed, which is the plugin's own defect ({})",
                 status.as_str()
             ),
-            LoadError::Registration(error) => write!(f, "{error}"),
             LoadError::CapabilityMismatch { capability, detail } => write!(
                 f,
                 "the manifest and the library disagree about the capability list: {capability} {detail}"
             ),
+            LoadError::Registration(error) => write!(f, "{error}"),
         }
     }
 }
