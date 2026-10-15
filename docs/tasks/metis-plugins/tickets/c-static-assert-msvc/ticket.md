@@ -3,8 +3,9 @@ type: ticket
 subtype: bug
 title: Fix the C static assertion so the Windows target compiles
 status: stable
-workflow_state: ready
-blocked_by: [abi-initialisation-entry]
+workflow_state: done
+blocked_by:
+- abi-initialisation-entry
 size: s
 ---
 
@@ -80,3 +81,27 @@ criterion 1's exact MSVC invocation and criterion 3's widened `windows` CI job
 have never executed. The first run of that job on a runner with MSVC is the only
 proof of those two halves. The strict-C89 compile under gcc and clang, plus the
 byte-identical tree, is the strongest evidence available here.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `51879e8` and passes, including
+the new check: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test`, `buf lint`, `buf breaking`, `bash
+scripts/regenerate-contracts.sh --check`, `bash scripts/build-c-plugin.sh`,
+`bash scripts/check-c-layout-asserts.sh`, `cargo check -p plugin-contract
+--no-default-features`, `cargo run -p plugin-fixture --bin abi-harness` and
+`bash scripts/regenerate-abi-header.sh --check`.
+
+The two items this note handed to finalize are done: the archived record at
+`docs/bugs/archive/plugin-contract-c-static-assert-msvc.md` now carries
+`fix_commit: e1099f5`, the landing merge, and `docs/tasks/metis-plugins/map.md`
+no longer describes the defect as open. The arch spec's copy of the old path was
+closed by the level-2 reconcile. `.work/handoff/metis-plugins.md` is the
+orchestrator's own handoff note and is not edited by hand.
+
+Durable lesson for the tickets that follow: a C-level assertion form is part of
+the contract's portability surface, not a detail of one compiler, so the pinned
+check compiles the translation unit in the oldest mode the target toolchain can
+be asked for, and a deliberate mismatch must still fail there. The widened
+`windows` job is now the only place the real MSVC invocation runs, so a
+regression in that form fails CI rather than a user's Windows build.

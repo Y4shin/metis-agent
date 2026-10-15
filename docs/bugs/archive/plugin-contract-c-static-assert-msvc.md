@@ -2,7 +2,7 @@
 type: bug
 title: plugin-contract's C layout checks do not compile under MSVC
 status: fixed
-fix_commit: 9cef2c0
+fix_commit: e1099f5
 ---
 
 # `plugin-contract`'s C layout checks do not compile under MSVC C mode
