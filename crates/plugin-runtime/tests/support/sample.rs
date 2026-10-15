@@ -179,14 +179,8 @@ properties = {{ instance = {{ type = "string" }} }}
 pub fn bytes_signed_by(chain: &TestChain, manifest: &str) -> Vec<u8> {
     let target = bundle::host_target();
     let entries = vec![
-        (
-            bundle::MANIFEST.to_string(),
-            manifest.as_bytes().to_vec(),
-        ),
-        (
-            bundle::library_path(&target, LIBRARY_FILE),
-            library_bytes(),
-        ),
+        (bundle::MANIFEST.to_string(), manifest.as_bytes().to_vec()),
+        (bundle::library_path(&target, LIBRARY_FILE), library_bytes()),
     ];
     signer::signed_bundle(chain, &bundle::archive(&entries))
 }

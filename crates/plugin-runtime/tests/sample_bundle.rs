@@ -293,10 +293,7 @@ fn a_manifest_that_disagrees_with_the_library_is_refused_loudly() {
         &sample::host_context(),
         &trust,
     )) {
-        Err(LoadError::CapabilityMismatch {
-            capability,
-            detail,
-        }) => {
+        Err(LoadError::CapabilityMismatch { capability, detail }) => {
             assert_eq!(
                 capability, "c.cancel",
                 "the refusal names the capability that differed"
@@ -323,10 +320,7 @@ fn a_manifest_that_disagrees_with_the_library_is_refused_loudly() {
         &sample::host_context(),
         &trust,
     )) {
-        Err(LoadError::CapabilityMismatch {
-            capability,
-            detail,
-        }) => {
+        Err(LoadError::CapabilityMismatch { capability, detail }) => {
             assert_eq!(capability, "c.not_in_the_library");
             assert!(
                 detail.contains("not by the library"),
