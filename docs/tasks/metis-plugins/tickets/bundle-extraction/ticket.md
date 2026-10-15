@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Extract a verified bundle under the archive rules
 status: stable
-workflow_state: ready
-blocked_by: [bundle-verification]
+workflow_state: done
+blocked_by:
+- bundle-verification
 size: m
 ---
 
@@ -76,3 +77,32 @@ the staging-directory count assertion is process-global and holds only because
 every staging test in that binary takes one file-wide mutex; and a missing root
 manifest is deliberately not refused here, because `manifest-and-library` owns
 that refusal.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `b20c990`, after `main` was
+merged in, and passes: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`, `cargo test`, `buf lint`, `buf breaking`, `bash
+scripts/regenerate-contracts.sh --check`, `bash scripts/build-c-plugin.sh`,
+`cargo check -p plugin-contract --no-default-features`, `cargo run -p
+plugin-fixture --bin abi-harness` and `bash scripts/regenerate-abi-header.sh
+--check`.
+
+One documentation defect this landing left is fixed here: contract section
+17.8 described the staging directory as `metis-plugin-stage-` plus the process
+id and a counter, while the code names it `metis-plugin-stage-<pid>-<nanos>-
+<counter>`, so a crash sweep and a second staging process both depend on facts
+the contract did not state. The section now names the timestamp component and
+says why it is there. `docs/tasks/metis-plugins/map.md` also stopped listing the
+extraction limits, the permission rule and the sample-plugin choice as open fog,
+because all three are settled by this ticket and by `sample-bundle-ci`'s scope.
+
+Durable lessons for the tickets that follow. The extraction limits are 256
+entries, 64 MiB per entry and 256 MiB in total, enforced on declared sizes, and
+the host target is a plain string with no exported derivation, so
+`async-initialisation` owns the derivation and a producer must spell it the same
+way. `StagedBundle::manifest_path()` can name a file that is not there, so
+`manifest-and-library` refuses an absent manifest rather than trusting the path.
+A dependent classifies `StageError` instead of matching its 15 variants, and
+`sample-bundle-ci` must call `unix_permissions(0o600)` because the `zip`
+writer's `0o644` default is refused.
