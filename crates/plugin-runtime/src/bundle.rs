@@ -31,7 +31,8 @@ mod extract;
 // The extractor is reached as `bundle::extract`, next to the verifier it takes
 // its input from, so a caller names one module for both halves of the bundle
 // path.
-pub use extract::{STAGING_PREFIX, StageError, StagedBundle, extract};
+pub use extract::{MAX_ENTRIES, MAX_ENTRY_SIZE, MAX_UNCOMPRESSED_SIZE, STAGING_PREFIX};
+pub use extract::{StageError, StagedBundle, extract};
 
 /// The container's magic, at offset 0.
 pub const CONTAINER_MAGIC: [u8; 8] = *b"METISBND";

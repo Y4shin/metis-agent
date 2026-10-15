@@ -34,6 +34,25 @@ use super::VerifiedBundle;
 /// what a killed process left rather than guess at names.
 pub const STAGING_PREFIX: &str = "metis-plugin-stage-";
 
+/// The most entries an archive may hold.
+///
+/// A bundle carries the root manifest plus one file per target it supports, so
+/// this leaves room for a producer that also carries assets while keeping the
+/// walk over the archive bounded.
+pub const MAX_ENTRIES: usize = 256;
+
+/// The largest uncompressed size one entry may declare, in bytes.
+pub const MAX_ENTRY_SIZE: u64 = 64 * 1024 * 1024;
+
+/// The largest total uncompressed size the entries of one archive may declare
+/// between them, in bytes.
+///
+/// Only the manifest and one library are written, so this bounds what an
+/// archive may cost this host before either is read. The per-entry limit is
+/// checked first, so this one answers for an archive whose entries are each
+/// inside their own limit.
+pub const MAX_UNCOMPRESSED_SIZE: u64 = 256 * 1024 * 1024;
+
 /// The manifest's name at the archive root.
 const MANIFEST_NAME: &str = "manifest.toml";
 
@@ -260,14 +279,21 @@ fn stage(
         ZipArchive::new(Cursor::new(bytes)).map_err(|error| StageError::ArchiveUnreadable {
             detail: error.to_string(),
         })?;
+    if archive.len() > MAX_ENTRIES {
+        return Err(StageError::TooManyEntries {
+            count: archive.len(),
+            limit: MAX_ENTRIES,
+        });
+    }
 
     let mut library: Option<PathBuf> = None;
     let mut target_files: usize = 0;
+    let mut declared_total: u64 = 0;
 
     for index in 0..archive.len() {
         // The metadata pass reads no entry's bytes, so an archive is refused on
         // its names and its declared metadata before anything is decompressed.
-        let (name, entry_path) = {
+        let (name, entry_path, declared_size) = {
             let entry =
                 archive
                     .by_index_data(index)
@@ -284,8 +310,23 @@ fn stage(
                 .into_owned();
             let entry_path = entry_path(&name)?;
             check_entry(&name, entry.is_dir(), entry.unix_mode())?;
-            (name, entry_path)
+            (name, entry_path, entry.size())
         };
+
+        if declared_size > MAX_ENTRY_SIZE {
+            return Err(StageError::EntryTooLarge {
+                name,
+                size: declared_size,
+                limit: MAX_ENTRY_SIZE,
+            });
+        }
+        declared_total = declared_total.saturating_add(declared_size);
+        if declared_total > MAX_UNCOMPRESSED_SIZE {
+            return Err(StageError::ArchiveTooLarge {
+                declared_size: declared_total,
+                limit: MAX_UNCOMPRESSED_SIZE,
+            });
+        }
 
         let kind = classify(&entry_path, target);
         let destination = match &kind {

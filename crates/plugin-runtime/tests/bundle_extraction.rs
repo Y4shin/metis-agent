@@ -18,7 +18,8 @@ use std::io::{Cursor, Write};
 use std::sync::{Mutex, MutexGuard};
 
 use plugin_runtime::bundle::{
-    STAGING_PREFIX, StageError, StagedBundle, TrustStore, extract, verify_bundle,
+    MAX_ENTRIES, MAX_ENTRY_SIZE, MAX_UNCOMPRESSED_SIZE, STAGING_PREFIX, StageError, StagedBundle,
+    TrustStore, extract, verify_bundle,
 };
 use support::signer::{self, TestChain};
 use zip::write::SimpleFileOptions;
@@ -581,4 +582,130 @@ fn a_staged_file_and_its_directories_carry_the_hosts_own_modes() {
     assert_eq!(mode(&staged.root().join("lib").join(TARGET)), 0o700);
     assert_eq!(mode(staged.manifest_path()), 0o600);
     assert_eq!(mode(staged.library_path()), 0o600);
+}
+
+/// Rewrites the uncompressed size one entry's central-directory record
+/// declares, so a test can build an archive whose claim its data does not back.
+///
+/// A producer controls both its data and its declaration, so this is a field a
+/// hostile bundle can set, and the rules read the declaration before any data is
+/// decoded.
+fn declare_size(archive: &mut [u8], name: &str, declared_size: u32) {
+    let record = central_directory_record(archive, name);
+    archive[record + 24..record + 28].copy_from_slice(&declared_size.to_le_bytes());
+}
+
+/// The offset of the central-directory record of the entry named `name`.
+fn central_directory_record(archive: &[u8], name: &str) -> usize {
+    const RECORD: &[u8] = b"PK\x01\x02";
+    let mut searched: usize = 0;
+    while let Some(found) = find(&archive[searched..], RECORD) {
+        let record = searched + found;
+        let length = u16::from_le_bytes([archive[record + 28], archive[record + 29]]) as usize;
+        let name_at = record + 46;
+        if archive.get(name_at..name_at + length) == Some(name.as_bytes()) {
+            return record;
+        }
+        searched = record + RECORD.len();
+    }
+    panic!("the archive holds no central-directory record for {name}");
+}
+
+#[test]
+fn an_archive_holding_too_many_entries_is_refused() {
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    for index in 0..MAX_ENTRIES {
+        archive.file(
+            &library_entry(OTHER_TARGET, &format!("filler{index}.so")),
+            b"x",
+        );
+    }
+    assert_eq!(
+        refusal(&archive.finish(), TARGET),
+        StageError::TooManyEntries {
+            count: MAX_ENTRIES + 2,
+            limit: MAX_ENTRIES
+        }
+    );
+}
+
+#[test]
+fn an_archive_holding_exactly_the_entry_limit_stages() {
+    let _guard = lock();
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    for index in 0..MAX_ENTRIES - 2 {
+        archive.file(
+            &library_entry(OTHER_TARGET, &format!("filler{index}.so")),
+            b"x",
+        );
+    }
+    extract_archive(&archive.finish(), TARGET).expect("an archive at the entry limit stages");
+}
+
+#[test]
+fn an_entry_declaring_more_than_the_entry_limit_is_refused() {
+    let name = library_entry(OTHER_TARGET, "big.so");
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    archive.file(&name, b"one byte, and a claim this host refuses to believe");
+    let mut archive = archive.finish();
+    declare_size(&mut archive, &name, MAX_ENTRY_SIZE as u32 + 1);
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::EntryTooLarge {
+            name,
+            size: MAX_ENTRY_SIZE + 1,
+            limit: MAX_ENTRY_SIZE
+        }
+    );
+}
+
+#[test]
+fn an_entry_declaring_exactly_the_entry_limit_stages() {
+    let _guard = lock();
+    let name = library_entry(OTHER_TARGET, "big.so");
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    archive.file(&name, b"one byte, and a claim this host accepts");
+    let mut archive = archive.finish();
+    declare_size(&mut archive, &name, MAX_ENTRY_SIZE as u32);
+    extract_archive(&archive, TARGET).expect("a declaration at the limit is inside it");
+}
+
+#[test]
+fn an_archive_declaring_more_than_the_total_limit_is_refused() {
+    // Four entries at the per-entry limit already declare the whole archive
+    // limit, and the two staged files push the sum past it.
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    let declared_entries = 5;
+    for index in 0..declared_entries {
+        archive.file(
+            &library_entry(OTHER_TARGET, &format!("big{index}.so")),
+            b"one byte each",
+        );
+    }
+    let mut archive = archive.finish();
+    for index in 0..declared_entries {
+        declare_size(
+            &mut archive,
+            &library_entry(OTHER_TARGET, &format!("big{index}.so")),
+            MAX_ENTRY_SIZE as u32,
+        );
+    }
+    let staged = (MANIFEST_BYTES.len() + LIBRARY_BYTES.len()) as u64;
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::ArchiveTooLarge {
+            declared_size: 4 * MAX_ENTRY_SIZE + staged,
+            limit: MAX_UNCOMPRESSED_SIZE
+        }
+    );
 }
