@@ -625,3 +625,207 @@ fn the_shutdown_deadline_ends_the_wait_and_the_report_names_every_instance() {
         host.ordering()
     );
 }
+
+/// The name the child runs under: the fault test is ignored by default, so the
+/// only way it runs is the parent below naming it.
+const FAULTING_CHILD: &str = "a_copied_handle_dropped_after_unload_faults_the_process";
+
+#[test]
+fn the_release_entry_has_no_outstanding_clone_gate() {
+    let host = Host::new();
+    let serving = serving(&host);
+
+    // One clone of the waker this call is polled with stays with the plugin, and
+    // the call is then dropped: the clone outlives the call, and it is the state
+    // a clone counter would have to count if one gated the unload.
+    let instance = Arc::clone(serving.instance());
+    let mut call = instance
+        .invoke("tool.deferred", 5, &support::request("defer"))
+        .expect("the fixture's deferred capability starts");
+    assert!(
+        matches!(poll_once(&mut call), Poll::Pending),
+        "the deferred capability parks and keeps the waker clone it was polled with"
+    );
+    drop(call);
+    drop(instance);
+
+    let (handed_out, released, _) = host.waker_counts();
+    assert!(
+        handed_out > released,
+        "one owning waker reference is still outstanding: {handed_out} handed out, {released} released"
+    );
+
+    // The release unloads anyway: no counter gates it, and the hazard findings
+    // settled that one should not.
+    let report = block_on(serving.release(deadline()));
+    assert!(
+        report.released(),
+        "an outstanding clone is not a release refusal: {}",
+        report
+            .refusal()
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    );
+    assert!(report.resident().is_none());
+    assert!(
+        report
+            .ledger()
+            .iter()
+            .any(|line| line.contains("library unloaded")),
+        "the library is unloaded with a clone outstanding: {:#?}",
+        report.ledger()
+    );
+    assert!(
+        !report
+            .ledger()
+            .iter()
+            .any(|line| line.contains("refused")),
+        "nothing refuses the release over a clone: {:#?}",
+        report.ledger()
+    );
+}
+
+#[test]
+fn a_copied_handle_dropped_after_unload_faults_the_child() {
+    if !cfg!(unix) {
+        println!(
+            "[skip] the fault is asserted by the signal the child dies with, which this platform does not report"
+        );
+        return;
+    }
+    let binary = std::env::current_exe().expect("the test binary's own path is readable");
+    let child = std::process::Command::new(binary)
+        .args(["--exact", FAULTING_CHILD, "--ignored", "--nocapture"])
+        .env("RUST_TEST_THREADS", "1")
+        .output()
+        .expect("the test binary spawns its own faulting child");
+    let said = String::from_utf8_lossy(&child.stderr);
+    assert!(
+        said.contains("the library is unloaded, and the copied handle's drop call runs now"),
+        "the child reached the drop call after the unload, so the fault is that drop: {said}"
+    );
+    assert!(
+        !child.status.success(),
+        "the child is the fault, so it must not exit cleanly: {}",
+        child.status
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            child.status.signal(),
+            Some(11),
+            "a handle dropped after its library was unloaded faults the child: {}",
+            child.status
+        );
+    }
+}
+
+/// The fault itself, in its own process: a future handle copied out of the table
+/// and dropped after the library was unloaded.
+///
+/// It is ignored by default and run by the test above, because the fault is the
+/// point: the child dies inside the drop call, so no assertion about what
+/// happened can be made in the process that does it. What the parent asserts is
+/// the signal.
+///
+/// The path is the raw table, which is the only one that reaches the fault: the
+/// runtime's own `unload` refuses while any future it handed out is alive, and
+/// `Instance::invoke` ties every future to the instance, so a handle copied out
+/// of the table is the one thing that outlives both guards. The ABI allows a
+/// caller to copy that handle, which is why the contract states the after-unload
+/// rule as a hard precondition rather than a check the host can make.
+#[test]
+#[ignore = "run in a subprocess by a_copied_handle_dropped_after_unload_faults_the_child"]
+fn a_copied_handle_dropped_after_unload_faults_the_process() {
+    use std::ffi::c_void;
+
+    use plugin_contract::abi::{
+        METIS_BUFFER_OWNER_HOST, MetisBuffer, MetisFutureHandle, MetisStatus, MetisWaker,
+    };
+    use plugin_contract::payload::metis_encode_payload;
+
+    /// A host-owned buffer carrying the payload envelope the contract fixes.
+    fn host_buffer(body: &[u8]) -> (Vec<u8>, MetisBuffer) {
+        let encoded = metis_encode_payload(body);
+        let buffer = MetisBuffer {
+            ptr: encoded.as_ptr() as *mut u8,
+            len: encoded.len(),
+            cap: encoded.len(),
+            owner: METIS_BUFFER_OWNER_HOST,
+            reserved: 0,
+        };
+        (encoded, buffer)
+    }
+
+    let loaded = Arc::new(
+        // SAFETY: this test built the library from the tree it is testing, which
+        // is what the version gate's caller has to establish.
+        unsafe { plugin_runtime::Loaded::load(support::fixture_path()) }
+            .expect("the fixture loads through the version gate"),
+    );
+    let host = Host::new();
+    host.bind_release(loaded.table().release_buffer);
+
+    // Initialisation, driven by hand: the raw path is what has to be exercised,
+    // so the future is polled with the null waker a caller with no executor has.
+    let (_init_bytes, init_buffer) = host_buffer(&support::initialisation_body("fixture"));
+    let mut instance: *mut c_void = std::ptr::null_mut();
+    let mut init = MetisFutureHandle::null();
+    // SAFETY: the table is the fixture's own, the host table is live, and the
+    // payload buffer is host-owned and valid for the call.
+    let status = unsafe {
+        (loaded.table().init_plugin)(host.api(), init_buffer, &mut instance, &mut init)
+    };
+    assert_eq!(
+        status,
+        MetisStatus::Ok,
+        "the fixture's initialisation entry starts"
+    );
+    let mut out = MetisBuffer::empty();
+    // SAFETY: the handle came from this table's `init_plugin`.
+    let status = unsafe { ((*init.vtable).poll)(init.ctx, MetisWaker::null(), &mut out) };
+    assert_eq!(
+        status,
+        MetisStatus::Ok,
+        "the fixture's initialisation resolves on its first poll"
+    );
+
+    // One call, and a copy of the handle it hands out.
+    let capability = b"tool.echo";
+    let (_request_bytes, request_buffer) = host_buffer(&support::request("after unload"));
+    let mut handle = MetisFutureHandle::null();
+    // SAFETY: the instance is live, the request buffer is host-owned and valid
+    // for this call, and the out parameter is a local.
+    let status = unsafe {
+        (loaded.table().invoke_future)(
+            instance,
+            capability.as_ptr(),
+            capability.len(),
+            77,
+            request_buffer,
+            host.api(),
+            &mut handle,
+        )
+    };
+    assert_eq!(status, MetisStatus::Ok, "the call starts");
+    let copied = handle;
+    assert!(
+        !copied.is_null(),
+        "the call handed out a future handle to copy"
+    );
+
+    // The contract's rule: the table is dead after `destroy_instance`. The
+    // instance is destroyed and the last reference to the library is dropped,
+    // which is what unmaps it.
+    // SAFETY: the pointer came from this table's `init_plugin`.
+    let destroyed = unsafe { (loaded.table().destroy_instance)(instance) };
+    assert_eq!(destroyed, MetisStatus::Ok, "the instance is destroyed");
+    drop(loaded);
+    eprintln!("[child] the library is unloaded, and the copied handle's drop call runs now");
+
+    // SAFETY: none. This is the fault the case exists for: the drop function the
+    // copy names was in the library that is no longer mapped.
+    unsafe { ((*copied.vtable).drop)(copied.ctx) };
+    unreachable!("a copied handle dropped after its library was unloaded faults the process")
+}
