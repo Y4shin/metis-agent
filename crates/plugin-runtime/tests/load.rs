@@ -474,3 +474,34 @@ fn an_instance_type_needs_no_default_and_its_constructor_is_asynchronous() {
     // constructor, which is what the load tests above drive to completion on
     // this test's runtime.
 }
+
+#[test]
+fn a_bundled_capability_serves_a_call_through_the_registry() {
+    let host = Host::new();
+    let (file, trust) = bundle::bundle_file(Some(&hand_written(&CAPABILITIES)));
+
+    let serving = block_on(load_bundle(
+        &host,
+        file.path(),
+        &config("serving"),
+        &host_context("serving"),
+        &trust,
+    ))
+    .expect("the fixture's own bundle loads");
+
+    // The registered instance is what the caller routes through: one capability
+    // the library serves, called by its qualified name, answers with its own
+    // response.
+    let response = block_on(serving.registry().call(
+        &format!("{NAME}.tool.echo"),
+        &request("hello"),
+        7,
+    ))
+    .expect("a registered capability serves a call");
+
+    assert_eq!(
+        decode(&response).echo,
+        "hello",
+        "the response is the capability's own"
+    );
+}
