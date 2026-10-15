@@ -709,3 +709,21 @@ fn an_archive_declaring_more_than_the_total_limit_is_refused() {
         }
     );
 }
+
+#[test]
+fn a_hostile_archive_is_refused_at_its_first_hostile_entry() {
+    // Several hostile entries at once: a hostile entry is refused rather than
+    // skipped, so the archive is answered for the first one the walk reaches
+    // and the entries after it are never examined.
+    let archive = archive_then(TARGET, |archive| {
+        archive.file("../../escape", b"a traversal");
+        archive.symlink(&library_entry(TARGET, "escape.so"), "/etc/passwd");
+        archive.file("/etc/passwd", b"an absolute name");
+    });
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::ParentEntryName {
+            name: "../../escape".to_string()
+        }
+    );
+}
