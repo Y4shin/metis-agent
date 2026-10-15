@@ -60,10 +60,16 @@ const BLOCKING: Duration = Duration::from_millis(250);
 
 /// The fixture plugin.
 ///
-/// It is a unit value with no `Default`: the only way to obtain one is
+/// It carries no `Default` and no public constructor other than
 /// [`Fixture::init`], which is what makes "an instance that exists has been
-/// initialised" true for this plugin.
-pub struct Fixture;
+/// initialised" true for this plugin. The one field is the teardown fault the
+/// initialisation configuration asked for, so a host can reach a shutdown that
+/// answers a status other than `ok`.
+pub struct Fixture {
+    /// Whether this instance's teardown entry panics, which the adapter turns
+    /// into a terminal `internal`.
+    refuse_shutdown: bool,
+}
 
 /// The descriptor version every capability but the gated one advertises.
 const CAPABILITY_VERSION: u32 = 1;
@@ -78,6 +84,16 @@ const CAPABILITY_VERSION: u32 = 1;
 /// with a status that speaks about the plugin rather than about the
 /// configuration.
 pub const DEFECTIVE_INITIALISATION: &str = "fixture-defective-initialisation";
+
+/// The instance name that asks the fixture's teardown entry to refuse.
+///
+/// The authoring trait's `stopped` is infallible, so the one way a plugin can
+/// answer a teardown entry with a status other than `ok` is to raise a panic
+/// the adapter contains: this name is how a host asks for that, in the same
+/// shape as [`DEFECTIVE_INITIALISATION`]. It is the configuration and the host
+/// context together, so the instance is initialised normally and only its
+/// shutdown refuses.
+pub const REFUSING_SHUTDOWN: &str = "fixture-refusing-shutdown";
 
 /// The capability a newer plugin build advertises: its descriptor version is
 /// one a host of this revision does not support.
@@ -184,7 +200,9 @@ impl Plugin for Fixture {
             &format!("fixture: initialised for {}", context.instance_name),
         );
         host.emit_event("fixture.ready", &serde_json::json!({ "ready": true }))?;
-        Ok(Fixture)
+        Ok(Fixture {
+            refuse_shutdown: config.instance == REFUSING_SHUTDOWN,
+        })
     }
 
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
@@ -234,6 +252,12 @@ impl Plugin for Fixture {
     }
 
     fn stopped(&self, host: &Host) {
+        // Asking for a refused shutdown is asked for by name, and the adapter
+        // contains this panic and answers `internal`, which is the one status a
+        // host can reach from an infallible teardown hook.
+        if self.refuse_shutdown {
+            panic!("fixture: a deliberate panic inside the teardown entry")
+        }
         // The adapter owns every buffer the plugin hands out, so the ledger it
         // keeps is the plugin's side of the ownership check. This runs when the
         // host has dropped every future, which is what makes the numbers final.

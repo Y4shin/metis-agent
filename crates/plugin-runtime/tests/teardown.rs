@@ -33,7 +33,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use plugin_contract::abi::MetisStatus;
-use plugin_runtime::load::{Serving, load_bundle};
+use plugin_fixture::REFUSING_SHUTDOWN;
+use plugin_runtime::load::{ReleaseRefusal, Serving, load_bundle};
 use plugin_runtime::{CallError, Host, PluginCall, RouteError};
 use serde_json::{Value, json};
 use support::block_on;
@@ -46,13 +47,13 @@ const NAME: &str = bundle::INSTANCE_NAME;
 /// The configuration the host resolved for the fixture, and the host context
 /// that names the same instance: the fixture's own constructor refuses a pair
 /// that disagrees.
-fn configuration() -> Value {
-    json!({ "instance": NAME })
+fn configuration(instance: &str) -> Value {
+    json!({ "instance": instance })
 }
 
 /// The host context, as contract 18's named part.
-fn context() -> Value {
-    json!({ "instance_name": NAME, "capability_version": 1 })
+fn context(instance: &str) -> Value {
+    json!({ "instance_name": instance, "capability_version": 1 })
 }
 
 /// A serving plugin loaded from the fixture's own signed bundle.
@@ -60,12 +61,22 @@ fn context() -> Value {
 /// The bundle file is removed when the guard drops, which is after the load has
 /// read and staged it: the running instance needs no file.
 fn serving(host: &Host) -> Serving {
+    serving_as(host, NAME)
+}
+
+/// The same, under the configuration and host context `instance` names.
+///
+/// The fixture's constructor compares those two names with each other, and its
+/// reserved names ask for a fault: this is how a case asks the fixture to refuse
+/// one teardown entry. The manifest's name is the chain's leaf common name and
+/// is not what this chooses.
+fn serving_as(host: &Host, instance: &str) -> Serving {
     let (file, trust) = bundle::bundle_file(Some(&bundle::manifest(&bundle::CAPABILITIES)));
     match block_on(load_bundle(
         host,
         file.path(),
-        &configuration(),
-        &context(),
+        &configuration(instance),
+        &context(instance),
         &trust,
     )) {
         Ok(serving) => serving,
@@ -281,5 +292,62 @@ fn disabling_refuses_new_calls_and_enabling_accepts_them_with_no_reload() {
             .any(|line| line.contains("library unloaded")),
         "disabling and enabling touch no library: {:#?}",
         host.ordering()
+    );
+}
+
+#[test]
+fn a_shutdown_that_answers_a_non_ok_status_leaves_the_library_mapped() {
+    let host = Host::new();
+    // The fixture's own reserved name asks its teardown entry to refuse, which
+    // is a status no in-tree plugin could reach any other way: `stopped` is
+    // infallible, and the adapter answers `internal` for a panic inside it.
+    let serving = serving_as(&host, REFUSING_SHUTDOWN);
+    let name = serving.name().to_string();
+
+    let report = block_on(serving.release(deadline()));
+
+    assert_eq!(report.name(), name, "the report names the instance");
+    assert!(
+        !report.released(),
+        "an instance whose shutdown refused was not released"
+    );
+    match report.refusal() {
+        Some(ReleaseRefusal::Shutdown(CallError::Status(status))) => assert_eq!(
+            status,
+            &MetisStatus::Internal,
+            "the refusal carries the status the shutdown entry answered"
+        ),
+        other => panic!("the shutdown entry refused, and this is the outcome: {other:?}"),
+    }
+    assert_eq!(
+        report.refusal().map(ReleaseRefusal::step),
+        Some("shutdown"),
+        "the report names the step that refused"
+    );
+
+    // The library is still mapped: reading the plugin's own table through it
+    // would fault if the platform had unmapped it.
+    let resident = report
+        .resident()
+        .expect("an instance that could not be released keeps its library mapped");
+    assert!(
+        resident.has_service_complete(),
+        "the library is still mapped after a refused shutdown"
+    );
+
+    let ledger = report.ledger();
+    assert!(
+        ledger
+            .iter()
+            .any(|line| line.contains("release refused: the shutdown entry answered")),
+        "the refusal is recorded rather than inferred: {ledger:#?}"
+    );
+    assert!(
+        !ledger.iter().any(|line| line.contains("instance destroyed")),
+        "a plugin that did not quiesce is not destroyed: {ledger:#?}"
+    );
+    assert!(
+        !ledger.iter().any(|line| line.contains("library unloaded")),
+        "nothing here unloads a library: {ledger:#?}"
     );
 }
