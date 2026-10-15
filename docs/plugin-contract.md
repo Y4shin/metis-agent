@@ -570,8 +570,10 @@ bounded, and the size limits bound what an archive can cost this host before a
 byte of it is written.
 
 **Staging.** `extract` creates one directory under `std::env::temp_dir()`, named
-`metis-plugin-stage-` followed by this process's id and a counter, so a sweep
-after a crash can find what a killed process left. A staged directory is `0700`
+`metis-plugin-stage-` followed by this process's id, the current time in
+nanoseconds and a counter, so a sweep after a crash can find what a killed
+process left and two processes staging at once cannot pick the same name. A
+staged directory is `0700`
 and a staged file is `0600`; no mode an entry declares ever reaches the
 filesystem. A refusal removes the staging directory before it is answered, so a
 refused extraction leaves nothing behind and what an extraction staged before
