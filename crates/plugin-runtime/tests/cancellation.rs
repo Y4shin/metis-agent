@@ -52,6 +52,81 @@ fn plugin_saw_cancel(host: &Host, request_id: u64) -> bool {
 }
 
 #[test]
+fn dropping_a_call_releases_what_the_host_held_and_refuses_a_later_completion() {
+    let (host, instance) = new_instance();
+    let mut dropped = instance
+        .invoke("tool.pending", 31, &request("wait"))
+        .expect("the future starts");
+    let mut kept = instance
+        .invoke("tool.pending", 32, &request("wait"))
+        .expect("the future starts");
+    assert!(matches!(poll_once(&mut dropped), Poll::Pending));
+    assert!(matches!(poll_once(&mut kept), Poll::Pending));
+    assert_eq!(
+        host.pending_services()
+            .iter()
+            .map(|service| service.request_id)
+            .collect::<Vec<u64>>(),
+        vec![31, 32],
+        "both calls left the host holding a service request"
+    );
+
+    // The caller drops one call, and only what that call left behind goes with
+    // it.
+    drop(dropped);
+    assert_eq!(
+        host.pending_services()
+            .iter()
+            .map(|service| service.request_id)
+            .collect::<Vec<u64>>(),
+        vec![32],
+        "the drop released the buffer the host still held for call 31"
+    );
+    let ordering = host.ordering();
+    assert!(
+        ordering
+            .iter()
+            .any(|event| event.contains("call 31") && event.contains("service request")),
+        "what the drop released is recorded: {ordering:?}"
+    );
+
+    // A completion offered afterwards is refused rather than delivered into a
+    // context that no longer exists.
+    assert_eq!(
+        instance
+            .complete_service(31, MetisStatus::Ok, br#"{"delay_ms":20}"#)
+            .unwrap_err(),
+        CallError::Status(MetisStatus::NotFound),
+        "a completion for a released context is refused"
+    );
+    let logs = host.logs();
+    assert!(
+        !logs
+            .iter()
+            .any(|line| line.contains("no awaited service for request 31")),
+        "the completion never reached the plugin: {logs:?}"
+    );
+    assert_eq!(
+        host.pending_services().len(),
+        1,
+        "a refused completion adds nothing back"
+    );
+
+    // The other call is untouched: its completion is still delivered, and its
+    // answer resolves it.
+    instance
+        .complete_service(32, MetisStatus::Ok, br#"{"delay_ms":20}"#)
+        .expect("the call that is still here is answered");
+    match poll_once(&mut kept) {
+        Poll::Ready(Ok(body)) => assert_eq!(decode(&body).echo, "timer 20"),
+        Poll::Ready(Err(error)) => panic!("the answered call resolves: {error:?}"),
+        Poll::Pending => panic!("the answered call resolves"),
+    }
+    drop(kept);
+    assert_references_balanced(&host, "a released call and an answered one");
+}
+
+#[test]
 fn a_cancel_dropped_before_the_plugin_acknowledged_is_recorded_and_the_instance_keeps_serving() {
     let (host, instance) = new_instance();
     let mut call = instance

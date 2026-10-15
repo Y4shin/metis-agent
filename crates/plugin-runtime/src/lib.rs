@@ -540,6 +540,29 @@ impl Host {
         Some(services.remove(index))
     }
 
+    /// Cancels every service request the host still holds for one call, and
+    /// returns what it released.
+    ///
+    /// A service request is a plugin-owned buffer, and what the host keeps of
+    /// it is the copy it took at the callback, so this is the buffer the host
+    /// still holds for the call. Dropping that copy is what makes "no
+    /// completion is ever delivered into a released context" true: after it,
+    /// the id is not in the pending set, so [`Instance::complete_service`]
+    /// refuses a later answer instead of handing it into a context that is
+    /// gone.
+    pub fn cancel_services(&self, request_id: u64) -> Vec<PendingService> {
+        let mut services = self.inner.services.lock().unwrap();
+        let mut released = Vec::new();
+        services.retain(|service| {
+            let mine = service.request_id == request_id;
+            if mine {
+                released.push(service.clone());
+            }
+            !mine
+        });
+        released
+    }
+
     /// The ordering ledger: the steps unload safety depends on.
     pub fn ordering(&self) -> Vec<String> {
         self.inner.order.lock().unwrap().clone()
@@ -783,12 +806,20 @@ impl Instance {
     ///
     /// The answer payload is host-owned and borrowed for the call, so the host
     /// frees it when this returns.
+    ///
+    /// A completion for an id this instance no longer holds is answered as the
+    /// frozen `NotFound` status and the plugin is not called: the call's future
+    /// was dropped and its outstanding service requests were cancelled with it,
+    /// so there is no context left for the answer to reach.
     pub fn complete_service(
         &self,
         request_id: u64,
         status: MetisStatus,
         body: &[u8],
     ) -> Result<(), CallError> {
+        if !self.in_flight.lock().unwrap().contains(&request_id) {
+            return Err(CallError::Status(MetisStatus::NotFound));
+        }
         let encoded = if status == MetisStatus::Ok {
             metis_encode_payload(body)
         } else {
@@ -980,6 +1011,18 @@ impl Drop for PluginCall {
     fn drop(&mut self) {
         if self.state.dropped.swap(true, SeqCst) {
             return;
+        }
+        // Every buffer the host still holds for this call is released, and its
+        // outstanding service requests are cancelled with it, before the
+        // context is reclaimed: that is what keeps a completion from being
+        // delivered into a released context.
+        let released = self.instance.host.cancel_services(self.request_id);
+        if !released.is_empty() {
+            self.instance.host.order(format!(
+                "call {} released {} service request(s) the host still held",
+                self.request_id,
+                released.len()
+            ));
         }
         // A cancel the plugin accepted and never resolved as cancelled is the
         // caller's deadline having passed. It is recorded on the ledger and the
