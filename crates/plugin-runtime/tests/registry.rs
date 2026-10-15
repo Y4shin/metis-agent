@@ -15,7 +15,7 @@ use support::{block_on, new_instance, request};
 #[test]
 fn the_loader_reads_the_declaration_and_the_version() {
     let (_, instance) = new_instance();
-    assert_eq!(instance.loaded().abi(), (1, 1));
+    assert_eq!(instance.loaded().abi(), (1, 2));
     assert!(instance.loaded().has_service_complete());
     let declared: Vec<&str> = instance
         .capabilities()
@@ -92,7 +92,7 @@ fn routing_validates_both_directions() {
     assert!(
         host.logs()
             .iter()
-            .any(|line| line.contains("instance created"))
+            .any(|line| line.contains("instance initialised"))
     );
 }
 

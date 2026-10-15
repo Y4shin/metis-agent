@@ -46,18 +46,23 @@ use std::time::Duration;
 
 use plugin_contract::abi::MetisPluginTableV1;
 use plugin_contract::authoring::{
-    Call, CapabilityDescriptor, Host, LogLevel, Plugin, PluginError, Request, Response, accounting,
-    schema_of, table,
+    Call, CapabilityDescriptor, Host, HostContext, Initialisation, LogLevel, Plugin, PluginError,
+    Request, Response, accounting, schema_of, table,
 };
 
-use crate::payload::{EchoRequest, EchoResponse, Progress, TimerAnswer, TimerRequest};
+use crate::payload::{
+    EchoRequest, EchoResponse, FixtureConfig, Progress, TimerAnswer, TimerRequest,
+};
 
 /// How long the blocking capability blocks, which is longer than the host's
 /// watchdog window on purpose.
 const BLOCKING: Duration = Duration::from_millis(250);
 
 /// The fixture plugin.
-#[derive(Default)]
+///
+/// It is a unit value with no `Default`: the only way to obtain one is
+/// [`Fixture::init`], which is what makes "an instance that exists has been
+/// initialised" true for this plugin.
 pub struct Fixture;
 
 /// The descriptor version every capability but the gated one advertises.
@@ -140,6 +145,30 @@ impl Drop for PanicOnDrop {
 }
 
 impl Plugin for Fixture {
+    async fn init(host: Host, initialisation: Initialisation) -> Result<Self, PluginError> {
+        // The two parts of the one payload: the configuration the daemon
+        // resolved for this instance, and what the host says about itself.
+        let config: FixtureConfig = initialisation.config()?;
+        let context: HostContext = initialisation.host_context()?;
+        if config.instance != context.instance_name {
+            // The "configuration does not match what the plugin declared"
+            // class: the configuration was resolved for another instance.
+            return Err(PluginError::InvalidArgument(format!(
+                "the configuration was resolved for {} and this instance is {}",
+                config.instance, context.instance_name
+            )));
+        }
+        // A log and an event at initialisation time are how the lifecycle half
+        // of both routes is exercised: the callbacks belong to the host table,
+        // not to a request.
+        host.log(
+            LogLevel::Info,
+            &format!("fixture: initialised for {}", context.instance_name),
+        );
+        host.emit_event("fixture.ready", &serde_json::json!({ "ready": true }))?;
+        Ok(Fixture)
+    }
+
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
         CAPABILITIES.iter().map(|name| descriptor(name)).collect()
     }
@@ -184,12 +213,6 @@ impl Plugin for Fixture {
             }),
             other => Err(PluginError::NotFound(other.to_string())),
         }
-    }
-
-    fn started(&self, host: &Host) -> Result<(), PluginError> {
-        // An event at creation time is how the lifecycle half of the event route
-        // is exercised: the callback belongs to the host table, not to a request.
-        host.emit_event("fixture.ready", &serde_json::json!({ "ready": true }))
     }
 
     fn stopped(&self, host: &Host) {

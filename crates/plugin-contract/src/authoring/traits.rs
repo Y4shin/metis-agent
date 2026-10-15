@@ -1,4 +1,4 @@
-//! The authoring trait and its error type.
+//! The authoring trait, its initialisation payload, and its error type.
 //!
 //! This module deliberately names no ABI type. Everything the ABI forced onto
 //! the authoring surface is in `call` (the per-request context and the host
@@ -107,6 +107,118 @@ impl fmt::Display for PluginError {
 
 impl std::error::Error for PluginError {}
 
+/// The host context: what the host tells a plugin about itself when it
+/// initialises it.
+///
+/// The field names are the contract, and the JSON shape is what a C author
+/// decodes by name. The set is deliberately permissive and forward-compatible:
+/// a plugin ignores context fields it does not know, so a host may add one
+/// without breaking an older plugin. Nothing secret belongs here; the host
+/// decides what it discloses.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostContext {
+    /// The name of the instance this plugin is being initialised as.
+    pub instance_name: String,
+    /// The directory the plugin may keep its own state in, when the host set
+    /// one.
+    #[serde(default)]
+    pub data_dir: Option<String>,
+    /// The highest capability descriptor version this host serves.
+    #[serde(default = "default_capability_version")]
+    pub capability_version: u32,
+}
+
+/// The capability descriptor version a host serves when it says nothing else.
+fn default_capability_version() -> u32 {
+    1
+}
+
+/// One initialisation payload: the plugin's own configuration and the host
+/// context, as the two named parts of one body.
+///
+/// The two names are the contract and are documented for a C author. The parts
+/// stay JSON values here because the configuration's shape belongs to the
+/// plugin, which decodes it into its own type through [`Initialisation::config`],
+/// and the host context is the shared [`HostContext`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Initialisation {
+    config: serde_json::Value,
+    host_context: serde_json::Value,
+}
+
+impl Initialisation {
+    /// The body field carrying the plugin's own configuration.
+    pub const CONFIG_FIELD: &'static str = "config";
+    /// The body field carrying the host context.
+    pub const HOST_CONTEXT_FIELD: &'static str = "host_context";
+
+    /// Builds a payload from the configuration the host resolved and the host
+    /// context it chose.
+    pub fn new<C>(config: C, host_context: HostContext) -> Result<Initialisation, PluginError>
+    where
+        C: Serialize,
+    {
+        let config = serde_json::to_value(config)
+            .map_err(|err| PluginError::Internal(format!("configuration payload: {err}")))?;
+        let host_context = serde_json::to_value(host_context)
+            .map_err(|err| PluginError::Internal(format!("host context payload: {err}")))?;
+        Ok(Initialisation {
+            config,
+            host_context,
+        })
+    }
+
+    /// The JSON body of this payload, which is what rides inside the envelope.
+    pub fn body(&self) -> Vec<u8> {
+        serde_json::json!({
+            Self::CONFIG_FIELD: self.config,
+            Self::HOST_CONTEXT_FIELD: self.host_context,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// Decodes the JSON body a host delivered.
+    ///
+    /// A body that is not one object with both named parts is the
+    /// "configuration does not match what this plugin declared" class, because
+    /// the plugin cannot read what it was handed.
+    pub fn decode(body: &[u8]) -> Result<Initialisation, PluginError> {
+        let value: serde_json::Value = serde_json::from_slice(body).map_err(|err| {
+            PluginError::InvalidArgument(format!("the initialisation payload is not JSON: {err}"))
+        })?;
+        let object = value.as_object().ok_or_else(|| {
+            PluginError::InvalidArgument("the initialisation payload is not one object".to_string())
+        })?;
+        let part = |field: &str| {
+            object.get(field).cloned().ok_or_else(|| {
+                PluginError::InvalidArgument(format!(
+                    "the initialisation payload has no {field} part"
+                ))
+            })
+        };
+        Ok(Initialisation {
+            config: part(Self::CONFIG_FIELD)?,
+            host_context: part(Self::HOST_CONTEXT_FIELD)?,
+        })
+    }
+
+    /// The plugin's own configuration, decoded into the author's type.
+    pub fn config<T: DeserializeOwned>(&self) -> Result<T, PluginError> {
+        serde_json::from_value(self.config.clone()).map_err(|err| {
+            PluginError::InvalidArgument(format!(
+                "the configuration does not match what this plugin declared: {err}"
+            ))
+        })
+    }
+
+    /// The host context.
+    pub fn host_context(&self) -> Result<HostContext, PluginError> {
+        serde_json::from_value(self.host_context.clone())
+            .map_err(|err| PluginError::InvalidArgument(format!("the host context: {err}")))
+    }
+}
+
 /// What a plugin author implements.
 ///
 /// One routed call, a capability declaration, an instance lifecycle pair, and a
@@ -120,11 +232,33 @@ impl std::error::Error for PluginError {}
 /// hidden: the plugin is `Send + Sync + 'static` because the host may poll one
 /// of its futures from any thread, and its futures are `Send` for the same
 /// reason. Nothing here spawns or blocks: the host owns when plugin code runs.
-pub trait Plugin: Default + Send + Sync + 'static {
+///
+/// There is no `Default` bound. An instance that exists has completed
+/// initialisation, so the only way to obtain a plugin value is the fallible,
+/// asynchronous [`Plugin::init`]: an uninitialised value is not representable.
+pub trait Plugin: Send + Sync + 'static {
+    /// Instance construction and initialisation, as one asynchronous call.
+    ///
+    /// The plugin's own configuration and the host context arrive together in
+    /// [`Initialisation`], and the host is available for logs and events. The
+    /// future is polled by the host on the host's own runtime, so initialisation
+    /// may await a host service and return `Pending` rather than block.
+    ///
+    /// A failure whose cause is the configuration the host handed over is
+    /// [`PluginError::InvalidArgument`], which is the "the configuration does
+    /// not match what this plugin declared" class. Every other error is the
+    /// plugin's own defect. Both classes are distinguishable by the caller.
+    fn init(
+        host: Host,
+        initialisation: Initialisation,
+    ) -> impl Future<Output = Result<Self, PluginError>> + Send
+    where
+        Self: Sized;
+
     /// The capability descriptors this plugin advertises.
     ///
     /// The adapter returns exactly these from `list_capabilities`, and checks
-    /// them for duplicate names at instance creation.
+    /// them for duplicate names once initialisation has resolved.
     fn capabilities(&self) -> Vec<CapabilityDescriptor>;
 
     /// One capability, routed by name. One request in, one response out.
@@ -147,17 +281,6 @@ pub trait Plugin: Default + Send + Sync + 'static {
     /// reported as the cancel's own status; the default accepts.
     fn cancel(&self, call: Call) -> Result<(), PluginError> {
         let _ = call;
-        Ok(())
-    }
-
-    /// Instance initialisation, run by the adapter from `create_instance`.
-    ///
-    /// `Default` construction stays infallible and configuration-free; this is
-    /// where initialisation reports failure, and the error's status is what
-    /// `create_instance` returns. A plugin whose `started` fails yields no
-    /// instance.
-    fn started(&self, host: &Host) -> Result<(), PluginError> {
-        let _ = host;
         Ok(())
     }
 

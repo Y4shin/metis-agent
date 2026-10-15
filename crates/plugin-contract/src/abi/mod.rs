@@ -9,11 +9,19 @@
 //! The revision is clean, not an append: `invoke` and the host `complete`
 //! callback are deleted rather than deprecated, and the entry order changed
 //! while the entry symbol and the ABI major stayed the same. `abi_minor`
-//! therefore becomes 1 and [`metis_read_table`] compares it additively: it
-//! accepts minor 1 and anything newer, whose extra entries are appended after
-//! the last entry it reads, and it refuses a minor older than 1, which refuses a
-//! stale pre-release plugin instead of reading its entries through the new
-//! order.
+//! therefore moved to 1, and the initialisation revision moved it to 2, one
+//! step per reshaped table. [`metis_read_table`] compares it additively: it
+//! accepts this build's minor and anything newer, whose extra entries are
+//! appended after the last entry it reads, and it refuses a minor older than
+//! this build's, which refuses a plugin whose entries are in a superseded order
+//! instead of reading those entries through this order.
+//!
+//! Revision 2 replaces `create_instance` with `init_plugin`, the asynchronous
+//! initialisation entry: one payload carries the configuration and the host
+//! context, and the plugin returns the instance plus the future that must
+//! resolve successfully before the instance is valid. The table still carries
+//! exactly eight pointer slots, so `size` does not move, and no counter of any
+//! kind is reachable through the table.
 //!
 //! The layout rules the tables rely on are asserted at the bottom of this
 //! module by `layout`, on every build, and again in C by
@@ -31,13 +39,14 @@ pub use version::{MetisAbiError, metis_read_table};
 pub const METIS_ABI_MAJOR: u32 = 1;
 /// ABI minor version. It travels in the function table.
 ///
-/// It is 1 because this revision changed the entry order under an unchanged
-/// symbol and major. The minor is compared additively: a reader accepts the
-/// minor it knows and any newer one, because a newer table's extra entries are
-/// appended after the last entry this build reads, and it refuses an older
-/// minor, because that table's entries are in the superseded order. A plugin
-/// built against the superseded order is therefore refused instead of misread.
-pub const METIS_ABI_MINOR: u32 = 1;
+/// It is 2 because this revision replaced the instance-creation entry with the
+/// asynchronous initialisation entry under an unchanged symbol and major. The
+/// minor is compared additively: a reader accepts the minor it knows and any
+/// newer one, because a newer table's extra entries are appended after the last
+/// entry this build reads, and it refuses an older minor, because that table's
+/// entries are in a superseded order. A plugin built against a superseded order
+/// is therefore refused instead of misread.
+pub const METIS_ABI_MINOR: u32 = 2;
 
 /// The name of the exported entry point for ABI major 1.
 ///
@@ -332,10 +341,22 @@ pub struct MetisWakerVtable {
 
 // --- plugin table ---------------------------------------------------------
 
-/// Creates an instance and hands it the host table it will call back through.
-pub type MetisCreateInstanceFn = unsafe extern "C" fn(
+/// Initialises an instance and starts the future that completes it.
+///
+/// The one payload is host-owned, borrowed for this call, and carries the
+/// plugin's own configuration and the host context as the two named parts of
+/// one body; a plugin that needs it after this call returns copies it. On
+/// `Ok` both out parameters are filled: the instance, and a plugin-owned future
+/// that must resolve `Ok` before the instance is valid. The host drives that
+/// future on its own runtime, so initialisation may await a host service and
+/// return `Pending` rather than block. On any other resolution the host drops
+/// the future and then calls `destroy_instance` on the instance pointer, which
+/// must tolerate a failed initialisation.
+pub type MetisInitPluginFn = unsafe extern "C" fn(
     host: *const MetisHostApiV1,
+    payload: MetisBuffer,
     out_instance: *mut *mut c_void,
+    out_future: *mut MetisFutureHandle,
 ) -> MetisStatus;
 
 /// Destroys an instance. A destroyed handle is not used again.
@@ -391,14 +412,15 @@ pub type MetisServiceCompleteFn = unsafe extern "C" fn(
     payload: MetisBuffer,
 ) -> MetisStatus;
 
-/// The version 1 function table, revision 1 of the contract.
+/// The version 1 function table, revision 2 of the contract.
 ///
-/// Append-only evolution from here: a new entry is appended after
-/// `service_complete` and `size` grows to cover it. A reader compares `size`
-/// against the prefix it knows before touching a field, and never decides
-/// presence from a null pointer: the fields are plain function pointers,
-/// because `Option<NamedFnAlias>` has no C rendering cbindgen can emit
-/// (measured).
+/// Eight entries and no more: there is no counters entry and no counter of any
+/// kind is reachable through the table. Append-only evolution from here: a new
+/// entry is appended after `service_complete` and `size` grows to cover it. A
+/// reader compares `size` against the prefix it knows before touching a field,
+/// and never decides presence from a null pointer: the fields are plain
+/// function pointers, because `Option<NamedFnAlias>` has no C rendering
+/// cbindgen can emit (measured).
 #[repr(C)]
 pub struct MetisPluginTableV1 {
     /// Size in bytes of this table. First field, always.
@@ -408,8 +430,9 @@ pub struct MetisPluginTableV1 {
     /// ABI minor version. A reader accepts the one it speaks and any newer one,
     /// and refuses an older one.
     pub abi_minor: u32,
-    /// Instance lifecycle.
-    pub create_instance: MetisCreateInstanceFn,
+    /// Instance lifecycle: construct and initialise, then hand out the future
+    /// that completes the initialisation.
+    pub init_plugin: MetisInitPluginFn,
     /// Instance lifecycle.
     pub destroy_instance: MetisDestroyInstanceFn,
     /// Capability discovery.
@@ -518,6 +541,11 @@ pub struct MetisHostApiV1 {
 // for the plugin table, and the same expression with the host table's own
 // prefix width for the host table.
 
+/// Whether a plugin table that claims `size` bytes covers `init_plugin`.
+pub const fn metis_plugin_table_has_init_plugin(size: usize) -> bool {
+    size >= METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_THRESHOLD
+}
+
 /// Whether a plugin table that claims `size` bytes covers `invoke_future`.
 pub const fn metis_plugin_table_has_invoke_future(size: usize) -> bool {
     size >= METIS_PLUGIN_TABLE_V1_INVOKE_FUTURE_THRESHOLD
@@ -533,8 +561,8 @@ pub const fn metis_host_api_has_service_request(size: usize) -> bool {
     size >= METIS_HOST_API_V1_SERVICE_REQUEST_THRESHOLD
 }
 
-/// The `create_instance` pointer slot of the plugin table, after its prefix.
-pub const METIS_PLUGIN_TABLE_V1_CREATE_INSTANCE_SLOT: usize = 0;
+/// The `init_plugin` pointer slot of the plugin table, after its prefix.
+pub const METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT: usize = 0;
 /// The `destroy_instance` pointer slot of the plugin table, after its prefix.
 pub const METIS_PLUGIN_TABLE_V1_DESTROY_INSTANCE_SLOT: usize = 1;
 /// The `list_capabilities` pointer slot of the plugin table, after its prefix.
@@ -570,6 +598,13 @@ pub const METIS_HOST_API_V1_SLOTS: usize = 5;
 /// translation unit asserts the equality), so the thresholds below are written
 /// in one number.
 const SLOT: usize = size_of::<*const c_void>();
+
+/// The byte size a plugin table needs before `init_plugin` may be called.
+///
+/// This is the prefix plus the slots before it plus that slot: the number a
+/// reader compares `size` against.
+pub const METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_THRESHOLD: usize =
+    size_of::<MetisTablePrefix>() + (METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT + 1) * SLOT;
 
 /// The byte size a plugin table needs before `invoke_future` may be read.
 ///
