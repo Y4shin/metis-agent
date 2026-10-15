@@ -5,6 +5,10 @@ title: Task Changelog
 
 # Task Changelog
 
+## 2026-10-14, Bundle container verification (bundle-verification)
+
+A plugin bundle is now a verifiable artifact rather than an opaque file. `plugin_runtime::bundle` reads a 40-byte big-endian container header, verifies an X.509 over Ed25519 chain against a `TrustStore` the caller supplies, verifies the payload signature over the domain tag, the header, the chain and the archive with the signature bytes deleted, and answers one typed `BundleError` per refusal rule, including the chain profile, the recomputed key ids and the revocation list. A committed 894-byte vector and an altered copy are tested at byte level and rebuilt from a second implementation of the layout on every run, so a moved offset fails the suite. The trusted parse path adds 19 crates, all pure Rust with no C build step, and the contract documents the container, the domain tag bytes `METIS-PLUGIN-BUNDLE-PAYLOAD`, the anchor-is-last-chain-link rule, the key id rule and the refusal split between trust failures and unreadable containers. Residual: extraction, the manifest and the loader are the next tickets, and the ABI harness still owes the waker release the previous ticket's contract now requires.
+
 ## 2026-10-14, Waker lifecycle defects in the plugin host (waker-lifecycle-fix)
 
 The three defects the ABI hazard prototype measured are fixed. The host releases the one owning waker reference it hands a poll as soon as that poll returns, `CallState` carries the request id so `Host::wakes_after_drop()` names the call a late wake belongs to, and a `MetisWaker` carries a host-side token so a second wake on one consumed clone is refused instead of over-releasing the call state. `Host::waker_counts()`'s first element changed meaning to every owning reference the host handed out, `docs/plugin-contract.md` section 8 and section 11 rule 4 now say the late wake is a counted violation that names its request id, and the ABI is unchanged, so the fix needed no minor bump. Residual: the ABI harness, the second host implementation, does not yet release its poll's reference, which `abi-initialisation-entry` owns.

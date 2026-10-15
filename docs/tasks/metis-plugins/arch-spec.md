@@ -75,14 +75,20 @@ What exists today, and therefore what every ticket below builds on.
   `PluginCall` is the polled future, `registry::{Registry, Entry, RouteError,
   RegistryError}` routes and validates. Its error surface is settled: one type
   each for load and dispatch (`CallError`), routing and validation
-  (`RouteError`) and registration (`RegistryError`).
-- `crates/plugin-fixture`: the Rust fixture, its hand-written C twin
-  (`c/c-plugin.c`), the other-major plugin, and the ABI harness
-  (`src/bin/abi-harness.rs`) that hand-drives a real host.
-- `docs/plugin-contract.md` is still v1 text. It names `create_instance` and a
-  counters entry that this effort's spec removes. The two amendments land in
-  `abi-initialisation-entry` and in `bundle-verification`, in that order, and
-  no earlier ticket edits that file.
+  (`RouteError`) and registration (`RegistryError`). The
+  `bundle::{BundleHeader, VerifiedBundle, BundleError, TrustStore, RootKey,
+  KeyId, verify_bundle}` surface verifies a signed bundle out of one file,
+  `src/bundle.rs`, reached as `plugin_runtime::bundle`, and the host waker
+  accounting is `Host::waker_counts()` plus the new `Host::wakes_after_drop()`.
+- `crates/plugin-fixture`: the Rust fixture with its ten capabilities, its
+  hand-written C twin (`c/c-plugin.c`), the other-major plugin, and the ABI
+  harness (`src/bin/abi-harness.rs`) that hand-drives a real host.
+- `docs/plugin-contract.md` is v1 text with two of this effort's amendments
+  already in it: the waker rule, in section 8 and section 11 rule 4, and the
+  bundle container, chain, profile, key id, revocation and refusal rules, in
+  section 17. It still names `create_instance` and a counters entry that this
+  effort's spec removes, and `abi-initialisation-entry` lands the amendment
+  that removes them. No other ticket edits that file.
 - `docs/testing.md` is the command protocol. Tickets that add a command or close
   a recorded gap edit it in the same commit.
 
@@ -106,44 +112,111 @@ pack-sample-bundle + one end-to-end CI test                                 samp
 
 ## Level 0
 
+**Landed state.** `waker-lifecycle-fix` landed on the landing branch
+`task/waker-lifecycle-fix`; its ticket note records the merge commit `dd7e1bf`
+and the working branch tip `cefc602`, while the review and the bundle landing
+record that branch's tip as `b30efde`. `bundle-verification` landed on
+`task/bundle-verification` as the merge commit `7306244`, from the working
+branch tip `b68f491`, on a landing branch that already carried the waker fix. A
+level-1 chain therefore starts from `7306244`, and that base carries the
+corrected waker accounting in `plugin-runtime` with no ABI change, the new
+`plugin_runtime::bundle` module, the contract's waker rule in section 8 and
+section 11 rule 4, and the contract's new section 17. Nothing else lands between
+these two tickets and the level-1 tickets.
+
 ### Required state before the dependency levels: the ABI and the waker
 
 `waker-lifecycle-fix` (bug) and `bundle-verification` (feature) are the two
-independent, unblocked tickets. The bug sits in `plugin-contract`'s authoring
-bridge and in the host waker in `plugin-runtime`; the feature adds the bundle
-verifier to `plugin-runtime`. Neither depends on the other, and both must land
-before the rest of the graph.
+independent, unblocked tickets. The bug is the leaked owning reference at
+`plugin-contract`'s authoring bridge, fixed in the host waker in
+`plugin-runtime`; the feature adds the bundle verifier to `plugin-runtime`.
+Neither depends on the other, and both must land before the rest of the graph.
 
-The bug's interface contract, because `abi-initialisation-entry` depends on it:
-the authoring bridge must hand a poll a `MetisWaker` whose lifetime the host
-owns, so that the host releases exactly one owning reference when the poll
-returns; `CallState` must carry the request id so a `wakes_after_drop` record
-can name the call; and `waker_wake` must consume an owning clone at most once,
-so a second wake on one clone cannot over-release. The fix is in
-`crates/plugin-contract/src/authoring/call.rs` and `future.rs` plus the host
-waker in `crates/plugin-runtime/src/lib.rs`, with the record rule worded in
-`docs/plugin-contract.md` section 11 rule 4 as a counted violation rather than
-an ordering-ledger entry. The measured reference counts and the three defect
-statements are in the hazard findings file, not to be re-derived.
+The bug's interface contract, because `abi-initialisation-entry` depends on it.
+The fix landed in the host: `PluginCall::poll` releases the one owning reference
+it hands to the poll as soon as that poll returns, whatever it returned, so a
+poll that parks, fails or panics cannot leak it, and
+`crates/plugin-contract/src/authoring/call.rs` and `future.rs` are untouched by
+this ticket. A clone the plugin takes stays the plugin's to release.
+
+Two pieces of the host's public accounting moved. `Host::waker_counts()` still
+returns three numbers, and the first one now counts every owning waker reference
+the host handed out, one for each poll it runs and one for each clone the plugin
+takes, and no longer just the clones the plugin made. The second counts
+releases, and the first two are equal when nothing is outstanding; the third is
+the length of the late-wake record. `Host::wakes_after_drop() -> Vec<u64>` is
+new: it returns the request ids of the wakes that arrived after their call's
+future was dropped, in arrival order, so a late wake names the call it belongs
+to. `CallState` carries the request id, which is what makes that record
+possible. A dependent reads the first number as references handed out, never as
+plugin clones.
+
+`MetisWaker` now carries a host-side token in its `data` field, not a raw
+`Arc<CallState>` pointer. The token names an entry in a process-wide live-waker
+table, and the first `wake` or `drop` of a token takes the entry out, so a
+second use of one consumed clone finds nothing left to release and is refused
+rather than acted on, which is what makes a double release impossible. The ABI
+is unchanged: the field stays opaque, the layout does not move,
+`METIS_ABI_MINOR` stays 1, and the corrected lifetime claim is in the doc
+comment in `crates/plugin-contract/src/abi/mod.rs` and in the regenerated
+header.
+
+The record rule is worded in `docs/plugin-contract.md` section 8 and section 11
+rule 4 as a counted violation rather than an ordering-ledger entry. The measured
+reference counts and the three defect statements are in the hazard findings
+file, not to be re-derived.
+
+The fixture now exposes ten capabilities, the two new ones being `tool.deferred`
+and `tool.wake_deferred`, and the ABI harness's expected list grew with them.
+The double wake is provoked by a `#[cfg(test)]` unit test in
+`crates/plugin-runtime/src/lib.rs`, because the authoring surface cannot express
+it. `abi-initialisation-entry` inherits one host obligation from this fix,
+because the ABI harness does not yet release the waker reference its own poll
+hands out; see the carried risks below.
 
 #### `bundle-verification` (feature, l)
 
-**Exports.** A new `plugin_runtime::bundle` module, re-exported from the crate
-root.
+**Exports.** A new `plugin_runtime::bundle` module, landed as one file,
+`crates/plugin-runtime/src/bundle.rs`, declared as `pub mod bundle` and reached
+as `plugin_runtime::bundle::...`. The crate root does not re-export its items.
+Splitting the file into a `bundle/` directory is left to `bundle-extraction` if
+the module grows.
 
 - `TrustStore`: the trust policy as a plain value the daemon constructs. It
-  carries the root keys and the revocation list, each a set of key ids with the
-  public key alongside. `TrustStore::empty()` is the compiled-in default the
-  daemon starts from. The runtime never reads a configuration file and never
-  defines the configuration file's shape.
-- `BundleHeader`: the parsed fixed-size container header. Big-endian throughout,
-  fixed width because the signature's location depends on it.
-- `VerifiedBundle`: a borrowed view of an accepted bundle, carrying the header,
-  the parsed chain, the leaf-authorising certificate's common name, and the
-  archive bytes. Nothing is copied, and nothing is extracted.
-- `BundleError`: one variant per refusal rule, in this crate's existing error
-  style (`CallError` and `RouteError` are the models: a plain enum of struct
-  variants, `Display`, `std::error::Error`, no panic path).
+  holds the roots as `RootKey` values, each a recomputed key id with the raw
+  32-byte Ed25519 public key, and the revoked keys as `KeyId` values, which is a
+  `[u8; 16]`. The constructors and mutators are `TrustStore::empty()`,
+  `with_root(public_key)`, `add_root(&mut self, public_key)`,
+  `revoke(&mut self, id)`, plus the readers `roots()` and `revoked()`.
+  `TrustStore::empty()` is the compiled-in default the daemon starts from. The
+  runtime never reads a configuration file and never defines the configuration
+  file's shape.
+- `KeyId` and `key_id(public_key)`: the 16-byte key id type and the function
+  that computes it from the raw public key.
+- `BundleHeader`: the parsed fixed-size container header, built only through
+  `BundleHeader::parse(bytes)`. Big-endian throughout, fixed width because the
+  signature's location depends on it.
+- `VerifiedBundle`: a borrowed view of an accepted bundle. Its whole public
+  surface is `header()`, `archive()` and `leaf_common_name()`: the parsed chain
+  is a private field, so `x509_cert::Certificate` never enters this crate's
+  public API, and a later ticket that needs a chain detail adds an accessor
+  first. Nothing is copied, and nothing is extracted.
+- `BundleError`: 26 variants, one per refusal rule, in this crate's existing
+  error style (`CallError` and `RouteError` are the models: a plain enum of
+  struct variants, `Display`, `std::error::Error`, no panic path). The variants
+  are `Truncated`, `BadMagic`, `UnknownContainerVersion`, `UnknownSigningSuite`,
+  `BadHeaderLength`, `ReservedNotZero`, `BytesBeforeHeader`,
+  `ChainSpanMismatch`, `SpanMismatch`, `EmptyChain`, `ChainTooLong`,
+  `TrailingChainBytes`, `NonCanonicalDer`, `MalformedCertificate`,
+  `UnknownRoot`, `RevokedKey`, `Expired`, `NotYetValid`, `CaConstraintMissing`,
+  `LeafIsCa`, `UnknownCriticalExtension`, `ChainBroken`,
+  `ChainSignatureInvalid`, `MalformedSignature`, `SignatureInvalid` and
+  `MissingCommonName`. That is the planned families plus eight variants the plan
+  did not name, so the variant set is wider than planned and a dependent must
+  not match it exhaustively.
+- The constants `CONTAINER_MAGIC` (`METISBND`), `CONTAINER_VERSION` (1),
+  `SIGNING_SUITE` (1), `HEADER_LENGTH` (40), `MAX_CHAIN_LINKS` (8),
+  `KEY_ID_LENGTH` (16) and `DOMAIN_TAG`.
 - `verify_bundle(bytes: &[u8], trust: &TrustStore) -> Result<VerifiedBundle<'_>,
   BundleError>`: the one entry point.
 
@@ -167,17 +240,43 @@ plus signature length plus ZIP length, so no byte escapes the signed range.
 The **signed message** is the domain tag, then the header bytes, then the chain
 bytes, then the ZIP bytes, with the signature bytes themselves deleted rather
 than zero-filled. The domain tag is a fixed byte string independent of the
-container version, so a container version bump does not change it. The signature
-is raw Ed25519 over that message, verified with `verify_strict`, so a
-non-canonical key or signature encoding is refused.
+container version, so a container version bump does not change it; its bytes are
+the 27 ASCII characters `METIS-PLUGIN-BUNDLE-PAYLOAD`, exported as `DOMAIN_TAG`,
+so a producer signs `DOMAIN_TAG || header || chain || archive`. The signature is
+raw Ed25519 over that message, verified with `verify_strict`, so a non-canonical
+key or signature encoding is refused.
+
+**The anchor, the profile and the validity window, fixed here**, because a
+producer and a dependent both have to match them. The chain carries the anchor's
+own certificate as its last link, and the anchor is trusted by the key id
+recomputed from its public key rather than by who signed it, so a chain that
+omits the anchor's certificate is refused as an unknown root. `basicConstraints`
+is the only extension this build understands: any other critical extension
+refuses the chain, and every other non-critical extension is ignored, so a
+producer may carry its own key identifier and this build will not trust it. A
+certificate that authorises another key carries `CA:TRUE`, the leaf-authorising
+certificate is an end entity, and a link's validity window is checked at second
+granularity against the host's clock with 60 seconds of skew tolerated at each
+end.
 
 **Crates chosen here, with their cost measured and recorded.** The token
 `ed25519-dalek` 3 over `curve25519-dalek` 5 for verification, `x509-cert` 0.3
 over `der` 0.8 (`spki` 0.8, `const-oid` 0.10) for strict DER and the certificate
-profile, and `sha2` 0.11 for the key id. All are pure Rust with no build script
-and no C compiler in the path that reads untrusted bytes. The exact dependency
-count before and after is recorded in the ticket's implementation note and in
-the contract's dependency paragraph.
+profile, and `sha2` 0.11 for the key id. All are pure Rust, and no C compiler is
+in the path that reads untrusted bytes. The measured count at `plugin-runtime`
+is 66 crates before this ticket and 85 after for normal edges, so the trusted
+parse path adds 19 including its four direct crates, and 76 before and 101 after
+when the test-only signer's dev-dependencies are counted. The only added crate
+with a build script is `curve25519-dalek`, whose script selects cfg flags from
+the rustc version and compiles nothing. The signer's extra features
+(`x509-cert`'s `builder`, `ed25519-dalek`'s `alloc` and `pkcs8`) are
+dev-dependencies only, so no shipped build compiles a signing path. The counting
+pipeline is `cargo tree -p plugin-runtime --edges normal --prefix none | grep -v
+'(*)' | sort -u | wc -l`, with the `grep` filter because `cargo tree` prints a
+repeated subtree as a marker line that survives `sort -u`. The counts are
+repeated in the ticket's implementation note and in the contract's dependency
+paragraph, and contract 17.7 lacks that filter, which is one of the carried
+risks below.
 
 **Key id rule, fixed here.** The key id of a public key is the first 16 bytes of
 its SHA-256, computed over the raw 32-byte Ed25519 public key, never over the
@@ -194,7 +293,12 @@ magic, unknown container version, a span that does not account for the whole
 file, bytes before the header, a non-canonical DER encoding, trailing bytes in
 the chain region, more than eight links, a malformed certificate, a non-zero
 reserved field) degrade that one bundle instead, because there is no evidence of
-tampering, only a file this build cannot read.
+tampering, only a file this build cannot read. Bytes before the header, as the
+landed check reads it, is a declared signature offset below the header's end,
+checked before the rule that the offset equals the header length plus the chain
+length, because one header can trip both. `startup-policy` calls
+`is_trust_failure()` as a predicate rather than matching `BundleError` variants,
+because the landed variant set is wider than the plan named.
 
 **Existing abstractions to use.** `CallError`'s shape for the new error enum;
 `Loaded`'s doc-comment style for the unsafe-free parse path; the workspace
@@ -216,15 +320,25 @@ fixture: committed bundle vectors with altered copies under
 `crates/plugin-runtime/tests/vectors/`. One test-only helper: a signer in
 `tests/support/` that issues a small chain and signs a payload with a fixed
 test seed, used to build the vectors and to install the test key as a root
-explicitly. The daemon's compiled-in root set stays empty, so no shipped build
-trusts the test key.
+explicitly. It landed as `crates/plugin-runtime/tests/support/signer.rs` and is
+a deliberate second implementation of the layout: it restates the offsets, the
+magic, the container version and the domain tag instead of calling the
+verifier's constants, and the committed vectors are rebuilt from it and compared
+byte for byte on every run, so a changed byte fails the suite. The daemon's
+compiled-in root set stays empty, so no shipped build trusts the test key.
 
 **Interface contract.** `VerifiedBundle::archive()` returns the ZIP bytes,
 `VerifiedBundle::leaf_common_name()` returns the name the manifest check
 compares against, `VerifiedBundle::header()` returns the parsed header, and
-`BundleError::is_trust_failure()` classifies the outcome. `bundle-extraction`
-consumes `archive()`, `manifest-and-library` consumes `leaf_common_name()`, and
-`startup-policy` consumes the classification.
+`BundleError::is_trust_failure()` classifies the outcome. The parsed chain stays
+private, so a dependent that needs a chain detail adds an accessor first.
+`bundle-extraction` consumes `archive()`, `manifest-and-library` consumes
+`leaf_common_name()`, and `startup-policy` calls
+`BundleError::is_trust_failure()` rather than matching variants, because the
+variant set is wider than the plan named and the predicate is the stable seam. A
+producer, which is the packaging step of `sample-bundle-ci`, signs the domain
+tag, the header, the chain and the archive together and writes the root's
+certificate as the chain's last link.
 
 **Doc edits.** `docs/plugin-contract.md` gains a section for the container
 header, the chain profile, the domain tag, the key id rule, the revocation rule
@@ -237,9 +351,11 @@ and the refusal rules, and the dependency paragraph records the measured count.
 
 **Exports.** `plugin_runtime::bundle::extract`: a function that takes an
 accepted `VerifiedBundle` plus this host's target and returns a `StagedBundle`,
-or a `StageError`. `StagedBundle` owns a temporary directory and removes it when
-dropped, so a failed load leaves nothing behind. It exposes the staged root, the
-manifest's path and this host's library path.
+or a `StageError`. The verifier module is one file,
+`crates/plugin-runtime/src/bundle.rs`; splitting it into a `bundle/` directory is
+left to this ticket if the module grows. `StagedBundle` owns a temporary
+directory and removes it when dropped, so a failed load leaves nothing behind.
+It exposes the staged root, the manifest's path and this host's library path.
 
 **Targets.** A target is one string, operating system and architecture joined
 by a hyphen, such as `linux-x86_64`, derived from `std::env::consts::OS` and
@@ -487,8 +603,9 @@ from the bundle's file name with no capabilities. Placeholders are listable, are
 excluded from the capabilities an agent would be offered, and answer the
 existing disabled route error carrying the reason.
 
-**Existing abstractions to use.** `BundleError::is_trust_failure` for the
-stop-versus-disable split, `LoadError` for the per-plugin outcomes, and
+**Existing abstractions to use.** `BundleError::is_trust_failure()` for the
+stop-versus-disable split, called as a predicate rather than by matching
+`BundleError` variants, `LoadError` for the per-plugin outcomes, and
 `Registry`'s existing entry and route-error surfaces for the placeholder's
 behaviour. The policy itself is a table in the crate, documented in
 `docs/plugin-contract.md`.
@@ -544,7 +661,11 @@ signed bundle holding the C fixture's library and a hand-written manifest,
 signed with the test key, and a CI step runs an integration test that loads that
 bundle through the public load entry, dispatches a capability, observes at
 least one event through the sink, and releases the instance with the ledger
-asserting the teardown order. The same test fails when one byte of the bundle is
+asserting the teardown order. The packaging step signs exactly what the verifier
+signs (`DOMAIN_TAG || header || chain || archive`, with the signature's own
+bytes absent) and writes the root's certificate as the chain's last link,
+because the anchor is the last link and is trusted by its recomputed key id.
+The same test fails when one byte of the bundle is
 altered or when the chain is signed by a key that is not a configured root.
 `docs/testing.md` and `.github/workflows/ci.yml` gain the step, and the
 daemon's compiled-in root set stays empty.
@@ -590,8 +711,44 @@ sink plus the release entry. The CI step is the gate.
   `plugin-runtime`, so the host sees the primitives and the envelope alone.
 - The daemon's own dependencies are out of scope here.
 - The measured dependency count for `plugin-runtime` is recorded by
-  `bundle-verification`, and no later ticket adds a dependency without the same
-  measurement.
+  `bundle-verification`: 66 crates before and 85 after for normal edges, so the
+  trusted parse path adds 19, and 76 before and 101 after when the test-only
+  signer's dev-dependencies are counted. The pipeline is `cargo tree -p
+  plugin-runtime --edges normal --prefix none | grep -v '(*)' | sort -u |
+  wc -l`, and the `grep` filter is needed because `cargo tree` prints a repeated
+  subtree as a marker line that survives `sort -u`. No later ticket adds a
+  dependency without the same measurement.
+
+## Carried risks from the landed level-0 tickets
+
+Known defects the two landings left, recorded so a level-1 chain absorbs them
+instead of rediscovering them. None of them is spec content.
+
+- The dependency-count pipeline in `docs/plugin-contract.md` section 17.7
+  over-counts. `cargo tree` prints a repeated subtree as a marker line,
+  `name vX.Y.Z (*)`, and those lines survive `sort -u`. Run literally, the pipe
+  prints 77 crates before and 101 after, against the recorded 66 and 85. The
+  recorded figures are the correct distinct-crate counts, so the claim holds,
+  and the pipeline needs `| grep -v '(*)'` before any number is quoted again.
+- `docs/tasks/metis-plugins/tasks/abi-hazard-fixtures/findings.md` line 74 still
+  says `Host::waker_counts()` is `(cloned, released, wakes_after_drop)`, which is
+  the pre-fix meaning of the first element. The measurements below that line were
+  taken against the prototype and stay valid, but the first element now counts
+  every owning waker reference the host handed out.
+- The amended host obligation, release the one owning waker reference a poll is
+  given when that poll returns, is implemented in `plugin-runtime` and not in
+  the ABI harness at `crates/plugin-fixture/src/bin/abi-harness.rs`, which is
+  the second host implementation and must keep passing. Its poll never releases
+  the reference it hands out, and its `waker_wake` still prints an ordering line
+  for a dead slot, which contract section 11 rule 4 forbids.
+  `abi-initialisation-entry` rewrites that harness, so the obligation belongs
+  with it.
+- The two landing notes do not agree on the waker landing's commit: the ticket
+  note records the merge commit `dd7e1bf`, and the review and the bundle landing
+  record the tip of `task/waker-lifecycle-fix` as `b30efde`. Confirm which
+  commit landed the waker fix before the effort is archived. No code or contract
+  fact depends on the difference, because every level-1 chain builds on
+  `7306244`.
 
 ## Out of scope for this effort
 
