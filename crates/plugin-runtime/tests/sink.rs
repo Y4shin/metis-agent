@@ -811,3 +811,127 @@ fn a_refused_service_request_is_refused_synchronously() {
         "the request was delivered once and refused once"
     );
 }
+
+#[test]
+fn a_host_with_no_sink_records_into_the_accessors_its_tests_read() {
+    let _guard = one_at_a_time();
+    // No sink is installed, so the host is the recording one: this is the host
+    // the rest of the suite builds, and its accessors keep answering.
+    let host = Host::new();
+    let loaded = fixture();
+    let instance = block_on(
+        loaded
+            .init_plugin(&host, &initialisation_body("fixture"))
+            .expect("the initialisation entry starts"),
+    )
+    .expect("the fixture initialises");
+
+    let body = drive(&instance, "tool.echo", 1, "wait").expect("the echo call succeeds");
+    assert_eq!(support::decode(&body).echo, "wait");
+
+    assert!(
+        host.logs()
+            .iter()
+            .any(|line| line == "[1] fixture: initialised for fixture"),
+        "a log line is recorded with its level, as it always was: {:?}",
+        host.logs()
+    );
+    assert_eq!(
+        host.events(),
+        vec!["fixture.ready", "fixture.answered"],
+        "event topics are recorded in order, as they always were"
+    );
+
+    let mut call = instance
+        .invoke("tool.pending", 2, &request("wait"))
+        .expect("the future starts");
+    assert!(matches!(poll_once(&mut call), Poll::Pending));
+    let pending = host.pending_services();
+    assert_eq!(
+        pending.len(),
+        1,
+        "the service request is recorded: {pending:?}"
+    );
+    assert_eq!(pending[0].service, "timer");
+    assert_eq!(pending[0].request_id, 2);
+    assert_eq!(
+        serde_json::from_slice::<TimerAnswer>(&pending[0].body).expect("the recorded ask is JSON"),
+        TimerAnswer { delay_ms: 5 }
+    );
+
+    let taken = host
+        .take_service(2)
+        .expect("the host takes the request it answers");
+    assert_eq!(taken.request_id, 2);
+    assert!(host.pending_services().is_empty(), "taking it removed it");
+    let answer = serde_json::to_vec(&TimerAnswer { delay_ms: 5 }).expect("the answer serialises");
+    instance
+        .complete_service(2, MetisStatus::Ok, &answer)
+        .expect("the instance still holds the call");
+    assert!(
+        matches!(poll_once(&mut call), Poll::Ready(Ok(_))),
+        "the answered call finishes through the completion entry"
+    );
+}
+
+#[test]
+fn a_plugin_loaded_through_the_load_entry_delivers_to_the_installed_sink() {
+    let _guard = one_at_a_time();
+    let sink = Recording::new();
+    // The host a daemon builds: one sink, set once before anything is loaded.
+    let host = Host::with_sink(sink.clone());
+    let name = support::bundle::INSTANCE_NAME;
+    let (file, trust) = support::bundle::bundle_file(Some(&support::bundle::manifest(
+        &support::bundle::CAPABILITIES,
+    )));
+
+    let serving = block_on(plugin_runtime::load::load_bundle(
+        &host,
+        file.path(),
+        &serde_json::json!({ "instance": name }),
+        &serde_json::json!({ "instance_name": name, "capability_version": 1 }),
+        &trust,
+    ))
+    .expect("the fixture's own bundle loads through the one entry");
+
+    // The fixture logs and emits an event while it initialises, so the lifecycle
+    // callbacks arrive before any capability is called, and the load is what
+    // named the instance they carry.
+    assert!(
+        sink.of_kind("log").iter().any(|log| matches!(
+            log,
+            Delivered::Log { instance, message, .. }
+                if instance == name && message == &format!("fixture: initialised for {name}")
+        )),
+        "the initialisation log reached the sink, named: {:?}",
+        sink.of_kind("log")
+    );
+    let ready = sink
+        .of_kind("event")
+        .into_iter()
+        .find(|event| matches!(event, Delivered::Event { topic, .. } if topic == "fixture.ready"))
+        .expect("the initialisation event reached the sink");
+    match ready {
+        Delivered::Event { instance, .. } => assert_eq!(
+            instance, name,
+            "the instance the load registered is the instance the sink is told about"
+        ),
+        other => panic!("only an event is an event: {other:?}"),
+    }
+
+    // And a capability served through the registry the load built delivers to
+    // the same sink, named the same way.
+    let body = drive(serving.instance(), "tool.echo", 1, "wait").expect("the echo call succeeds");
+    assert_eq!(support::decode(&body).echo, "wait");
+    let answered = sink
+        .of_kind("event")
+        .into_iter()
+        .find(
+            |event| matches!(event, Delivered::Event { topic, .. } if topic == "fixture.answered"),
+        )
+        .expect("the call's event reached the sink");
+    match answered {
+        Delivered::Event { instance, .. } => assert_eq!(instance, name),
+        other => panic!("only an event is an event: {other:?}"),
+    }
+}
