@@ -250,8 +250,13 @@ pub async fn load_bundle(
     let loaded = Arc::new(unsafe { Loaded::open(&library, &manifest) }.map_err(LoadError::Call)?);
     let name = manifest.name().to_string();
     let body = initialisation_body(config, host_context);
+    // The instance's own view of the host: it names the instance on every
+    // callback, so a sink installed on the host the caller passed hears which
+    // plugin spoke. The name is the manifest's, which is the name the instance
+    // is registered under.
+    let instance_host = host.for_instance(&name);
     let init = loaded
-        .init_plugin(host, &body)
+        .init_plugin(&instance_host, &body)
         .map_err(|error| initialisation_refusal(&name, error))?;
     let instance = init
         .await

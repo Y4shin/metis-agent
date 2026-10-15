@@ -25,15 +25,18 @@ Run if asked (by number):
 8. `bash scripts/check-c-layout-asserts.sh`
 9. `cargo run -p client --example echo`
 10. `cargo run -p client --example events`
+11. `cargo test --profile no-panic -p plugin-runtime --features no-panic-check --no-run`
 
 Every command runs inside the devenv shell as `devenv shell -- <command>`, which
 is where `cargo`, `buf` and the rest exist. The three always-run commands are what
 `.github/workflows/ci.yml` gates on first, and numbers 1 to 8 are the contract and
 plugin ABI commands it runs after them; numbers 3 and 2 resolve their pinned
 plugins from the BSR, so they need the credential described in `docs/dev-env.md`.
-Numbers 9 and 10 are the two runnable walkthroughs, which CI does not run. The
-`## Run commands` section below documents the same commands per area, with what
-each one proves.
+Numbers 9 and 10 are the two runnable walkthroughs, which CI does not run.
+Number 11 is the `no-panic` build check: it runs in a CI step of its own, it is
+the only place that assertion holds, and the block below records exactly what it
+proves and what it does not. The `## Run commands` section below documents the
+same commands per area, with what each one proves.
 
 ## Framework
 
@@ -388,6 +391,53 @@ Plugin host, documented in `crates/plugin-runtime`:
   function of the caller's deadline, so the runtime waits for no cancellation:
   the test polls nothing after it, the call is still in flight, and the caller's
   own drop is what turns the unacknowledged cancel into the ledger entry.
+- `cargo test -p plugin-runtime --test sink` -- the one sink a host delivers to:
+  progress, events, logs and service requests, set at `Host::with_sink` and
+  named per instance with `Host::for_instance`, which the load entry applies with
+  the manifest's name. The run asserts that each callback kind arrives with the
+  instance name and the fields it has and that an event carries no request id;
+  that the payload a sink is handed is a copy that outlives the plugin's buffer,
+  which is released through the plugin's own release entry before the sink is
+  called, including when the sink panics, read from the fixture's own buffer
+  ledger; that a panic inside a sink is caught in the callback's frame and
+  recorded on the ordering ledger while the plugin's call still completes and the
+  instance keeps serving; that one instance's callbacks arrive in emission order
+  and that two instances' callbacks are not ordered against each other, which is
+  measured by one instance's delivery waiting for the other's; that an accepted
+  service request is answered later through `Instance::complete_service` and a
+  refused one is refused synchronously as the status the callback returns; that a
+  host with no sink still records into `logs()`, `events()`, `pending_services()`
+  and `take_service()`; and that a plugin loaded through the load entry delivers
+  to the sink the caller installed, named as the load registered it. The
+  fixture's buffer ledger is process-wide, so every case in that binary takes one
+  file-wide lock.
+- `cargo test --profile no-panic -p plugin-runtime --features no-panic-check
+  --no-run` -- the `no-panic` build check, which is command 11 of the protocol
+  and runs in a CI step of its own. It is the only place that assertion holds,
+  and it proves exactly this: a link with the feature on, at `opt-level = 1` and
+  `panic = "unwind"`, fails when a hand-off frame of the host table can raise a
+  panic. The four frames the plugin calls into -- `host_progress`,
+  `host_emit_event`, `host_log` and `host_service_request` -- carry the
+  attribute, and each one is a hand-off to a delivery frame of the same shape,
+  because a frame passes the assertion only when every unwinding path in it is
+  one a caught closure holds. The copy, the plugin's release entry, the ordering
+  ledger and the sink call carry unwind paths the compiler cannot remove (`std`'s
+  mutex has one in both its lock and the unlock a guard runs on drop, and every
+  heap value dropped in a frame has one), so they live in the delivery frames,
+  which are `extern "C"` and never inlined and which carry the `catch_unwind`
+  that contains a panicking sink. The check therefore covers the frames' own code
+  and the hand-off, and it proves nothing about what a sink does: a panic inside
+  one is caught at run time, which is the guarantee that matters, and the check
+  is an addition to that rather than a replacement for it. Two profiles make it
+  prove nothing at all, which is why it runs nowhere else: a command that never
+  links the frame, such as `cargo check` or a library-only build, has no link for
+  the assertion's undefined symbol to fail, and a profile that does not unwind
+  (`panic = "abort"`, or an `extern "C"` frame, which aborts rather than
+  unwinds) never drops the attribute's guard, so the symbol is never referenced.
+  The `no-panic-check` feature exists because the check needs optimization to
+  prove what it proves, and the workspace's `no-panic` profile is the one place
+  `opt-level = 1` is set for it: neither belongs in the default development loop,
+  where a frame that only optimization can prove would fail the build.
 
 Daemon state, documented in `crates/daemon`:
 
@@ -539,8 +589,12 @@ for the Windows target, and by the platform-independent rules tested on Linux:
 shell on push to `main` and on pull requests, followed by the three contract
 commands and the five plugin ABI commands (the C plugin build, the C layout
 assertion check, the authoring-feature-off check, the harness, and the header
-drift check). The frontend commands are not in CI yet; add them when the frontend
-has behaviour worth gating.
+drift check). It then runs the `no-panic` build check as a step of its own,
+because that assertion holds nowhere else: the step is the one place a linker
+sees the annotated frames with the feature on and the profile selected, and
+`docs/testing.md` records what it proves and what it does not. The frontend
+commands are not in CI yet; add them when the frontend has behaviour worth
+gating.
 
 A second job, `windows`, runs on `windows-latest` and compiles the Windows local
 transport and the plugin line for the Windows target with

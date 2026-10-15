@@ -17,6 +17,14 @@ members = [
     "crates/app",
 ]
 
+# The dedicated profile for the `no-panic` check, which needs the compiler to
+# optimize before it can prove a frame panic-free. It inherits the development
+# profile, so `panic = "unwind"` stays as it is, which is the setting the check
+# is meaningless without, and it is only ever selected by that one CI step.
+[profile.no-panic]
+inherits = "dev"
+opt-level = 1
+
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
@@ -98,6 +106,12 @@ subtle = "2"
 zip = { version = "9", default-features = false, features = [
     "deflate-flate2-zlib-rs",
 ] }
+
+# The `no_panic` attribute, which makes the linker refuse a frame the compiler
+# cannot prove panic-free. It is an optional dependency of `plugin-runtime`,
+# behind the `no-panic-check` feature, and only the dedicated CI step enables
+# it, because the check needs a linker, `panic = "unwind"` and optimization.
+no-panic = "0.1"
 
 # The manifest is a plain text file at a bundle's root, and `toml` is the
 # reader for it: TOML is the format an author writes by hand, and the crate is
