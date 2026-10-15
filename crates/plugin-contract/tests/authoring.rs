@@ -22,12 +22,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use plugin_contract::abi::{
-    METIS_BUFFER_OWNER_HOST, MetisBuffer, MetisFutureHandle, MetisHostApiV1, MetisPluginTableV1,
-    MetisStatus, MetisWaker, metis_read_table,
+    METIS_ABI_MINOR, METIS_BUFFER_OWNER_HOST, MetisBuffer, MetisFutureHandle, MetisHostApiV1,
+    MetisPluginTableV1, MetisStatus, MetisWaker, metis_read_table,
 };
 use plugin_contract::authoring::{
-    Call, CapabilityDescriptor, Host, LogLevel, Plugin, PluginError, Request, Response, accounting,
-    schema_of, table,
+    Call, CapabilityDescriptor, Host, HostContext, Initialisation, LogLevel, Plugin, PluginError,
+    Request, Response, accounting, schema_of, table,
 };
 use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
 
@@ -328,7 +328,6 @@ fn drive(
 
 /// The six capabilities the routed trait dispatches by name. Six is the point:
 /// the four-arm vocabulary could not name a fifth.
-#[derive(Default)]
 struct Many;
 
 const CAPABILITIES: [&str; 6] = [
@@ -341,6 +340,10 @@ const CAPABILITIES: [&str; 6] = [
 ];
 
 impl Plugin for Many {
+    async fn init(_host: Host, _initialisation: Initialisation) -> Result<Self, PluginError> {
+        Ok(Many)
+    }
+
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
         CAPABILITIES.iter().map(|name| descriptor(name)).collect()
     }
@@ -357,7 +360,6 @@ impl Plugin for Many {
 }
 
 /// A capability that waits for a host service before answering.
-#[derive(Default)]
 struct Timer;
 
 #[derive(Debug, serde::Deserialize)]
@@ -366,6 +368,10 @@ struct TimerAnswer {
 }
 
 impl Plugin for Timer {
+    async fn init(_host: Host, _initialisation: Initialisation) -> Result<Self, PluginError> {
+        Ok(Timer)
+    }
+
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
         vec![descriptor("tool.timer")]
     }
@@ -384,10 +390,13 @@ impl Plugin for Timer {
 }
 
 /// A capability that parks on its cancellation token.
-#[derive(Default)]
 struct Cancellable;
 
 impl Plugin for Cancellable {
+    async fn init(_host: Host, _initialisation: Initialisation) -> Result<Self, PluginError> {
+        Ok(Cancellable)
+    }
+
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
         vec![descriptor("tool.cancellable")]
     }
@@ -399,10 +408,13 @@ impl Plugin for Cancellable {
 }
 
 /// A capability that panics in its poll.
-#[derive(Default)]
 struct Panics;
 
 impl Plugin for Panics {
+    async fn init(_host: Host, _initialisation: Initialisation) -> Result<Self, PluginError> {
+        Ok(Panics)
+    }
+
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
         vec![descriptor("tool.panic")]
     }
@@ -422,10 +434,13 @@ impl Drop for PanicOnDrop {
 }
 
 /// A capability whose future is never ready and whose destructor panics.
-#[derive(Default)]
 struct DropPanics;
 
 impl Plugin for DropPanics {
+    async fn init(_host: Host, _initialisation: Initialisation) -> Result<Self, PluginError> {
+        Ok(DropPanics)
+    }
+
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
         vec![descriptor("tool.panic_drop")]
     }
@@ -439,10 +454,13 @@ impl Plugin for DropPanics {
 
 /// A plugin with two capabilities of the same name, which a routed `call`
 /// cannot disambiguate.
-#[derive(Default)]
 struct Duplicate;
 
 impl Plugin for Duplicate {
+    async fn init(_host: Host, _initialisation: Initialisation) -> Result<Self, PluginError> {
+        Ok(Duplicate)
+    }
+
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
         vec![descriptor("tool.same"), descriptor("tool.same")]
     }
@@ -456,12 +474,135 @@ impl Plugin for Duplicate {
 
 // --- helpers --------------------------------------------------------------
 
-fn create(table: &MetisPluginTableV1, state: &HostState) -> (MetisStatus, *mut c_void) {
+/// One driven initialisation: what the entry returned, what its future
+/// resolved with, and the instance pointer the entry handed out.
+struct InitOutcome {
+    entry: MetisStatus,
+    future: MetisStatus,
+    instance: *mut c_void,
+    handle: MetisFutureHandle,
+}
+
+/// Drives one initialisation through the table's `init_plugin` entry.
+///
+/// The instance is valid exactly when the future resolved `Ok`, so this drives
+/// the future rather than trusting the entry's return.
+fn initialise(
+    table: &MetisPluginTableV1,
+    state: &HostState,
+    config: serde_json::Value,
+    instance_name: &str,
+) -> InitOutcome {
+    let payload = Initialisation::new(
+        config,
+        HostContext {
+            instance_name: instance_name.to_string(),
+            data_dir: None,
+            capability_version: 1,
+        },
+    )
+    .expect("the probe's own payload is buildable")
+    .body();
+    let encoded = metis_encode_payload(&payload);
     let mut instance = ptr::null_mut();
+    let mut handle = MetisFutureHandle::null();
     // SAFETY: the host table lives inside `state` and stays valid for the
-    // instance's lifetime, and the out parameter is a live local.
-    let status = unsafe { (table.create_instance)(state.api(), &mut instance) };
-    (status, instance)
+    // instance's lifetime, the payload buffer is host-owned and valid for the
+    // entry, and both out parameters are live locals.
+    let entry = unsafe {
+        (table.init_plugin)(
+            state.api(),
+            MetisBuffer {
+                ptr: encoded.as_ptr() as *mut u8,
+                len: encoded.len(),
+                cap: encoded.len(),
+                owner: METIS_BUFFER_OWNER_HOST,
+                reserved: 0,
+            },
+            &mut instance,
+            &mut handle,
+        )
+    };
+    let mut future = MetisStatus::InvalidArgument;
+    if entry == MetisStatus::Ok {
+        let mut out = MetisBuffer::empty();
+        let mut polls = 0;
+        loop {
+            // SAFETY: the handle came from this table's `init_plugin`, and the
+            // waker is this host's.
+            let polled = unsafe { ((*handle.vtable).poll)(handle.ctx, state.waker(), &mut out) };
+            polls += 1;
+            assert!(polls < 8, "initialisation must not stay pending here");
+            if polled != MetisStatus::Pending {
+                future = polled;
+                break;
+            }
+        }
+    }
+    InitOutcome {
+        entry,
+        future,
+        instance,
+        handle,
+    }
+}
+
+/// Drops the initialisation future and, when the initialisation failed,
+/// destroys the instance, which is the order the contract fixes.
+fn finished(state: &HostState, outcome: InitOutcome) {
+    // SAFETY: the handle came from this table's `init_plugin` and this is its
+    // one drop.
+    let dropped = unsafe { ((*outcome.handle.vtable).drop)(outcome.handle.ctx) };
+    assert_eq!(
+        dropped,
+        MetisStatus::Ok,
+        "the initialisation future drops once"
+    );
+    if outcome.future != MetisStatus::Ok {
+        let instance = outcome.instance;
+        assert!(
+            !instance.is_null(),
+            "a failed initialisation still leaves a pointer to destroy"
+        );
+        // SAFETY: the pointer came from the same table's `init_plugin` entry,
+        // and a failed initialisation leaves it valid for exactly this call.
+        let destroyed = unsafe { ((*state.table).destroy_instance)(instance) };
+        assert_eq!(
+            destroyed,
+            MetisStatus::Ok,
+            "a failed initialisation still destroys the instance it handed out"
+        );
+    }
+}
+
+/// The instance of an initialisation that resolved `Ok`, with the future
+/// dropped.
+fn ok_instance(_state: &HostState, outcome: InitOutcome) -> *mut c_void {
+    assert_eq!(outcome.entry, MetisStatus::Ok, "the entry starts the future");
+    assert_eq!(outcome.future, MetisStatus::Ok, "initialisation resolved");
+    assert!(!outcome.instance.is_null(), "an initialised instance exists");
+    let instance = outcome.instance;
+    // SAFETY: the handle came from this table's `init_plugin`.
+    assert_eq!(
+        unsafe { ((*outcome.handle.vtable).drop)(outcome.handle.ctx) },
+        MetisStatus::Ok
+    );
+    instance
+}
+
+/// Creates an initialised instance from a probe table, which is what every case
+/// below needs.
+fn created(table: &MetisPluginTableV1, state: &HostState) -> *mut c_void {
+    let outcome = initialise(table, state, serde_json::json!({}), "probe");
+    if outcome.entry == MetisStatus::Ok && outcome.future == MetisStatus::Ok {
+        return ok_instance(state, outcome);
+    }
+    // A refused initialisation: drop the future, destroy the pointer, and
+    // report the status the future resolved with, which is where a plugin
+    // reports a failed initialisation.
+    let status = outcome.future;
+    finished(state, outcome);
+    panic!("the probe initialisation failed with {}", status.as_str());
 }
 
 // --- the cases ------------------------------------------------------------
@@ -479,7 +620,7 @@ fn the_exported_table_is_the_revision_and_reads_back() {
     // SAFETY: the table is a static and never mutated.
     let read = unsafe { metis_read_table(&raw const MANY) }.expect("a current table is accepted");
     assert_eq!(read.abi_major, 1);
-    assert_eq!(read.abi_minor, 1);
+    assert_eq!(read.abi_minor, METIS_ABI_MINOR);
     assert_eq!(read.size, size_of::<MetisPluginTableV1>());
 }
 
@@ -487,8 +628,7 @@ fn the_exported_table_is_the_revision_and_reads_back() {
 fn more_than_four_capabilities_dispatch_by_name() {
     let _guard = serial();
     let state = HostState::new(&raw const MANY);
-    let (status, instance) = create(&MANY, &state);
-    assert_eq!(status, MetisStatus::Ok);
+    let instance = created(&MANY, &state);
     // The ledger is process-wide, so this case compares against its own
     // starting point rather than against zero.
     let violations = accounting().violations;
@@ -531,8 +671,7 @@ fn more_than_four_capabilities_dispatch_by_name() {
 fn a_host_service_round_trips_through_the_future() {
     let _guard = serial();
     let state = HostState::new(&raw const TIMER);
-    let (status, instance) = create(&TIMER, &state);
-    assert_eq!(status, MetisStatus::Ok);
+    let instance = created(&TIMER, &state);
 
     let body = request("tool.timer");
     let encoded = metis_encode_payload(&body);
@@ -622,8 +761,7 @@ fn a_host_service_round_trips_through_the_future() {
 fn a_cancel_resolves_as_cancelled() {
     let _guard = serial();
     let state = HostState::new(&raw const CANCELLABLE);
-    let (status, instance) = create(&CANCELLABLE, &state);
-    assert_eq!(status, MetisStatus::Ok);
+    let instance = created(&CANCELLABLE, &state);
 
     let body = request("tool.cancellable");
     let encoded = metis_encode_payload(&body);
@@ -676,8 +814,7 @@ fn a_cancel_resolves_as_cancelled() {
 fn a_panic_in_a_poll_is_terminal_and_the_instance_keeps_serving() {
     let _guard = serial();
     let state = HostState::new(&raw const PANICS);
-    let (status, instance) = create(&PANICS, &state);
-    assert_eq!(status, MetisStatus::Ok);
+    let instance = created(&PANICS, &state);
 
     let before = accounting().violations;
     let status = drive(&PANICS, &state, instance, 1_401, "tool.panic");
@@ -706,8 +843,7 @@ fn a_panic_in_a_poll_is_terminal_and_the_instance_keeps_serving() {
 fn a_panic_in_a_future_destructor_is_contained() {
     let _guard = serial();
     let state = HostState::new(&raw const DROP_PANICS);
-    let (status, instance) = create(&DROP_PANICS, &state);
-    assert_eq!(status, MetisStatus::Ok);
+    let instance = created(&DROP_PANICS, &state);
 
     let body = request("tool.panic_drop");
     let encoded = metis_encode_payload(&body);
@@ -757,8 +893,7 @@ fn a_panic_in_a_future_destructor_is_contained() {
 fn a_double_drop_is_reported_rather_than_a_second_free() {
     let _guard = serial();
     let state = HostState::new(&raw const PANICS);
-    let (status, instance) = create(&PANICS, &state);
-    assert_eq!(status, MetisStatus::Ok);
+    let instance = created(&PANICS, &state);
     let body = request("tool.panic");
     let encoded = metis_encode_payload(&body);
     let mut handle = MetisFutureHandle::null();
@@ -805,17 +940,25 @@ fn a_double_drop_is_reported_rather_than_a_second_free() {
 fn a_duplicate_capability_name_fails_at_creation() {
     let _guard = serial();
     let state = HostState::new(&raw const DUPLICATE);
-    let (status, instance) = create(&DUPLICATE, &state);
-    assert_eq!(status, MetisStatus::InvalidArgument);
-    assert!(instance.is_null(), "a refused creation yields no instance");
+    let outcome = initialise(&DUPLICATE, &state, serde_json::json!({}), "duplicate");
+    assert_eq!(
+        outcome.entry,
+        MetisStatus::Ok,
+        "the duplicate declaration is checked once the plugin value exists"
+    );
+    assert_eq!(
+        outcome.future,
+        MetisStatus::InvalidArgument,
+        "two capabilities of one name make the instance invalid"
+    );
+    finished(&state, outcome);
 }
 
 #[test]
 fn a_plugin_starts_and_stops_through_the_lifecycle_pair() {
     let _guard = serial();
     let state = HostState::new(&raw const MANY);
-    let (status, instance) = create(&MANY, &state);
-    assert_eq!(status, MetisStatus::Ok);
+    let instance = created(&MANY, &state);
     // SAFETY: the instance is live.
     assert_eq!(unsafe { (MANY.shutdown)(instance) }, MetisStatus::Ok);
     // SAFETY: the instance is live.
@@ -831,11 +974,15 @@ fn a_plugin_starts_and_stops_through_the_lifecycle_pair() {
     );
 }
 
-/// A plugin whose `started` fails yields no instance.
-#[derive(Default)]
-struct StartsBadly;
+/// A plugin whose initialisation fails, which is one of the two failure
+/// classes rather than a configuration problem.
+struct InitFails;
 
-impl Plugin for StartsBadly {
+impl Plugin for InitFails {
+    async fn init(_host: Host, _initialisation: Initialisation) -> Result<Self, PluginError> {
+        Err(PluginError::PermissionDenied("probe: no".to_string()))
+    }
+
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
         vec![descriptor("tool.never")]
     }
@@ -843,29 +990,139 @@ impl Plugin for StartsBadly {
     async fn call(&self, _call: Call, _request: Request<'_>) -> Result<Response, PluginError> {
         Ok(Response::new(Vec::new()))
     }
+}
 
-    fn started(&self, _host: &Host) -> Result<(), PluginError> {
-        Err(PluginError::PermissionDenied("probe: no".to_string()))
+static INIT_FAILS: MetisPluginTableV1 = table::<InitFails>();
+
+#[test]
+fn a_failing_initialisation_yields_no_valid_instance() {
+    let _guard = serial();
+    let state = HostState::new(&raw const INIT_FAILS);
+    let outcome = initialise(
+        &INIT_FAILS,
+        &state,
+        serde_json::json!({}),
+        "init-fails",
+    );
+    assert_eq!(
+        outcome.entry,
+        MetisStatus::Ok,
+        "the entry starts the initialisation"
+    );
+    assert_eq!(
+        outcome.future,
+        MetisStatus::PermissionDenied,
+        "the future is where a failed initialisation is reported"
+    );
+    assert!(
+        !outcome.instance.is_null(),
+        "the entry handed out a pointer, because the host destroys it after a failure"
+    );
+    finished(&state, outcome);
+    assert_eq!(state.waker_clones.load(Ordering::SeqCst), state.waker_drops.load(Ordering::SeqCst));
+}
+
+/// A plugin that reads its configuration, so a configuration it cannot read is
+/// the "does not match what this plugin declared" class.
+struct ConfigReader;
+
+/// What [`ConfigReader`] declares its configuration to be.
+#[derive(Debug, serde::Deserialize)]
+struct ReadersConfig {
+    reader: String,
+}
+
+impl Plugin for ConfigReader {
+    async fn init(_host: Host, initialisation: Initialisation) -> Result<Self, PluginError> {
+        let config: ReadersConfig = initialisation.config()?;
+        if config.reader.is_empty() {
+            return Err(PluginError::InvalidArgument(
+                "the configuration names no reader".to_string(),
+            ));
+        }
+        Ok(ConfigReader)
+    }
+
+    fn capabilities(&self) -> Vec<CapabilityDescriptor> {
+        vec![descriptor("tool.configured")]
+    }
+
+    async fn call(&self, _call: Call, _request: Request<'_>) -> Result<Response, PluginError> {
+        Response::json(&Body {
+            text: "configured".to_string(),
+        })
     }
 }
 
-static STARTS_BADLY: MetisPluginTableV1 = table::<StartsBadly>();
+static CONFIG_READER: MetisPluginTableV1 = table::<ConfigReader>();
 
 #[test]
-fn a_failing_start_yields_no_instance() {
+fn a_configuration_the_plugin_cannot_read_is_its_own_class() {
     let _guard = serial();
-    let state = HostState::new(&raw const STARTS_BADLY);
-    let (status, instance) = create(&STARTS_BADLY, &state);
-    assert_eq!(status, MetisStatus::PermissionDenied);
-    assert!(instance.is_null());
+    let state = HostState::new(&raw const CONFIG_READER);
+    let before = accounting().violations;
+
+    // The configuration the plugin declared.
+    let outcome = initialise(
+        &CONFIG_READER,
+        &state,
+        serde_json::json!({ "reader": "configured" }),
+        "configured",
+    );
+    assert_eq!(outcome.entry, MetisStatus::Ok);
+    assert_eq!(outcome.future, MetisStatus::Ok, "the declared configuration is read");
+    let instance = ok_instance(&state, outcome);
+    let mut listed = MetisBuffer::empty();
+    // SAFETY: the instance is live.
+    assert_eq!(
+        unsafe { (CONFIG_READER.list_capabilities)(instance, &mut listed) },
+        MetisStatus::Ok
+    );
+    let _ = state.read_and_release(listed);
+    // SAFETY: the instance is live and has been shut down below.
+    assert_eq!(unsafe { (CONFIG_READER.shutdown)(instance) }, MetisStatus::Ok);
+    // SAFETY: the instance is live.
+    assert_eq!(unsafe { (CONFIG_READER.destroy_instance)(instance) }, MetisStatus::Ok);
+
+    // A configuration that does not match what the plugin declared. The class
+    // is `invalid_argument`, which is what tells a caller that the
+    // configuration was the problem rather than the plugin.
+    let outcome = initialise(
+        &CONFIG_READER,
+        &state,
+        serde_json::json!({ "reader": 7 }),
+        "mismatched",
+    );
+    assert_eq!(outcome.entry, MetisStatus::Ok);
+    assert_eq!(
+        outcome.future,
+        MetisStatus::InvalidArgument,
+        "a configuration the plugin cannot read is its own class"
+    );
+    let refused = outcome.instance;
+    finished(&state, outcome);
+    assert!(!refused.is_null());
+    assert_eq!(
+        accounting().violations,
+        before,
+        "a refused initialisation is not an ownership violation"
+    );
+    assert_eq!(
+        state.waker_clones.load(Ordering::SeqCst),
+        state.waker_drops.load(Ordering::SeqCst),
+        "every waker clone the initialisation future took was released"
+    );
 }
 
 /// A plugin with nothing but the routed call, to prove the trait's shape is
 /// still usable when an author overrides nothing else.
-#[derive(Default)]
 struct Minimal;
 
 impl Plugin for Minimal {
+    async fn init(_host: Host, _initialisation: Initialisation) -> Result<Self, PluginError> {
+        Ok(Minimal)
+    }
+
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
         vec![descriptor("tool.nothing")]
     }
@@ -882,8 +1139,7 @@ static MINIMAL: MetisPluginTableV1 = table::<Minimal>();
 fn the_default_hooks_are_optional() {
     let _guard = serial();
     let state = HostState::new(&raw const MINIMAL);
-    let (status, instance) = create(&MINIMAL, &state);
-    assert_eq!(status, MetisStatus::Ok);
+    let instance = created(&MINIMAL, &state);
     assert_eq!(
         drive(&MINIMAL, &state, instance, 1_701, "tool.nothing"),
         MetisStatus::Ok

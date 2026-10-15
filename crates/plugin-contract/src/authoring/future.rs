@@ -31,12 +31,25 @@ use crate::abi::{
     MetisStatus, MetisWaker,
 };
 use crate::authoring::alloc::{plugin_alloc, violation};
-use crate::authoring::traits::{PluginError, Response};
+use crate::authoring::traits::PluginError;
 use crate::payload::metis_encode_payload;
+
+/// What an author's erased future resolves to.
+///
+/// Two futures cross this boundary: a capability answers with a response body,
+/// and the initialisation entry resolves with nothing but its success, because
+/// its out parameters were filled when the entry returned. One enum keeps one
+/// context, one vtable and one panic-containment path for both.
+pub(crate) enum FutureOutcome {
+    /// A capability answered with these response body bytes.
+    Response(Vec<u8>),
+    /// An instance finished initialising.
+    Initialised,
+}
 
 /// What the adapter boxes: the author's future, erased.
 pub(crate) type ErasedFuture =
-    Pin<Box<dyn Future<Output = Result<Response, PluginError>> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = Result<FutureOutcome, PluginError>> + Send + 'static>>;
 
 // --- the waker bridge ------------------------------------------------------
 
@@ -211,12 +224,22 @@ fn future_poll_body(
     // context is only reachable through this one `&mut`.
     let pinned = unsafe { Pin::new_unchecked(future) };
     match Future::poll(pinned, &mut context) {
-        Poll::Ready(Ok(response)) => {
+        Poll::Ready(Ok(outcome)) => {
             ctx.terminal = Some(MetisStatus::Ok);
             ctx.future = None;
+            let buffer = match outcome {
+                // The response body is wrapped in the envelope and handed to
+                // the host, which releases it through the table's
+                // `release_buffer`.
+                FutureOutcome::Response(body) => plugin_alloc(&metis_encode_payload(&body)),
+                // Initialisation has no value to hand back here: the entry
+                // returned the instance and the future handle already, and this
+                // `Ok` is what makes the instance valid.
+                FutureOutcome::Initialised => MetisBuffer::empty(),
+            };
             // SAFETY: the host owns the out parameter and releases the buffer
             // through the table's `release_buffer`.
-            unsafe { *out_value = plugin_alloc(&metis_encode_payload(&response.body)) };
+            unsafe { *out_value = buffer };
             MetisStatus::Ok
         }
         Poll::Ready(Err(error)) => {

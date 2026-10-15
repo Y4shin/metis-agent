@@ -17,14 +17,15 @@
 /**
  * ABI minor version. It travels in the function table.
  *
- * It is 1 because this revision changed the entry order under an unchanged
- * symbol and major. The minor is compared additively: a reader accepts the
- * minor it knows and any newer one, because a newer table's extra entries are
- * appended after the last entry this build reads, and it refuses an older
- * minor, because that table's entries are in the superseded order. A plugin
- * built against the superseded order is therefore refused instead of misread.
+ * It is 2 because this revision replaced the instance-creation entry with the
+ * asynchronous initialisation entry under an unchanged symbol and major. The
+ * minor is compared additively: a reader accepts the minor it knows and any
+ * newer one, because a newer table's extra entries are appended after the last
+ * entry this build reads, and it refuses an older minor, because that table's
+ * entries are in a superseded order. A plugin built against a superseded order
+ * is therefore refused instead of misread.
  */
-#define METIS_ABI_MINOR 1
+#define METIS_ABI_MINOR 2
 
 /**
  * No owner: an unset buffer, such as a null out parameter.
@@ -62,9 +63,9 @@
 #define METIS_LOG_ERROR 3
 
 /**
- * The `create_instance` pointer slot of the plugin table, after its prefix.
+ * The `init_plugin` pointer slot of the plugin table, after its prefix.
  */
-#define METIS_PLUGIN_TABLE_V1_CREATE_INSTANCE_SLOT 0
+#define METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT 0
 
 /**
  * The `destroy_instance` pointer slot of the plugin table, after its prefix.
@@ -330,22 +331,6 @@ typedef struct MetisHostApiV1 {
 } MetisHostApiV1;
 
 /**
- * Creates an instance and hands it the host table it will call back through.
- */
-typedef enum MetisStatus (*MetisCreateInstanceFn)(const struct MetisHostApiV1 *host,
-                                                  void **out_instance);
-
-/**
- * Destroys an instance. A destroyed handle is not used again.
- */
-typedef enum MetisStatus (*MetisDestroyInstanceFn)(void *instance);
-
-/**
- * Returns a plugin-allocated payload holding the capability descriptors.
- */
-typedef enum MetisStatus (*MetisListCapabilitiesFn)(void *instance, struct MetisBuffer *out_payload);
-
-/**
  * Produces a second owning waker from a borrowed one.
  */
 typedef struct MetisWaker (*MetisWakerCloneFn)(const struct MetisWaker *waker);
@@ -479,6 +464,34 @@ typedef struct MetisFutureHandle {
 } MetisFutureHandle;
 
 /**
+ * Initialises an instance and starts the future that completes it.
+ *
+ * The one payload is host-owned, borrowed for this call, and carries the
+ * plugin's own configuration and the host context as the two named parts of
+ * one body; a plugin that needs it after this call returns copies it. On
+ * `Ok` both out parameters are filled: the instance, and a plugin-owned future
+ * that must resolve `Ok` before the instance is valid. The host drives that
+ * future on its own runtime, so initialisation may await a host service and
+ * return `Pending` rather than block. On any other resolution the host drops
+ * the future and then calls `destroy_instance` on the instance pointer, which
+ * must tolerate a failed initialisation.
+ */
+typedef enum MetisStatus (*MetisInitPluginFn)(const struct MetisHostApiV1 *host,
+                                              struct MetisBuffer payload,
+                                              void **out_instance,
+                                              struct MetisFutureHandle *out_future);
+
+/**
+ * Destroys an instance. A destroyed handle is not used again.
+ */
+typedef enum MetisStatus (*MetisDestroyInstanceFn)(void *instance);
+
+/**
+ * Returns a plugin-allocated payload holding the capability descriptors.
+ */
+typedef enum MetisStatus (*MetisListCapabilitiesFn)(void *instance, struct MetisBuffer *out_payload);
+
+/**
  * The only call entry: starts a host-polled future for a capability.
  *
  * On success `*out` holds a plugin-owned future. Nothing is called back for
@@ -530,14 +543,15 @@ typedef enum MetisStatus (*MetisServiceCompleteFn)(void *instance,
                                                    struct MetisBuffer payload);
 
 /**
- * The version 1 function table, revision 1 of the contract.
+ * The version 1 function table, revision 2 of the contract.
  *
- * Append-only evolution from here: a new entry is appended after
- * `service_complete` and `size` grows to cover it. A reader compares `size`
- * against the prefix it knows before touching a field, and never decides
- * presence from a null pointer: the fields are plain function pointers,
- * because `Option<NamedFnAlias>` has no C rendering cbindgen can emit
- * (measured).
+ * Eight entries and no more: there is no counters entry and no counter of any
+ * kind is reachable through the table. Append-only evolution from here: a new
+ * entry is appended after `service_complete` and `size` grows to cover it. A
+ * reader compares `size` against the prefix it knows before touching a field,
+ * and never decides presence from a null pointer: the fields are plain
+ * function pointers, because `Option<NamedFnAlias>` has no C rendering
+ * cbindgen can emit (measured).
  */
 typedef struct MetisPluginTableV1 {
     /**
@@ -554,9 +568,10 @@ typedef struct MetisPluginTableV1 {
      */
     uint32_t abi_minor;
     /**
-     * Instance lifecycle.
+     * Instance lifecycle: construct and initialise, then hand out the future
+     * that completes the initialisation.
      */
-    MetisCreateInstanceFn create_instance;
+    MetisInitPluginFn init_plugin;
     /**
      * Instance lifecycle.
      */
@@ -597,5 +612,7 @@ typedef struct MetisPluginTableV1 {
  * and C scopes the struct tag to the prototype (measured).
  */
 typedef const struct MetisPluginTableV1 *(*MetisPluginEntryV1Fn)(void);
+
+
 
 #endif  /* METIS_PLUGIN_ABI_H */

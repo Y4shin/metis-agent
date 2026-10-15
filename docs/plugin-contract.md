@@ -68,7 +68,7 @@ the ABI version, and reads the table.
 metis_plugin_entry_v1() -> *const MetisPluginTableV1
 ```
 
-The symbol and the ABI major stay `v1` and 1, because this revision lands before the first release (section 15).
+The symbol and the ABI major stay `v1` and 1, because this revision lands before the first release (section 15). The ABI minor is 2, because the revision below replaced the instance-creation entry with the asynchronous initialisation entry under that unchanged symbol and major.
 
 ## 5. The plugin table
 
@@ -76,7 +76,10 @@ The symbol and the ABI major stay `v1` and 1, because this revision lands before
 | --- | --- | --- |
 | `size` | `usize` | Bytes of the table the plugin provides. Read first, always. |
 | `abi_major`, `abi_minor` | `u32` | Major is part of the symbol name; minor is compared additively, so a newer minor is tolerated and an older one is refused. |
-| `create_instance` | `(host: *const MetisHostApiV1, out_instance: **mut c_void) -> MetisStatus` | Builds an instance, stores the host table, runs the plugin's `started`. No instance on failure. |
+
+Eight entries and no more. There is no counters entry and no counter of any kind
+is reachable through the table.
+| `init_plugin` | `(host: *const MetisHostApiV1, payload: MetisBuffer, out_instance: **mut c_void, out_future: *mut MetisFutureHandle) -> MetisStatus` | Constructs and initialises an instance. The one payload is host-owned and carries the plugin's own configuration and the host context (section 18); on `Ok` both out parameters are filled, the instance and a plugin-owned future that must resolve `Ok` before the instance is valid. There is no separate instance-creation entry. |
 | `destroy_instance` | `(instance) -> MetisStatus` | Releases the instance. Only valid after `shutdown`. |
 | `list_capabilities` | `(instance, out_payload: *mut MetisBuffer) -> MetisStatus` | Returns a plugin-allocated payload listing capabilities, each with its name, version, and request and response schemas. |
 | `invoke_future` | `(instance, capability: *const u8, capability_len: usize, request_id: u64, payload: MetisBuffer, host: *const MetisHostApiV1, out: *mut MetisFutureHandle) -> MetisStatus` | The only call entry. On success `*out` holds a plugin-owned future. The request payload stays valid for the call only. |
@@ -184,9 +187,10 @@ still drop, but it records a protocol violation.
    plugin-allocated and freed through `release_buffer`; request payloads are
    host-owned and valid for the call only; a `service_request` payload is
    plugin-owned and freed by the host through `release_buffer`; a
-   `service_complete` payload is host-owned and borrowed for the call.
-   `release_buffer` is reentrant: the host may call it from inside
-   `service_request`.
+   `service_complete` payload is host-owned and borrowed for the call; the
+   `init_plugin` payload is host-owned and borrowed for the entry, so a plugin
+   that needs it afterwards copies it. `release_buffer` is reentrant: the host
+   may call it from inside `service_request`.
 2. **Single poller.** Only the daemon polls a future, one poll at a time. Two
    concurrent polls on one handle is a protocol violation.
 3. **No blocking in poll.** A poll returns `Pending` and asks for a service. A
@@ -223,7 +227,19 @@ still drop, but it records a protocol violation.
 pub struct Request<'a> { pub capability: &'a str, pub body: &'a [u8] }
 pub struct Response { pub body: Vec<u8> }
 
-pub trait Plugin: Default + Send + Sync + 'static {
+/// The two named parts of the initialisation payload.
+pub struct Initialisation { /* config: Value, host_context: Value */ }
+pub struct HostContext { pub instance_name: String, /* ... */ }
+
+pub trait Plugin: Send + Sync + 'static {
+    /// Construct and initialise, as one fallible asynchronous call. This is the
+    /// only way to obtain a plugin value: `Default` is not part of the trait, so
+    /// an uninitialised value is not representable.
+    fn init(host: Host, initialisation: Initialisation)
+        -> impl Future<Output = Result<Self, PluginError>> + Send
+    where
+        Self: Sized;
+
     /// Everything this plugin advertises, with schemas.
     fn capabilities(&self) -> Vec<CapabilityDescriptor>;
 
@@ -234,15 +250,16 @@ pub trait Plugin: Default + Send + Sync + 'static {
     /// A cancel was accepted; the call's token is already marked.
     fn cancel(&self, call: Call) -> Result<(), PluginError> { Ok(()) }
 
-    /// Instance start and stop.
-    fn started(&self, host: &Host) -> Result<(), PluginError> { Ok(()) }
+    /// Instance teardown.
     fn stopped(&self, host: &Host) {}
 }
 ```
 
 An author writes `async move { ... }` and decodes the request by capability name.
 Per-capability typing comes from the SDK's schema-derived facades, so the trait
-itself stays one method with no per-capability associated types.
+itself stays one method with no per-capability associated types. Initialisation
+is where an author reads its configuration and the host context, and it may
+await a host service rather than block.
 
 ## 13. Who owns what
 
@@ -273,9 +290,14 @@ boxed-future helper that replaces `async-ffi`.
    became contract text after a hand-written C plugin exposed them as guesswork.
 6. Two vtable `size` fields that were written and never read are deleted, so
    neither vtable carries a `size` field.
-7. The `metis.*` control plane (schemas, configure, counters) moves onto the
-   futures path so `invoke` can be deleted structurally rather than surviving as
-   an inline side channel.
+7. The `metis.*` control plane is unwound. Configuration becomes the lifecycle
+   entry `init_plugin` and its trait counterpart, which is where a plugin reads
+   its configuration and the host context; the schema-fetch member is redundant
+   because `list_capabilities` already returns schemas; and `counters` is
+   dropped, because no consumer exists and both candidate needs are covered by
+   the daemon's request-id policy and the host's own waker counts. The table
+   therefore gains the initialisation entry and loses the counters entry the
+   plan named.
 
 ## 15. Decisions the implementation ticket took
 
@@ -296,9 +318,12 @@ as recorded here, so an implementer does not reopen them.
 - **The two vtable `size` fields.** Deleted, with the residual recorded: a
   wrong-size plugin vtable is that plugin's own bug and is not detectable at
   load.
-- **Control plane.** `list_capabilities` stays synchronous on the table, and only
-  the per-call control capabilities (configure, counters) move onto the futures
-  path, so `create_instance` never needs a schema fetch mid-call.
+- **Control plane.** `list_capabilities` stays synchronous on the table.
+  Configuration became a lifecycle entry rather than a capability, and the
+  revision replaced instance creation with it: `init_plugin` constructs and
+  initialises in one futures-shaped call, so an instance that exists has
+  completed initialisation with its configuration. The counters member was
+  dropped rather than moved, for the reason section 14 item 7 records.
 - **Reclaim.** Caller-driven on the poll return, which is what the prototype
   proved. A daemon-side reaper thread stays daemon work, and it is the one part
   of rule 6 not proven under load.
@@ -574,3 +599,29 @@ all. Measured at `plugin-runtime` for the extraction ticket:
   101 crates before, 107 after.
 - `crc32fast` is the only added crate with a build script, and its script reads
   `rustc --version` to select cfg flags and compiles nothing.
+
+## 18. The initialisation payload
+
+`init_plugin` receives one host-owned payload buffer, carried in the envelope of
+section 9. The body is one JSON object with two named parts:
+
+| field | shape | meaning |
+| --- | --- | --- |
+| `config` | object | The plugin's own configuration, as the daemon resolved it. Its schema is the one the manifest declares. |
+| `host_context` | object | What the host tells the plugin about itself. |
+
+The host context is permissive and forward-compatible: a plugin ignores context
+fields it does not know, so a host may add one without breaking an older plugin.
+The fields this build carries are `instance_name` (the name the plugin is being
+initialised as), `data_dir` (a directory the plugin may keep its own state in,
+absent when the host set none), and `capability_version` (the highest capability
+descriptor version the host serves). Nothing secret belongs in the context; the
+host decides what it discloses, and the runtime never reads the daemon's
+configuration.
+
+A failed initialisation falls into two classes, and the status the future
+resolves with is what tells them apart. A configuration the plugin cannot read
+is `invalid_argument`: the plugin is telling the host that what it was handed
+does not match what it declared. Every other terminal status is the plugin's own
+defect. On either, the host drops the future and then calls `destroy_instance` on
+the instance pointer, which must tolerate a failed initialisation.

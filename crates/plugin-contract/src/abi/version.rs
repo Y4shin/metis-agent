@@ -4,10 +4,10 @@
 //! Two things are checked before any entry is read, and they are separate on
 //! purpose. The *version* refuses a table this build cannot interpret: a
 //! different major, or a minor older than the one this build knows, which is
-//! what refuses a stale pre-release plugin whose entries are in the superseded
-//! order instead of reading them through the new one. The *size* refuses a table
-//! too short to cover an entry this build needs, which is the presence rule the
-//! whole ABI rests on.
+//! what refuses a plugin whose entries are in a superseded order instead of
+//! reading them through this one. The *size* refuses a table too short to cover
+//! an entry this build needs, which is the presence rule the whole ABI rests
+//! on.
 //!
 //! The minor check is additive: a table reporting the minor this build knows or
 //! a newer one is accepted, because additive change inside major 1 is
@@ -49,7 +49,7 @@ pub enum MetisAbiError {
     ///
     /// Additive tolerance, in one direction only: a table reporting this
     /// build's minor or a newer one is accepted, and a table reporting an older
-    /// one is refused, because the older table's entries are in the superseded
+    /// one is refused, because the older table's entries are in a superseded
     /// order and reading them through this build's order would interpret the
     /// wrong bytes.
     MinorMismatch {
@@ -98,7 +98,7 @@ impl std::error::Error for MetisAbiError {}
 const SLOT: usize = size_of::<*const core::ffi::c_void>();
 
 const PLUGIN_ENTRIES: [(&str, usize); 8] = [
-    ("create_instance", size_of::<MetisTablePrefix>() + SLOT),
+    ("init_plugin", size_of::<MetisTablePrefix>() + SLOT),
     ("destroy_instance", size_of::<MetisTablePrefix>() + 2 * SLOT),
     (
         "list_capabilities",

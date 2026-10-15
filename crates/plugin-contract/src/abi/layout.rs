@@ -107,7 +107,7 @@ const _: () = assert!(offset_of!(MetisPluginTableV1, size) == 0);
 const _: () = assert!(offset_of!(MetisPluginTableV1, abi_major) == SIZE_T);
 const _: () = assert!(offset_of!(MetisPluginTableV1, abi_minor) == SIZE_T + U32);
 const _: () =
-    assert!(offset_of!(MetisPluginTableV1, create_instance) == size_of::<MetisTablePrefix>());
+    assert!(offset_of!(MetisPluginTableV1, init_plugin) == size_of::<MetisTablePrefix>());
 const _: () = assert!(
     offset_of!(MetisPluginTableV1, destroy_instance) == size_of::<MetisTablePrefix>() + PTR
 );
@@ -136,6 +136,10 @@ const _: () = assert!(
 // The slot constants and the presence thresholds are the same numbers, written
 // for a reader that has only a `size` to compare against.
 const _: () = assert!(
+    METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT * PTR + size_of::<MetisTablePrefix>()
+        == offset_of!(MetisPluginTableV1, init_plugin)
+);
+const _: () = assert!(
     METIS_PLUGIN_TABLE_V1_INVOKE_FUTURE_SLOT * PTR + size_of::<MetisTablePrefix>()
         == offset_of!(MetisPluginTableV1, invoke_future)
 );
@@ -145,6 +149,10 @@ const _: () = assert!(
 );
 const _: () =
     assert!(METIS_PLUGIN_TABLE_V1_SERVICE_COMPLETE_SLOT + 1 == METIS_PLUGIN_TABLE_V1_SLOTS);
+const _: () = assert!(
+    METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_THRESHOLD
+        == offset_of!(MetisPluginTableV1, init_plugin) + PTR
+);
 const _: () = assert!(
     METIS_PLUGIN_TABLE_V1_INVOKE_FUTURE_THRESHOLD
         == offset_of!(MetisPluginTableV1, invoke_future) + PTR
