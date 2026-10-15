@@ -3,8 +3,10 @@ type: ticket
 subtype: feature
 title: One release entry, quarantine and shutdown reporting
 status: stable
-workflow_state: ready
-blocked_by: [async-initialisation, call-cancellation]
+workflow_state: done
+blocked_by:
+- async-initialisation
+- call-cancellation
 size: m
 ---
 
@@ -137,3 +139,27 @@ The working tree's `docs/tasks/metis-agent-core/` changes belong to another
 effort sharing this worktree, so this landing commit stages only this ticket's
 doc directory and its deviation report; those stay uncommitted and untouched.
 The ticket's `workflow_state` and the archive stay with `finalize-task`.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `bc61feb`: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test`, `buf lint`, `buf
+breaking`, `bash scripts/regenerate-contracts.sh --check`, `bash
+scripts/build-c-plugin.sh`, `bash scripts/check-c-layout-asserts.sh`, `cargo
+check -p plugin-contract --no-default-features`, `cargo run -p plugin-fixture
+--bin abi-harness` (82 checks), `bash scripts/regenerate-abi-header.sh --check`
+and `cargo test --profile no-panic -p plugin-runtime --features no-panic-check
+--no-run` all pass. Protocol command 12 (`cargo test -p plugin-runtime --test
+sample_bundle`) does not exist on this branch, because that test file lands with
+`sample-bundle-ci` on top of it; running it here answers `no test target named
+sample_bundle`, which is an ordering fact rather than a failure.
+
+Durable lessons for a later consumer. The deadline is the caller's, so the
+release is awaited by whoever owns the clock and the drain is the caller's own
+drop of its `PluginCall` futures; a caller that keeps a call alive reads
+`ReleaseRefusal::FuturesInFlight` at its deadline rather than hanging. The
+report's `resident()` is the only handle that keeps an unreleased library
+mapped, so a daemon that reports an unreleasable plugin must hold the report.
+A start-up pass that stops hands its started `Serving` values back rather than
+releasing them, because an immediate deadline inside the pass would decide a
+deadline the runtime does not own.
