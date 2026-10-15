@@ -18,6 +18,7 @@ use std::io::{Cursor, Write};
 
 use plugin_runtime::bundle::{StagedBundle, TrustStore, extract, verify_bundle};
 use plugin_runtime::manifest::{Manifest, ManifestError};
+use serde_json::json;
 use support::signer::{self, TestChain};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -188,5 +189,38 @@ fn the_manifests_name_must_be_the_name_the_bundle_chain_carries() {
             chain: NAME.to_string(),
         },
         "the chain's name is what the manifest is compared against"
+    );
+}
+
+#[test]
+fn a_hand_written_manifest_loads_with_every_declared_field() {
+    let target = host_target();
+    let library = format!("lib/{target}/{}", library_file_name());
+    let text = hand_written(NAME);
+
+    let manifest = Manifest::parse(&text).expect("a hand-written manifest is the format");
+    assert_eq!(manifest.name(), NAME);
+    assert_eq!(manifest.version(), "1.0.0");
+    assert_eq!(manifest.abi_major(), 1);
+    assert_eq!(manifest.min_abi_minor(), 2);
+    assert_eq!(
+        manifest.libraries().get(&target).map(String::as_str),
+        Some(library.as_str()),
+        "the manifest declares one library path per target"
+    );
+    assert_eq!(manifest.capabilities().len(), 1);
+    let capability = &manifest.capabilities()[0];
+    assert_eq!(capability.name, "tool.echo");
+    assert_eq!(capability.kind, "tool");
+    assert_eq!(capability.version, 1);
+    assert_eq!(capability.request_schema, json!({"type": "object"}));
+    assert_eq!(capability.response_schema, json!({"type": "object"}));
+    assert_eq!(manifest.config_schema(), &json!({"type": "object"}));
+
+    let staged = staged_with(Some(&text));
+    let loaded = Manifest::read(&staged, NAME).expect("the bundle's own manifest loads");
+    assert_eq!(
+        loaded, manifest,
+        "the bundle's manifest is the text the author wrote"
     );
 }

@@ -18,9 +18,12 @@
 //! bundle does not carry. And the errors name what is wrong rather than only
 //! that something is, which is what makes a hand-written manifest fixable.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use plugin_contract::capability::CapabilityDescriptor;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::bundle::StagedBundle;
 
@@ -29,9 +32,18 @@ use crate::bundle::StagedBundle;
 /// The fields are private and [`Manifest::parse`] is the only way to obtain a
 /// value, so a `Manifest` is proof that the text it came from was the format
 /// and that its identity is the one the bundle's chain carries.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// It is `PartialEq` and not `Eq`, because a capability's schemas are JSON, and
+/// a JSON value is only comparable for equality.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     name: String,
+    version: String,
+    abi_major: u32,
+    min_abi_minor: u32,
+    libraries: BTreeMap<String, String>,
+    capabilities: Vec<CapabilityDescriptor>,
+    config_schema: Value,
 }
 
 /// The manifest's text, as it is written.
@@ -44,6 +56,12 @@ pub struct Manifest {
 #[derive(Deserialize)]
 struct ManifestText {
     name: String,
+    version: String,
+    abi_major: u32,
+    min_abi_minor: u32,
+    libraries: BTreeMap<String, String>,
+    capabilities: Vec<CapabilityDescriptor>,
+    config_schema: Value,
 }
 
 impl Manifest {
@@ -56,7 +74,53 @@ impl Manifest {
         let text: ManifestText = toml::from_str(text).map_err(|error| ManifestError::Invalid {
             detail: error.to_string(),
         })?;
-        Ok(Manifest { name: text.name })
+        Ok(Manifest {
+            name: text.name,
+            version: text.version,
+            abi_major: text.abi_major,
+            min_abi_minor: text.min_abi_minor,
+            libraries: text.libraries,
+            capabilities: text.capabilities,
+            config_schema: text.config_schema,
+        })
+    }
+
+    /// The plugin's name, which is also the name the bundle's chain carries.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The plugin's own version. It is recorded and never gates a load.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// The ABI major the plugin is built for, which must be this build's.
+    pub fn abi_major(&self) -> u32 {
+        self.abi_major
+    }
+
+    /// The oldest ABI minor the plugin needs, which this build's known minor
+    /// must not be lower than.
+    pub fn min_abi_minor(&self) -> u32 {
+        self.min_abi_minor
+    }
+
+    /// The library path this manifest declares for each target, relative to the
+    /// archive root.
+    pub fn libraries(&self) -> &BTreeMap<String, String> {
+        &self.libraries
+    }
+
+    /// The capability list the host trusts for discovery, with each
+    /// capability's inline schemas.
+    pub fn capabilities(&self) -> &[CapabilityDescriptor] {
+        &self.capabilities
+    }
+
+    /// The schema the daemon resolves this plugin's configuration against.
+    pub fn config_schema(&self) -> &Value {
+        &self.config_schema
     }
 
     /// Reads the manifest a staged bundle carries, for the name the bundle's
