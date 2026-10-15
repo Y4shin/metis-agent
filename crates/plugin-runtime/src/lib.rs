@@ -576,8 +576,9 @@ impl Host {
     /// completion is ever delivered into a released context" true: after it,
     /// the id is not in the pending set, so [`Instance::complete_service`]
     /// refuses a later answer instead of handing it into a context that is
-    /// gone.
-    pub fn cancel_services(&self, request_id: u64) -> Vec<PendingService> {
+    /// gone. The call's own drop is what calls this, so it is not part of the
+    /// seam a daemon drives.
+    pub(crate) fn cancel_services(&self, request_id: u64) -> Vec<PendingService> {
         let mut services = self.inner.services.lock().unwrap();
         let mut released = Vec::new();
         services.retain(|service| {
