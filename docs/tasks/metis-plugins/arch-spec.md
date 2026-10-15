@@ -28,6 +28,14 @@ the glossary's terms.
   `docs/tasks/metis-plugins/tasks/abi-hazard-fixtures/findings.md`.
 - Decision and research records for this effort:
   `docs/tasks/metis-plugins/tasks/*/task.md` and `findings.md`.
+- The four cross-cutting host-boundary decisions:
+  `docs/adr/0005-plugin-host-boundary.md`, which records one signed bundle as
+  the artifact a plugin ships as, the three start-up outcomes and their split by
+  `BundleError::is_trust_failure`, caller-owned cancellation, and one sink. The
+  sections below point at that record instead of restating the decisions.
+- Domain vocabulary: `CONTEXT.md`'s Language section, which now carries bundle,
+  manifest, capability, target, host context, disabled plugin, sink and ordering
+  ledger as settled terms.
 - Prior art in tree: `spikes/plugin-abi-mechanics/` (the table, the payload
   envelope and the header generator), `spikes/plugin-authoring-trait/` (the
   trait and the export adapters), `spikes/plugin-registry/` (the registry and
@@ -57,7 +65,10 @@ the glossary's terms.
   `plugin-runtime`, crate `plugin-fixture`, entry symbol
   `metis_plugin_entry_v1`, feature gate `authoring`, table type
   `MetisPluginTableV1`, ABI major 1.
-- Prose and comments follow `AGENTS.md`: no em-dashes anywhere.
+- Prose and comments follow `AGENTS.md`: no em-dashes anywhere. The domain
+  terms are `CONTEXT.md`'s, not this file's to define: the Language section now
+  carries bundle, manifest, capability, target, host context, disabled plugin,
+  sink and ordering ledger, and this spec uses those words.
 
 ## The landed baseline
 
@@ -188,6 +199,10 @@ hands out; it closed that obligation in the harness, and the record is in the
 Level 1 landed state below.
 
 #### `bundle-verification` (feature, l)
+
+The cross-cutting decision this ticket serves is ADR 0005's one signed bundle
+as the artifact a plugin ships as (`docs/adr/0005-plugin-host-boundary.md`); this
+section records the landed surface and does not restate the decision.
 
 **Exports.** A new `plugin_runtime::bundle` module, landed as one file,
 `crates/plugin-runtime/src/bundle.rs`, declared as `pub mod bundle` and reached
@@ -1060,6 +1075,12 @@ level-5 tickets.
 
 ### `call-cancellation` (feature, m)
 
+The cross-cutting decision this ticket serves is ADR 0005's caller-owned
+cancellation (`docs/adr/0005-plugin-host-boundary.md`): the caller owns the
+deadline and the drop, the runtime holds no timer and no default deadline, and
+the same rule reaches teardown. This section records the landed surface and does
+not restate the decision.
+
 **Exports.** `Instance::cancel_all(&self, deadline: std::time::Instant) ->
 CancelReport`, plus two new public types at the crate root:
 
@@ -1138,6 +1159,12 @@ synchronous and deadline-fed), so neither could have a failing first run, and th
 worker recorded that rather than claiming one.
 
 ### `callback-sink` (feature, m)
+
+The cross-cutting decision this ticket serves is ADR 0005's one sink carrying
+every callback (`docs/adr/0005-plugin-host-boundary.md`), set when the host is
+built, infallible and non-blocking, naming its instance, with a host that has no
+sink still legal. This section records the landed surface and does not restate
+the decision.
 
 **Exports.** `plugin_runtime::sink`, landed as
 `crates/plugin-runtime/src/sink.rs`, with one trait and one typed log level:
@@ -1242,6 +1269,11 @@ which is what makes "the existing tests pass unchanged" checkable.
 
 ### `startup-policy` (feature, m)
 
+The cross-cutting decision this ticket serves is ADR 0005's three start-up
+outcomes and their split by the single predicate `BundleError::is_trust_failure`
+(`docs/adr/0005-plugin-host-boundary.md`), which is also contract section 19.
+This section records the landed surface and does not restate the decision.
+
 **Exports.** `plugin_runtime::startup`, landed as
 `crates/plugin-runtime/src/startup.rs`:
 
@@ -1325,16 +1357,20 @@ Aggregation belongs to `teardown-and-release`. The host context is built inside
 the policy as `{"instance_name": name, "capability_version": 1}` with no
 `data_dir`, so no caller can make two plugins claim one name.
 
-**The configuration key, which is a caller contract.** The initialisation payload
+**The configuration key, settled by the contract.** The initialisation payload
 is built before the load runs, so the only name available then is the bundle
-file's stem: both the configuration lookup and the host context use it. A
-manifest's name is known only after the load or the placeholder re-read, so a
-placeholder can carry a manifest name that differs from the key its configuration
-would have used. A daemon must therefore key its configuration by file stem, or
-name its bundle files after its plugins, and `sample-bundle-ci` follows the same
-rule. This is a caller contract until a later ticket or a contract sentence names
-it, and the recorded resolution's wording (the name the load reports) is the
-artifact that disagrees with the landed rule.
+file's stem: both the configuration lookup and the host context use it. Contract
+section 19 now states the rule, and it is the source: a bundle's identity before
+its manifest is read is its file's stem, the daemon resolves configuration by
+that name, and a placeholder whose manifest could not be read is named by it;
+once the manifest is readable, the name the manifest declares is the
+registration and routing identity. A manifest's name is known only after the
+load or the placeholder re-read, so a placeholder can carry a manifest name that
+differs from the key its configuration would have used. A daemon must therefore
+key its configuration by file stem, or name its bundle files after its plugins,
+and `sample-bundle-ci` follows the same rule. The earlier sentence that called
+this a caller contract, and the recorded resolution's wording (the name the load
+reports), are superseded by contract section 19.
 
 **The placeholder path's cost.** A load that refused hands back no `Manifest`, so
 the placeholder path reads the bundle a second time: `verify_bundle`,
@@ -1393,15 +1429,14 @@ it (`RefusedUnload`, `HostInner::refuse_unload`, `Host::take_refused_unload`) is
 crate-private, so the public `Host` surface did not grow; a caller that drives
 `PluginInit` by hand still reads a refused destroy only from the ordering ledger.
 
-**A wording conflict in the effort map, for the finalize pass.** The map's
-abort list, in its `## Decisions so far`, names "a plugin defect" beside the
-cases that really do abort start-up, which contradicts stories 41 and 42 and
-this section. The landed split is what this spec records: a plugin whose
+**A wording conflict in the effort map, corrected by the finalize pass.** The
+map's abort list, in its `## Decisions so far`, once named "a plugin defect"
+beside the cases that really abort start-up, which contradicted stories 41 and 42
+and this section. The landed split is what this spec records: a plugin whose
 initialisation fails is unloaded and replaced by a disabled placeholder, and
-only a refused unload during that recovery stops start-up. The effort map's
-abort-list wording is corrected by the finalize pass, so the two artifacts do
-not disagree once this reconcile lands, and no ticket re-plans against the map's
-sentence in the meantime.
+only a refused unload during that recovery stops start-up. The finalize pass
+corrected the map's wording, so the two artifacts agree and no ticket re-plans
+against the map's old sentence.
 
 ## Level 5
 
@@ -1672,9 +1707,11 @@ failures are asserted as the landed trust refusals.
 the C fixture's build script, and the runtime's support helpers (`block_on`,
 `repository_root`). It adds no third derivation of `<os>-<arch>`: the sample
 module calls the shared test-side `bundle::host_target()`. One pre-existing
-duplication it did not add to: `tests/support/bundle.rs` and `tests/manifest.rs`
-still carry a test-side copy of that derivation while `crates/plugin-runtime/src/
-load.rs` derives the same string privately.
+duplication it did not add to: the test side's `bundle::host_target()` in
+`tests/support/bundle.rs`, which the sample module calls, sits beside
+`crates/plugin-runtime/src/load.rs`'s private derivation. `tests/manifest.rs`
+carried a second test-side copy until the close-out's coherence pass, which made
+it use the shared helper instead.
 
 **Do not reimplement.** No second packaging format, no second loader, no SDK.
 The manifest is hand-written and stays hand-written: the C fixture is the proof
@@ -1689,6 +1726,13 @@ failed on the missing event, which confirmed the builder, the manifest
 cross-check, the routing and the release ledger before the fixture change. The
 other four cases exercise landed behaviour, passed on their first run and are the
 criteria's coverage rather than new production code.
+
+**Final landed state.** The effort is complete. Every ticket landed and was
+finalized, the `dotted-instance-names` fix is in, and the close-out added ADR
+0005 and the settled vocabulary in `CONTEXT.md`'s Language section. Main's tip
+after these commits is `350e7f5`, the coherence refactor, whose parent
+`5d8cfed` records the plugin host boundary and the vocabulary; nothing is left
+to land, and the effort is ready to archive.
 
 ## Testing seams, collected
 
@@ -1768,6 +1812,44 @@ criteria's coverage rather than new production code.
   adds a dependency without the same measurement. Neither `teardown-and-release`
   nor `sample-bundle-ci` added a dependency, so the measured pair above stands
   unchanged at 97 crates for normal edges.
+
+## The close-out coherence pass
+
+The close-out's coherence commit is `350e7f5`, `refactor(coherence):
+metis-plugins`, eleven files changed, +117/-198. It fixed five landed
+inconsistencies in place, and this spec records them rather than the plan they
+superseded.
+
+- **The duplicated test support.** `crates/plugin-runtime/tests/support/bundle.rs`
+gained the shared `capability_table` and `capability_list`, and the startup,
+teardown and sample manifests render their capability list through them. The
+test-side `host_target`, `library_file_name`, `library_bytes`, `library_path`,
+`entries` and `archive` helpers are now the ones `tests/manifest.rs` builds with,
+so that file no longer re-declares the shapes and `tests/support/sample.rs` no
+longer carries its own copies.
+- **The untrue `instance destroyed` line.** `Instance::unload` now records that
+ledger line only after `destroy_instance` answered `Ok`, so a refused destroy no
+longer leaves a line claiming the opposite of what happened. The unload guards
+keep their own refusal lines, and the release still records its refusal on its
+own line.
+- **The ledger slice's attribution.** `ReleaseReport`'s documentation and
+`ReleaseReport::ledger()` now state that the slice is the host's shared ordering
+from the release's own start index and carries no instance attribution, so a
+concurrent release on one host can appear inside it. The accessor's signature is
+unchanged: the limit is documented rather than changed.
+- **The four copies of the waker rule.** The waker's liveness rule is stated once,
+in `docs/plugin-contract.md` section 8. The Rust type's doc in
+`crates/plugin-contract/src/abi/mod.rs` and the comment in the C fixture point at
+that section instead of restating the rule, and the regenerated header carries
+the pointer because it is regenerated from the Rust source.
+- **The `docs/testing.md` numbering and credential wording.** Command 3 alone
+resolves the two pinned BSR remote plugins, because `buf lint` and `buf breaking`
+resolve none, and the credential note points at `contracts/README.md`. The
+run-commands section now documents command 5, which the CI description already
+named.
+
+The pass declined two further changes and recorded them as residuals rather than
+fixing them; both are under `## Carried risks from the landed tickets` below.
 
 ## Carried risks from the landed tickets
 
@@ -1939,8 +2021,11 @@ Added by the level-3 landing:
   `<os>-<arch>` by hand. A drift between two derivations refuses a bundle that
   carries this host's library, and an exported helper would be the smaller seam.
   Narrowed by `startup-policy`, which made the derivation `pub(crate)` and reused
-  it for the placeholder re-read instead of adding a third copy; the exported
-  helper is still not there.
+  it for the placeholder re-read instead of adding a third copy. Narrowed again
+  by the close-out's coherence pass, which made `tests/manifest.rs` build through
+  the shared test-side helper instead of its own copy, so the test side has one
+  derivation. The exported helper is still not there, and the runtime keeps its
+  own private one.
 - The runtime still owns neither value type, and the landed body is a
   hand-written JSON object rather than a typed one. A contract change to the
   body's field names would reach this crate only by hand, so a reader changing
@@ -1951,7 +2036,9 @@ Closed by the level-4 landings:
 
 - The level-3 residual about the host-target derivation is narrowed, as the
   bullet above records: one `pub(crate)` derivation now serves `load.rs` and
-  `startup.rs`, while the test support module still derives its own string.
+  `startup.rs`, while the test side keeps one derivation in
+  `tests/support/bundle.rs`. `tests/manifest.rs`'s own copy was removed by the
+  close-out's coherence pass.
 - The level-3 residual about a dotted instance name stays closed and the level-4
   landings use the rule: the start-up policy's placeholder lookup matches the
   placeholder's name as a prefix and then requires the remainder to be a declared
@@ -1971,14 +2058,14 @@ Added by the level-4 landings:
   unloading them, because `Serving::release` belongs to `teardown-and-release`.
   A daemon that stops leaves instances whose libraries stay mapped, and the
   level-5 section records that this ticket owns the gap.
-- The `startup-policy` tdd report and the landing note disagree on that ticket's
-  diff: the report records twelve files, 1897 insertions and 11 deletions, the
-  landing note twelve files, 1966 insertions and 11 deletions. The other two
-  level-4 tickets show a smaller version of the same disagreement:
-  `call-cancellation`'s report records `crates/plugin-runtime/src/lib.rs` as
-  +163/-4 and 4 deletions across the three files, while its landing note records
-  +163/-5. Nothing depends on the figures, but the recorded counts should agree
-  before the effort is archived.
+- The level-4 diff counts are settled by the close-out. `call-cancellation`'s
+  working-branch diff `c3e361e..385e538` is three files, 600 insertions and 4
+  deletions, and `crates/plugin-runtime/src/lib.rs` alone accounts for 163 of the
+  insertions and all 4 deletions. `startup-policy`'s working-branch diff
+  `3159576..636f874` is twelve files, 1966 insertions and 11 deletions, which
+  matches the landing note. The tdd report's 1897 insertions was the count before
+  that working branch's last commit. Both ranges are the measured record, so
+  nothing here is outstanding.
 - The host-side rule that `Instance::cancel` and `Instance::complete_service`
   answer the frozen `NotFound` for an id the instance does not hold is recorded in
   the code, in this spec and in the effort map, but `docs/plugin-contract.md` has
@@ -2011,11 +2098,14 @@ Added by the level-4 landings:
   an absolute number.
 - The placeholder path reads a disabled bundle a second time (verification,
   extraction and the manifest read), which is the cost the recorded resolution
-  accepted; `start_plugins`'s configuration key is the bundle file's stem, which
-  is a caller contract until a later ticket or a contract sentence names it; and
-  the recorded resolution's wording for that key (the name the load reports)
-  disagrees with the landed rule, because the initialisation payload is built
-  before the load reads the manifest.
+  accepted. Its configuration key is settled rather than open: `docs/
+  plugin-contract.md` section 19 now states that a bundle's identity before its
+  manifest is read is its file's stem, that the daemon resolves configuration by
+  that name and names a placeholder by it, and that the manifest's name is the
+  registration and routing identity. The earlier wording here, that the key was
+  a caller contract until a later contract sentence named it, and the recorded
+  resolution's phrasing (the name the load reports), are superseded by that
+  section.
 
 Closed by the level-5 landing:
 
@@ -2030,22 +2120,26 @@ Closed by the level-5 landing:
 
 Added by the level-5 landing:
 
-- `Instance::unload` records the ledger line `instance destroyed` before it
-  checks what the `destroy_instance` entry answered, so a refused destroy leaves
-  a line that is not true before the error returns. It is pre-existing, no
-  in-tree test reaches it, and the release's own refusal line is the honest
-  record; moving the line after the status check is a one-line fix for a later
-  pass.
+- Closed by the close-out. `Instance::unload` used to record the ledger line
+  `instance destroyed` before it checked what the `destroy_instance` entry
+  answered, so a refused destroy left a line that was not true before the error
+  returned. The coherence pass moved the line after the status check: it is now
+  recorded only once `destroy_instance` answered `Ok`, the unload guards keep
+  their own refusal lines, and the release still records its refusal on its own
+  line.
 - The refused-`destroy_instance` branch of `Instance::unload` has no test for a
   served instance, because `crates/plugin-runtime/tests/fixtures/
   refusing_destroy.rs` fails initialisation and can therefore never produce a
   `Serving`. The release reports that branch as `ReleaseRefusal::Unload` and
   records its own line for it, but the path is unexercised.
-- The ordering ledger carries no instance attribution, so a report's ledger
-  slice could include concurrent activity on the same host. Every test in the
-  ticket gives each release its own host, where the slice is exact, and a daemon
-  that releases several instances on one host must not read the slice as one
-  instance's.
+- Closed by the close-out. The ordering ledger carries no instance attribution,
+  so a report's ledger slice could include concurrent activity on the same host.
+  The coherence pass documented the limit rather than changing the ledger:
+  `ReleaseReport`'s documentation and `ReleaseReport::ledger()` now state that
+  the slice is the host's shared ordering from the release's own start index and
+  carries no instance attribution. Every test in the ticket gives each release
+  its own host, where the slice is exact, and a daemon that releases several
+  instances on one host must not read the slice as one instance's.
 - `Serving::registry_mut()` and `StartupStop::serving()`/`into_serving()` are
   additive public surface a daemon consumes, and `StartupStop`'s derive
   narrowing is a breaking change to a landed type. No in-tree consumer was
@@ -2087,6 +2181,40 @@ Added by the level-6 landing:
 - `LoadError::Registration` stays untested, as the level-3 and level-4 entries
   above already record: nothing in the tree makes `Registry::register` refuse,
   and the gate exercises the load path without it.
+
+Left by the close-out coherence pass (both declined, recorded rather than fixed):
+
+- Making `ReleaseReport::ledger()`'s slice attributable to one instance. The host
+  keeps no per-instance data for it, because the ordering is a plain
+  `Vec<String>`, and the accessor's return type `&[String]` is a fixed surface,
+  so the pass declined the change and documented the limitation instead. This is
+  a documented limitation rather than an unfixed defect: the type doc and the
+  accessor's doc now say the slice is the host's shared ordering from the
+  release's own start index, that the ordering carries no instance attribution,
+  and that a second concurrent release on the same host can contribute lines, so
+  a caller releasing several instances on one host must not read it as one
+  instance's record. `ledger() -> &[String]` is unchanged.
+- A ledger line of its own on `Instance::unload`'s refused-destroy branch. The
+  pass declined it because the release path already records that refusal as
+  `release refused: the unload refused: ...`, which this spec calls the honest
+  record, and a second line would say the same thing twice.
+
+Closed by the close-out:
+
+- The duplicated test support across the runtime's integration tests, as `## The
+  close-out coherence pass` records: `tests/support/bundle.rs` gained the shared
+  `capability_table` and `capability_list`, the startup, teardown and sample
+  manifests render through them, and `tests/manifest.rs` builds with the shared
+  helpers instead of re-declaring them.
+- The four copies of the waker's liveness rule. It is stated once in
+  `docs/plugin-contract.md` section 8; the Rust type's doc in
+  `crates/plugin-contract/src/abi/mod.rs`, the C fixture's comment and the
+  regenerated header point at it instead of restating it.
+- The `docs/testing.md` numbering and credential wording. Command 3 alone
+  resolves the two pinned BSR remote plugins, the credential note points at
+  `contracts/README.md`, and the run-commands section documents command 5.
+- The untrue `instance destroyed` line and the ledger slice's missing instance
+  attribution, both recorded under `Added by the level-5 landing` above.
 
 ## Out of scope for this effort
 
