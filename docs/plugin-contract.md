@@ -695,7 +695,13 @@ properties = { instance = { type = "string" } }
 The plugin's own version is recorded and gates nothing. The capability list is
 what the host trusts for discovery, and the load entry cross-checks it against
 what the library reports, so a manifest that disagrees with its library disables
-that plugin rather than serving it. A library whose table reports an older minor
+that plugin rather than serving it. The cross-check is the capability names: the
+two declarations have to carry the same ones, and a name carried by one side and
+not the other refuses the load with a refusal that names that capability.
+Nothing else about a capability is cross-checked there, because the manifest's
+schemas are declared text an author writes while the library derives its own,
+and a capability's kind and version are gated where a call routes. A library
+whose table reports an older minor
 than this build's, or is too short for an entry this build needs, is refused by
 the version gate (17.6) rather than by the manifest.
 

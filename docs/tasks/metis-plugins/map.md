@@ -112,9 +112,12 @@ CI.
   plugin and leave the daemon running when the daemon's own state is known
   intact: an archive refused by the extraction rules, an ABI mismatch, a bundle
   with no library for this host's target, and a manifest that disagrees with the
-  library. A failure that leaves the state unknown aborts startup: a plugin
-  defect, a missing archive path, an absent or invalid manifest, and a refused
-  unload of a degraded plugin. A plugin that blocks inside `init_plugin` hangs
+  library. A failure that leaves the state unknown aborts startup: a missing
+  archive path, an absent or invalid manifest, and a refused unload of a
+  degraded plugin. A plugin whose initialisation fails is not one of those: it is
+  unloaded and replaced by a disabled placeholder, and a refused unload during
+  that recovery is what aborts startup, per the effort spec's stories 41 and 42
+  and the `startup-policy` ticket. A plugin that blocks inside `init_plugin` hangs
   the daemon, which is accepted and documented because the ABI is not a sandbox.
 - The `metis.*` control plane is unwound. Configuration becomes a lifecycle
   entry, `init_plugin`, on both the C ABI and the Rust trait, replacing

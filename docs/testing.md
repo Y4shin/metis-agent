@@ -343,6 +343,32 @@ Plugin host, documented in `crates/plugin-runtime`:
   fields are also read out of the example in `docs/plugin-contract.md` section
   17.9 and parsed, so the documented format and the format this build reads
   cannot drift apart.
+- `cargo test -p plugin-runtime --test load` -- the one asynchronous load entry
+  at `load_bundle`, from a bundle path to a registered, serving plugin. Every
+  bundle it reads is built inside the test the way a producer builds one: the
+  fixture cdylib's own bytes beside a manifest the test writes by hand, signed
+  with the test chain's anchor installed as a root explicitly, written to a file
+  the entry reads. The run asserts that a load returns the instance registered
+  under the manifest's name with the capabilities the library declared and that
+  a capability from the bundled fixture serves a call through the registry the
+  entry registered it in and returns its response; that each refusal names the
+  first thing that was wrong, over a path that is not there, an untrusted
+  signature decided before the manifest is read, an absent manifest, and a
+  capability list the manifest and the library disagree about, which is refused
+  by the capability that differed; that the plugin received the configuration
+  and the host context before it was registered; and that a failed
+  initialisation is refused in the class it belongs to, the configuration's
+  `invalid_argument` and the plugin's own defect, which the fixture produces for
+  the one configuration the support module reserves for it and which destroys
+  the instance after dropping its future. It also compiles an instance type with
+  no `Default` against the plugin-side trait, so an instance type that needed
+  one, or a synchronous constructor, would not build.
+- `cargo test -p plugin-runtime --test load_threads` -- the no-executor
+  property across a whole load: the thread count is taken around a load of the
+  fixture's own bundle and asserted unchanged, so verification, extraction, the
+  mapping, the plugin's asynchronous initialisation and registration add no
+  thread of their own. It has its own binary because the test harness starts a
+  thread per test.
 
 Daemon state, documented in `crates/daemon`:
 
