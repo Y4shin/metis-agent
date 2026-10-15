@@ -141,6 +141,48 @@ fn the_registry_refuses_duplicates_and_toggles_entries() {
 }
 
 #[test]
+fn an_instance_name_carrying_a_dot_routes_like_any_other() {
+    let (_, instance) = new_instance();
+    let mut registry = Registry::new();
+    registry
+        .register("metis.echo", Arc::clone(&instance))
+        .expect("a dotted instance name registers");
+
+    // The routing map is keyed on the exact qualified name, so the owner comes
+    // back unambiguously and the tool half is what follows it. Reading the tool
+    // half from the first dot instead would look for "echo.tool.echo".
+    let (entry, capability) = registry
+        .route("metis.echo.tool.echo")
+        .expect("a dotted instance name routes");
+    assert_eq!(entry.instance_name, "metis.echo");
+    assert_eq!(capability.name, "tool.echo");
+    assert!(registry.gate("metis.echo.tool.echo", 1).is_ok());
+    assert!(
+        registry
+            .validate_request("metis.echo.tool.echo", &request("hello"))
+            .is_ok()
+    );
+
+    let response = block_on(registry.call("metis.echo.tool.echo", &request("hello"), 1))
+        .expect("the call succeeds");
+    assert_eq!(support::decode(&response).echo, "hello");
+
+    // A neighbouring undotted name keeps its own namespace.
+    let (_, second) = new_instance();
+    registry
+        .register("metis", second)
+        .expect("the neighbour registers");
+    let (owner, _) = registry
+        .route("metis.tool.echo")
+        .expect("the neighbour routes");
+    assert_eq!(owner.instance_name, "metis");
+    let (owner, _) = registry
+        .route("metis.echo.tool.echo")
+        .expect("the dotted name still routes");
+    assert_eq!(owner.instance_name, "metis.echo");
+}
+
+#[test]
 fn the_version_gate_is_per_capability() {
     let (_, instance) = new_instance();
     let mut registry = Registry::new();
