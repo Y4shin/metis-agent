@@ -41,6 +41,7 @@ pub mod load;
 pub mod manifest;
 pub mod registry;
 pub mod sink;
+pub mod startup;
 
 pub use plugin_contract::capability::{CapabilityDescriptor, CapabilityKind, CapabilityList};
 pub use registry::{Entry, Registry, RegistryError, RouteError};
@@ -325,6 +326,24 @@ impl Loaded {
 /// recorded against it can only be an initialisation's.
 const INITIALISATION_REQUEST_ID: u64 = 0;
 
+/// The table entry that destroys an instance, named as the table names it.
+const DESTROY_INSTANCE_STEP: &str = "destroy_instance";
+
+/// One teardown step that answered something other than `ok`.
+///
+/// It is recorded on the host rather than only in the ordering ledger, because
+/// the caller that has to decide whether to continue cannot act on a line it
+/// would have to parse, and because the entry's own name and the status it
+/// answered are what make the refusal actionable. The record is taken rather
+/// than read, so it belongs to the load it happened during.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RefusedUnload {
+    /// The teardown entry that refused.
+    pub(crate) step: &'static str,
+    /// The status it answered.
+    pub(crate) status: MetisStatus,
+}
+
 /// One instance's in-progress initialisation, driven by the caller.
 ///
 /// It owns the plugin's initialisation future, and dropping it drops that
@@ -427,6 +446,14 @@ impl Drop for PluginInit {
         // SAFETY: the pointer came from this table's `init_plugin`, and it is
         // destroyed exactly once because this path runs once.
         let destroyed = unsafe { (self.loaded.table().destroy_instance)(self.instance) };
+        if destroyed != MetisStatus::Ok {
+            // The instance a failed initialisation handed out was not destroyed,
+            // so the plugin is still holding it. That is the one cleanup refusal
+            // a caller has to see rather than read from the ledger.
+            self.host
+                .inner
+                .refuse_unload(DESTROY_INSTANCE_STEP, destroyed);
+        }
         self.host.order(format!(
             "instance destroyed after a failed initialisation (drop {}, destroy {})",
             dropped.as_str(),
@@ -484,6 +511,9 @@ struct HostInner {
     /// The request ids of the wakes that arrived after that call's future was
     /// dropped, in arrival order.
     wakes_after_drop: Mutex<Vec<u64>>,
+    /// The first teardown step that refused while a failed initialisation was
+    /// being recovered from, if one did.
+    refused_unload: Mutex<Option<RefusedUnload>>,
 }
 
 impl HostInner {
@@ -495,6 +525,20 @@ impl HostInner {
             wakers_handed_out: AtomicUsize::new(0),
             wakers_released: AtomicUsize::new(0),
             wakes_after_drop: Mutex::new(Vec::new()),
+            refused_unload: Mutex::new(None),
+        }
+    }
+
+    /// Records a teardown step that refused, keeping the first one.
+    ///
+    /// The first refusal is the one that names what the recovery could not do,
+    /// and a later step of the same recovery runs anyway: the contract fixes the
+    /// order as drop the future, then destroy the instance, and skipping the
+    /// second would leak the handle.
+    fn refuse_unload(&self, step: &'static str, status: MetisStatus) {
+        let mut refused = lock(&self.refused_unload);
+        if refused.is_none() {
+            *refused = Some(RefusedUnload { step, status });
         }
     }
 
@@ -672,6 +716,17 @@ impl Host {
             }
             _ => *bound = Some(release),
         }
+    }
+
+    /// Takes the teardown refusal this host recorded, if one was recorded.
+    ///
+    /// A load that recovered from a failed initialisation reads it to tell an
+    /// unclean recovery from a clean one, which is what makes a refused unload
+    /// stop start-up rather than be recorded beside a plugin that failed and was
+    /// unloaded. It is taken, so the record belongs to the load it happened
+    /// during rather than to every later load through the same host.
+    pub(crate) fn take_refused_unload(&self) -> Option<RefusedUnload> {
+        lock(&self.inner.refused_unload).take()
     }
 
     /// Every log line the plugin has sent, in order.
