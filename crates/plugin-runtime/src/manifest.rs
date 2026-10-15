@@ -123,6 +123,39 @@ impl Manifest {
         &self.config_schema
     }
 
+    /// The library this host loads, selected from the bundle the manifest came
+    /// from.
+    ///
+    /// The manifest declares one library path per target, relative to the
+    /// archive root, and the contract fixes that path as `lib/<target>/<file
+    /// name>`. Selection resolves the declaration for `target` and answers
+    /// where it is, or the refusal that it is not there.
+    ///
+    /// Only this target's declaration is resolved. A manifest that declares
+    /// other targets, or none, is judged by what it declares for this host
+    /// alone, so a bundle carrying several targets is not asked for the ones
+    /// this host does not load.
+    pub fn select_library(
+        &self,
+        staged: &StagedBundle,
+        target: &str,
+    ) -> Result<PathBuf, ManifestError> {
+        let declared =
+            self.libraries
+                .get(target)
+                .ok_or_else(|| ManifestError::NoTargetLibrary {
+                    target: target.to_string(),
+                })?;
+        let selected = staged.root().join(declared);
+        if !selected.is_file() {
+            return Err(ManifestError::LibraryNotStaged {
+                target: target.to_string(),
+                path: selected,
+            });
+        }
+        Ok(selected)
+    }
+
     /// Reads the manifest a staged bundle carries, for the name the bundle's
     /// chain carries.
     ///
@@ -186,6 +219,23 @@ pub enum ManifestError {
         /// What is wrong with the text, naming the field where there is one.
         detail: String,
     },
+    /// The manifest declares no library for this target.
+    ///
+    /// A bundle whose archive carries a library this host could stage and whose
+    /// manifest does not declare one is a disagreement about what is inside it,
+    /// which is why this refusal is the manifest's and not the extractor's.
+    NoTargetLibrary {
+        /// The target this host asked for.
+        target: String,
+    },
+    /// The manifest declares a library for this target that the bundle does not
+    /// carry there.
+    LibraryNotStaged {
+        /// The target this host asked for.
+        target: String,
+        /// The path the declaration names, which is not a file.
+        path: PathBuf,
+    },
     /// The manifest declares a name that is not the name the bundle's
     /// leaf-authorising certificate carries.
     NameMismatch {
@@ -213,6 +263,17 @@ impl std::fmt::Display for ManifestError {
                     "the manifest is not the format an author writes: {detail}"
                 )
             }
+            ManifestError::NoTargetLibrary { target } => {
+                write!(
+                    f,
+                    "the manifest declares no library for the target {target}"
+                )
+            }
+            ManifestError::LibraryNotStaged { target, path } => write!(
+                f,
+                "the manifest declares the library {target} at {}, and the bundle does not carry it",
+                path.display()
+            ),
             ManifestError::NameMismatch { declared, chain } => write!(
                 f,
                 "the manifest names the plugin {declared}, and the bundle's chain names {chain}"

@@ -112,13 +112,23 @@ fn staged_with(manifest: Option<&str>) -> StagedBundle {
 }
 
 /// The manifest an author writes by hand, which is what every bundle here
-/// carries.
+/// carries, declaring the library this host needs.
 ///
-/// The text is a literal with the target and the library's file name filled in,
-/// not a serialisation of any type in this tree: the format belongs to the
-/// author, and a hand-written manifest is what proves it.
+/// The text is a literal, not a serialisation of any type in this tree: the
+/// format belongs to the author, and a hand-written manifest is what proves it.
 fn hand_written(name: &str) -> String {
     let target = host_target();
+    hand_written_with(
+        name,
+        &format!(
+            "{target} = \"lib/{target}/{library}\"",
+            library = library_file_name()
+        ),
+    )
+}
+
+/// The same hand-written manifest, with the given `[libraries]` declarations.
+fn hand_written_with(name: &str, libraries: &str) -> String {
     format!(
         r#"# A hand-written manifest: the proof that packaging a plugin needs no
 # generator. The host trusts this list for discovery.
@@ -130,7 +140,7 @@ min_abi_minor = 2
 
 # One library path per target, relative to the archive root.
 [libraries]
-{target} = "lib/{target}/{library}"
+{libraries}
 
 # The capability list, with each capability's inline schemas.
 [[capabilities]]
@@ -147,9 +157,18 @@ type = "object"
 # The configuration schema the host resolves the plugin's configuration with.
 [config_schema]
 type = "object"
-"#,
-        library = library_file_name(),
+"#
     )
+}
+
+/// A target that is not this host's, so a bundle can carry more than this host
+/// needs.
+fn other_target() -> String {
+    if host_target() == "linux-x86_64" {
+        "macos-aarch64".to_string()
+    } else {
+        "linux-x86_64".to_string()
+    }
 }
 
 #[test]
@@ -222,5 +241,110 @@ fn a_hand_written_manifest_loads_with_every_declared_field() {
     assert_eq!(
         loaded, manifest,
         "the bundle's manifest is the text the author wrote"
+    );
+}
+
+#[test]
+fn selection_chooses_this_hosts_library_and_leaves_the_other_targets_declaration_alone() {
+    let target = host_target();
+    let other = other_target();
+    // The bundle carries both targets' files, and the manifest declares both,
+    // but the other target's declaration names a file this bundle does not
+    // carry: only this host's declaration is resolved.
+    let other_entry = format!("lib/{other}/libother.dylib");
+    let manifest_text = hand_written_with(
+        NAME,
+        &format!(
+            "{target} = \"lib/{target}/{library}\"
+{other} = \"{other_entry}\"",
+            library = library_file_name()
+        ),
+    );
+    let extra = [(other_entry.clone(), b"another target's bytes".to_vec())];
+    let staged = staged(&entries(&target, Some(&manifest_text), &extra), &target);
+    let manifest = Manifest::read(&staged, NAME).expect("the manifest loads");
+
+    let selected = manifest
+        .select_library(&staged, &target)
+        .expect("this host's declaration names the library the bundle carries");
+    assert_eq!(
+        selected,
+        staged
+            .root()
+            .join(library_path(&target, &library_file_name())),
+        "selection resolves this host's declaration against the staging root"
+    );
+    assert_eq!(
+        std::fs::read(&selected).expect("the selected library is a file"),
+        library_bytes(),
+        "the selected file is this host's library and nothing else"
+    );
+    assert!(
+        !staged.root().join(&other_entry).exists(),
+        "no other target's file is staged, and selection did not need one"
+    );
+
+    let error = manifest
+        .select_library(&staged, &other)
+        .expect_err("this staged bundle does not carry another target's library");
+    assert_eq!(
+        error,
+        ManifestError::LibraryNotStaged {
+            target: other.clone(),
+            path: staged.root().join(&other_entry),
+        },
+        "the refusal names the target and the declaration that is not there"
+    );
+}
+
+#[test]
+fn selection_refuses_a_bundle_that_carries_no_library_for_this_host() {
+    let target = host_target();
+    let other = other_target();
+
+    // Nothing at all is declared for this host.
+    let elsewhere = format!("lib/{other}/libother.dylib");
+    let undeclared = staged(
+        &entries(
+            &target,
+            Some(&hand_written_with(
+                NAME,
+                &format!("{other} = \"{elsewhere}\""),
+            )),
+            &[],
+        ),
+        &target,
+    );
+    let manifest = Manifest::read(&undeclared, NAME).expect("the manifest loads");
+    assert_eq!(
+        manifest.select_library(&undeclared, &target),
+        Err(ManifestError::NoTargetLibrary {
+            target: target.clone()
+        }),
+        "a manifest that declares no library for this host declares none"
+    );
+
+    // This host is declared, and the file the declaration names is not the one
+    // the bundle carries.
+    let declared = format!("lib/{target}/not-the-library.so");
+    let wrong = staged(
+        &entries(
+            &target,
+            Some(&hand_written_with(
+                NAME,
+                &format!("{target} = \"{declared}\""),
+            )),
+            &[],
+        ),
+        &target,
+    );
+    let manifest = Manifest::read(&wrong, NAME).expect("the manifest loads");
+    assert_eq!(
+        manifest.select_library(&wrong, &target),
+        Err(ManifestError::LibraryNotStaged {
+            target: target.clone(),
+            path: wrong.root().join(&declared),
+        }),
+        "a declaration the bundle does not carry is refused, naming it"
     );
 }
