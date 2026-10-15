@@ -100,6 +100,22 @@ pub enum LoadError {
     },
     /// The registry refused the instance's declaration.
     Registration(RegistryError),
+    /// The manifest's capability list and the library's own declaration
+    /// disagree.
+    ///
+    /// The manifest is what a host trusts for discovery and the library's
+    /// declaration is the cross-check, so the two have to carry the same
+    /// capabilities. The refusal names the capability that differed, because a
+    /// manifest generated from the same source as the plugin should never
+    /// disagree with it and which side is wrong decides what the author fixes.
+    CapabilityMismatch {
+        /// The capability that differed, spelled as the declaration that
+        /// carries it spells it.
+        capability: String,
+        /// What the disagreement is, naming the declaration the capability is
+        /// missing from.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for LoadError {
@@ -127,6 +143,10 @@ impl std::fmt::Display for LoadError {
                 status.as_str()
             ),
             LoadError::Registration(error) => write!(f, "{error}"),
+            LoadError::CapabilityMismatch { capability, detail } => write!(
+                f,
+                "the manifest and the library disagree about the capability list: {capability} {detail}"
+            ),
         }
     }
 }
@@ -236,6 +256,7 @@ pub async fn load_bundle(
         .await
         .map_err(|error| initialisation_refusal(&name, error))?;
     let capabilities = instance.capabilities().to_vec();
+    cross_check(&manifest, &instance)?;
     let mut registry = Registry::new();
     registry
         .register(&name, Arc::clone(&instance))
@@ -275,6 +296,52 @@ fn initialisation_refusal(plugin: &str, error: CallError) -> LoadError {
         }
         other => LoadError::Call(other),
     }
+}
+
+/// Cross-checks the manifest's capability list against what the library
+/// reports.
+///
+/// The two declarations have to carry the same capability names: the manifest
+/// is what a host trusts for discovery and the library's declaration is the
+/// cross-check, so a name on one side and not the other is a disagreement about
+/// what this bundle is. Each declaration is walked in its own order and the
+/// first difference is the one refused, so the refusal names a capability a
+/// reader can find rather than an arbitrary member of a set.
+///
+/// Only the names are compared. The manifest's schemas are declared text that
+/// an author writes, and the library derives its own, so comparing them would
+/// refuse a bundle the format is meant to allow. A capability's kind and
+/// version are gated per capability where a call routes, not here.
+fn cross_check(manifest: &Manifest, instance: &Instance) -> Result<(), LoadError> {
+    let reported = |name: &str| {
+        instance
+            .capabilities()
+            .iter()
+            .any(|capability| capability.name == name)
+    };
+    for capability in manifest.capabilities() {
+        if !reported(&capability.name) {
+            return Err(LoadError::CapabilityMismatch {
+                capability: capability.name.clone(),
+                detail: "is declared by the manifest and not by the library".to_string(),
+            });
+        }
+    }
+    let declared = |name: &str| {
+        manifest
+            .capabilities()
+            .iter()
+            .any(|capability| capability.name == name)
+    };
+    for capability in instance.capabilities() {
+        if !declared(&capability.name) {
+            return Err(LoadError::CapabilityMismatch {
+                capability: capability.name.clone(),
+                detail: "is declared by the library and not by the manifest".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// This host's target, spelled the way contract 17.8 fixes it.

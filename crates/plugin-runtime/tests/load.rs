@@ -61,11 +61,12 @@ fn host_context(instance: &str) -> Value {
 
 /// The manifest an author writes by hand, declaring exactly the capability
 /// names it is given and this host's library.
-fn hand_written(names: &[&str]) -> String {
+fn hand_written<S: AsRef<str>>(names: &[S]) -> String {
     let target = bundle::host_target();
     let capabilities: String = names
         .iter()
         .map(|name| {
+            let name = name.as_ref();
             format!(
                 "\n[[capabilities]]\nname = \"{name}\"\nkind = \"tool\"\nversion = 1\n\
                  request_schema = {{ type = \"object\" }}\n\
@@ -351,4 +352,78 @@ fn the_plugins_own_setup_failure_is_refused_as_the_plugins_defect() {
             .any(|line| line.starts_with("initialisation resolved")),
         "a failed initialisation never resolves Ok, so nothing was registered: {ordering:?}"
     );
+}
+
+/// The fixture's declared capability names with one of them replaced, so a
+/// manifest can declare a list that disagrees with the library.
+fn declared_names(replacing: &str, with: &str) -> Vec<String> {
+    let mut names: Vec<String> = CAPABILITIES.iter().map(|name| name.to_string()).collect();
+    let index = names
+        .iter()
+        .position(|name| *name == replacing)
+        .unwrap_or_else(|| panic!("the fixture declares {replacing}"));
+    names[index] = with.to_string();
+    names
+}
+
+#[test]
+fn a_manifest_capability_the_library_does_not_report_is_refused_by_name() {
+    let host = Host::new();
+    let (file, trust) = bundle::bundle_file(Some(&hand_written(&declared_names(
+        "tool.echo",
+        "tool.absent",
+    ))));
+
+    let error = refusal(
+        block_on(load_bundle(
+            &host,
+            file.path(),
+            &config("loaded"),
+            &host_context("loaded"),
+            &trust,
+        )),
+        "a manifest capability the library does not report cannot load",
+    );
+
+    match error {
+        LoadError::CapabilityMismatch { capability, .. } => assert_eq!(
+            capability, "tool.absent",
+            "the refusal names the capability the manifest declares and the library does not"
+        ),
+        other => panic!(
+            "a capability the manifest declares and the library does not is a disagreement, and this refusal is {other}"
+        ),
+    }
+}
+
+#[test]
+fn a_library_capability_the_manifest_does_not_declare_is_refused_by_name() {
+    let host = Host::new();
+    let names: Vec<String> = CAPABILITIES
+        .iter()
+        .filter(|name| **name != "tool.panic_drop")
+        .map(|name| name.to_string())
+        .collect();
+    let (file, trust) = bundle::bundle_file(Some(&hand_written(&names)));
+
+    let error = refusal(
+        block_on(load_bundle(
+            &host,
+            file.path(),
+            &config("loaded"),
+            &host_context("loaded"),
+            &trust,
+        )),
+        "a manifest that declares fewer capabilities than the library reports cannot load",
+    );
+
+    match error {
+        LoadError::CapabilityMismatch { capability, .. } => assert_eq!(
+            capability, "tool.panic_drop",
+            "the refusal names the capability the library reports and the manifest does not declare"
+        ),
+        other => panic!(
+            "a capability the manifest does not declare is a disagreement, and this refusal is {other}"
+        ),
+    }
 }
