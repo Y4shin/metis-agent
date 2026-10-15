@@ -99,6 +99,16 @@ zip = { version = "9", default-features = false, features = [
     "deflate-flate2-zlib-rs",
 ] }
 
+# The manifest is a plain text file at a bundle's root, and `toml` is the
+# reader for it: TOML is the format an author writes by hand, and the crate is
+# taken without its `display` feature because a manifest is only ever read.
+# `parse` is its parser and `serde` deserialises into the manifest's shape.
+toml = { version = "0.9", default-features = false, features = [
+    "parse",
+    "serde",
+    "std",
+] }
+
 # The bundle verifier's trusted parse path. `ed25519-dalek` verifies the
 # payload signature over the key the chain carries, `x509-cert` reads the
 # certificate chain through `der`'s strict decoder, and `sha2` computes a key

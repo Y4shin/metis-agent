@@ -30,6 +30,9 @@ ed25519-dalek.workspace = true
 x509-cert.workspace = true
 der.workspace = true
 sha2.workspace = true
+# The manifest's reader: a bundle's root manifest is TOML, which is the format
+# an author writes by hand. The workspace table explains the feature set.
+toml.workspace = true
 # The bundle extractor's archive reader, with the feature set the workspace
 # table explains: no bzip2, no zstd, no AES, and a pure-Rust deflate backend.
 zip.workspace = true

@@ -602,6 +602,117 @@ all. Measured at `plugin-runtime` for the extraction ticket:
 - `crc32fast` is the only added crate with a build script, and its script reads
   `rustc --version` to select cfg flags and compiles nothing.
 
+### 17.9 The manifest
+
+A bundle's root carries `manifest.toml`, and every bundle has one. The text is
+TOML, written by an author or by the SDK's generator, and the runtime reads it
+before it maps a library: `plugin_runtime::manifest` turns the text into a
+validated `Manifest` or into a typed refusal. The format belongs to the author,
+which is why it is documented here as fields to fill in rather than as a
+serialisation of any type, and why the C fixture's bundle is packaged by writing
+one by hand.
+
+| field | type | meaning |
+| --- | --- | --- |
+| `name` | string | The plugin's identity. It must be the name the bundle's leaf-authorising certificate carries (17.4). |
+| `version` | string | The plugin's own version. It is recorded and never gates a load. |
+| `abi_major` | integer | The ABI major the plugin is built for. It must equal this build's. |
+| `min_abi_minor` | integer | The oldest ABI minor the plugin needs. The minor this build knows must not be lower than it. There is no range syntax. |
+| `libraries` | table | One library path per target, relative to the archive root, spelled the way 17.8 fixes it: `<target> = "lib/<target>/<file name>"`. |
+| `capabilities` | array of tables | The capability list the host trusts for discovery. |
+| `capabilities[].name` | string | The name `invoke_future` addresses, without the instance qualifier the host adds. |
+| `capabilities[].kind` | string | `tool` or `provider`. A kind this build does not know is refused for that one capability. |
+| `capabilities[].version` | integer | The capability's own version, which the host gates per capability. |
+| `capabilities[].request_schema` | table | The JSON Schema of this capability's request body. |
+| `capabilities[].response_schema` | table | The JSON Schema of this capability's response body. |
+| `config_schema` | table | The JSON Schema the daemon resolves this plugin's configuration against. It is the schema of the `config` part of the initialisation payload (18). |
+
+A schema is declared as the TOML that stands for the JSON document: a table is
+an object, an array is an array, and a string, an integer, a float or a boolean
+is the JSON value of the same kind. TOML has no null, so a schema that needs one
+says so another way: `type = "null"` is a string and is fine, while a `null`
+default cannot be written here at all. A TOML date-time is not used, because it
+has no JSON counterpart. The fields may appear in any order, and a field this
+build does not know is ignored rather than refused, so a manifest a newer
+producer wrote stays readable here.
+
+```toml
+# The plugin's identity and its own version.
+name = "dev.metis.example-plugin"
+version = "1.0.0"
+
+# The ABI this plugin is built for, and the oldest minor it needs.
+abi_major = 1
+min_abi_minor = 2
+
+# One library path per target, relative to the archive root.
+[libraries]
+linux-x86_64 = "lib/linux-x86_64/libexample.so"
+
+# The capability list, with each capability's schemas written inline.
+[[capabilities]]
+name = "tool.echo"
+kind = "tool"
+version = 1
+
+[capabilities.request_schema]
+type = "object"
+required = ["echo"]
+properties = { echo = { type = "string" } }
+
+[capabilities.response_schema]
+type = "object"
+
+# The schema the daemon resolves this plugin's configuration against.
+[config_schema]
+type = "object"
+properties = { instance = { type = "string" } }
+```
+
+**What is checked, in this order, and what is refused.**
+
+1. the manifest is there. A bundle with no root manifest is the absent refusal
+   and not the invalid one, because extraction stages a bundle that carries no
+   manifest on purpose (17.8);
+2. the text is the format. A field that is missing, a value of the wrong type,
+   and text that is not TOML at all are one refusal that names what is wrong;
+3. the name the manifest declares is the name the bundle's leaf-authorising
+   certificate carries, so a bundle cannot declare an identity its own chain
+   does not carry;
+4. the ABI demand. A differing `abi_major`, and a `min_abi_minor` newer than the
+   minor this build knows, are the landed version errors, `MajorMismatch` and
+   `MinorMismatch`, because this is the landed rule read from the plugin's side
+   rather than a second rule. Both are decided before the library is opened, so
+   a plugin this build cannot serve is refused before any byte of it is read;
+5. the library for this host's target. The declaration is resolved against the
+   staging directory, and only this host's target is resolved: a manifest that
+   declares other targets, or none, is judged by what it declares for this host,
+   so a multi-target bundle is never asked for the files this host does not
+   load. A manifest that declares no library for that target, or whose
+   declaration names a file the bundle does not carry there, is refused, and the
+   refusal names the target.
+
+The plugin's own version is recorded and gates nothing. The capability list is
+what the host trusts for discovery, and the load entry cross-checks it against
+what the library reports, so a manifest that disagrees with its library disables
+that plugin rather than serving it. A library whose table reports an older minor
+than this build's, or is too short for an entry this build needs, is refused by
+the version gate (17.6) rather than by the manifest.
+
+**Dependencies.** The manifest is read by `toml` 0.9 with its default features
+off and only `parse`, `serde` and `std` on, so no display or writing path is
+compiled in. Measured at `plugin-runtime` on this ticket's landing branch before
+it and after it:
+
+- `cargo tree -p plugin-runtime --edges normal --prefix none | grep -v '(*)' |
+  sort -u | wc -l`: 84 crates before, 90 after, so the reader adds six: `toml`
+  itself, `toml_parser`, `toml_datetime` and `serde_spanned`, and `winnow`
+  twice, at 0.7.15 for `toml` and at 1.0.4 for `toml_parser`.
+- The same pipe without `--edges normal`, which includes the test-only signer:
+  98 crates before, 104 after.
+- None of the six has a build script that compiles anything, so the reader adds
+  no build step.
+
 ## 18. The initialisation payload
 
 `init_plugin` receives one host-owned payload buffer, carried in the envelope of
