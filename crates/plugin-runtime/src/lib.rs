@@ -5,7 +5,9 @@
 //! with them. It loads a cdylib, checks the version, creates an instance, reads
 //! the capability declaration, routes a call by capability name, validates the
 //! payload in both directions, polls the plugin's future, and decides when an
-//! instance is quarantined and when a library may be unloaded.
+//! instance is quarantined and when a library may be unloaded. What a plugin
+//! says outside its response payload, which is progress, events, logs and
+//! service requests, goes to the one [`sink::Sink`] the daemon installs.
 //!
 //! Two properties shape the design.
 //!
