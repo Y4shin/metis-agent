@@ -111,7 +111,7 @@ manifest = Manifest::parse(text) -> Result<Manifest, ManifestError>          man
 manifest = Manifest::read(&StagedBundle, common_name) -> Result<Manifest, ..> manifest-and-library
 loaded = unsafe { Loaded::open(lib_path, &Manifest) }                       manifest-and-library
 init = loaded.init_plugin(&host, body) -> Result<PluginInit, CallError>     abi-initialisation-entry
-serving = load_bundle(path, config, ctx, trust) -> Result<Serving, ..>      async-initialisation
+serving = load_bundle(&host, path, config, ctx, trust) -> Result<Serving, LoadError> async-initialisation
 instance.cancel_all(deadline) -> CancelReport                               call-cancellation
 Host::with_sink(sink)                                                       callback-sink
 start_plugins(dir, config, trust) -> StartupReport                          startup-policy
@@ -810,24 +810,92 @@ writes by hand, in section 17.9.
 
 ## Level 3
 
+**Landed state.** The level-3 ticket `async-initialisation` landed on the
+landing branch `task/async-initialisation` as the merge commit `f406f14`, whose
+parents are `28d22ae` (the landing branch tip, the `manifest-and-library`
+finalize) and `4cf353f` (the working branch tip). The merge was clean, the
+landed tree is byte-identical to the verified working-branch tip, and the
+branch `ticket/async-initialisation` was deleted after it. The landing line
+carries on to `0bc410b`, which records the ticket, and a level-4 chain starts
+from `0bc410b`. That base carries `plugin_runtime::load` with its two test
+binaries and its shared signed-bundle builder, the fixture's
+`DEFECTIVE_INITIALISATION`, contract 17.9's paragraph fixing the capability
+cross-check, and the two new command bullets in `docs/testing.md`. Nothing else
+lands between this ticket and the level-4 tickets.
+
 ### `async-initialisation` (feature, l)
 
-**Exports.** One asynchronous load entry on `plugin-runtime`:
-`load_bundle(bundle_path, config, host_context, &TrustStore) -> impl
-Future<Output = Result<Serving, LoadError>>`, composing verification,
-extraction, manifest validation, library selection, the ABI check, the
-initialisation call, the capability cross-check and registration. `Serving`
-carries the registered instance name, the `Arc<Instance>`, and the descriptor
-list it registered.
+**Exports.** `plugin_runtime::load`, declared as `pub mod load` by one added
+line in `crates/plugin-runtime/src/lib.rs` and landed as
+`crates/plugin-runtime/src/load.rs`. Its public surface is `load_bundle`,
+`Serving` and `LoadError`, and a dependent imports them from
+`plugin_runtime::load`.
+
+The load entry landed as a plain `async fn` with the host first:
+
+```rust
+pub async fn load_bundle(
+    host: &Host,
+    bundle_path: impl AsRef<Path>,
+    config: &serde_json::Value,
+    host_context: &serde_json::Value,
+    trust: &TrustStore,
+) -> Result<Serving, LoadError>
+```
+
+It composes `std::fs::read`, verification, extraction, manifest validation,
+library selection, the ABI check, the initialisation call, the capability
+cross-check and registration. The host parameter is not decoration. A failed
+load returns no `Serving`, so the host is the only thing a caller can read the
+initialisation ordering from, and a sink is set when the host is built, which is
+what lets `callback-sink` observe callbacks and `sample-bundle-ci` observe an
+event through the installed sink. `startup-policy` owns building the host it
+passes. The future is still caller-driven, so the caller's runtime decides when
+plugin code runs.
+
+`Serving` carries the registered instance name, the `Arc<Instance>`, the
+descriptor list it registered, and the registry it was registered in:
+`name()`, `instance()`, `capabilities()` and `registry()`. The entry builds one
+fresh `Registry::new()` per load and registers the instance into it, so
+`Serving::registry()` is the registry that routes a call to that instance.
+`teardown-and-release` reaches `Registry::unregister` and the enable and disable
+state through `Serving::registry()`, and a daemon that wants one registry for
+several plugins registers each `Serving` into its own aggregate registry through
+the same `Registry::register`, which stays the one registration path. No second
+registry type and no second registration path landed.
 
 The configuration and the host context are built by the daemon and delivered in
 one payload, and `plugin-runtime` does not own their value types: the landed
 `Initialisation` and `HostContext` live behind `plugin-contract`'s `authoring`
-feature gate, which the dependency posture keeps off for this crate. The
-plugin's setup failure falls into two classes the caller can tell apart: the
+feature gate, which the dependency posture keeps off for this crate. What landed
+is `&serde_json::Value` for both parameters, and `initialisation_body` builds the
+one `{"config", "host_context"}` object with `json!` from two private
+constants, `CONFIG_FIELD` and `HOST_CONTEXT_FIELD`, which are the only place
+those two names appear. `Initialisation` and `HostContext` are therefore
+unreachable from the runtime, and the host context's field set is kept in step
+with contract section 18 by hand rather than by the type. That duplication is
+the price of the unchanged dependency posture and is this ticket's recorded
+choice rather than an open question; the daemon, `startup-policy` and
+`sample-bundle-ci` build the same two names and their own value shapes. The
+plugin's setup failure falls into two classes the caller can tell apart, and
+they are separate values rather than one status the caller interprets: the
 plugin is defective, or the configuration does not match what the plugin
-declared. The capability cross-check refuses with the name of the capability
-that differed.
+declared. The fixture gained one public constant,
+`plugin_fixture::DEFECTIVE_INITIALISATION`, a reserved instance name that makes
+the fixture's own `init` fail with `Internal` so the plugin-defect class is
+reachable from a real bundle; no other struct literal changed and the ABI
+harness stays at its 82 checks.
+
+The capability cross-check compares capability names only. The two declarations
+are walked as name sets, the manifest's list first and then the library's, so a
+disagreement with several members reports the first difference in that order and
+the refusal names the capability that differed. Kind, version and schemas are
+not compared, which is a deliberate decision recorded in contract 17.9: the
+manifest's schemas are declared text an author writes while the library derives
+its own, so comparing them would refuse a bundle the format is meant to allow,
+and a capability's kind and version are gated where a call routes. A schema
+drift between the two sides is therefore not caught at load, and that is what
+makes `sample-bundle-ci`'s hand-written manifest reachable at all.
 
 Four landed facts shape this ticket. The initialisation call is
 `Loaded::init_plugin(&host, body) -> Result<PluginInit, CallError>` plus the
@@ -838,47 +906,108 @@ the same obligation as `Loaded::load` because it maps arbitrary native code, so
 the load entry contains one `unsafe` block whose justification is the trust the
 bundle's signature verification established and the extraction that staged the
 file; `open` decides the manifest's demand with `abi_check` before it delegates
-to `Loaded::load`. The load entry also
-confirms at its own seam that the failure ordering is the contract's: a
-`PluginInit` that never resolves `Ok` drops the plugin's future and then calls
-`destroy_instance` on the instance pointer. That runtime-seam test is this
-ticket's, because the landed tickets cover the path only at the raw ABI seams,
-in `crates/plugin-contract/src/authoring/` and in the ABI harness against the C
-plugin. The derivation of this host's target is this ticket's too, because
-`bundle::extract` takes a plain `&str` and nothing exports a helper: the string
-is `<os>-<arch>` as contract 17.8 fixes it, and the producer that writes a
-bundle has to spell it the same way.
+to `Loaded::load`. The load entry confirms at its own seam that the failure
+ordering is the contract's, which the earlier landings covered only at the raw
+ABI seams, in `crates/plugin-contract/src/authoring/` and in the ABI harness
+against the C plugin. The derivation of this host's target is this ticket's too,
+because `bundle::extract` takes a plain `&str` and nothing exports a helper: it
+landed as the private `fn host_target()` in `load.rs`, spelled `<os>-<arch>` as
+contract 17.8 fixes it. Level 6's packaging step must therefore re-derive the
+string by hand, exactly as the test support module does, and a drift between two
+derivations refuses a bundle that carries this host's library.
 
 The initialisation body is this ticket's to build, because `Initialisation` and
-`HostContext` sit behind that gate. The body is one JSON object with the two named parts
-`config` and `host_context`, and `serde_json` is already a runtime dependency,
-so the body is written by hand and `HostContext`'s field set is kept in step
-with the contract by hand. Changing the dependency posture instead is the
-alternative, and the choice is this ticket's.
+`HostContext` sit behind that gate. The body is one JSON object with the two
+named parts `config` and `host_context`, and `serde_json` was already a runtime
+dependency, so the body is written by hand and the duplication above is what it
+costs. Changing the dependency posture instead was the alternative, and the
+by-hand body is the choice that landed; no dependency moved in either
+`Cargo.toml` or `Cargo.lock`.
 
 **Existing abstractions to use.** `Registry::register`, `Instance`, `Host` and
-the payload envelope as they are. `LoadError` composes `BundleError`,
-`StageError` and `ManifestError` rather than restating them, and folds into the
-existing partition of load and dispatch, routing and registration. It classifies
-`StageError` as a value rather than matching it exhaustively, because the landed
-variant set is wider than the plan named, and the initialisation call is the
-landed `Loaded::init_plugin` plus `PluginInit`.
+the payload envelope as they are, and the initialisation call is the landed
+`Loaded::init_plugin` plus `PluginInit`. `LoadError` composes `BundleError`,
+`StageError` and `ManifestError` rather than restating them, with `From` for
+each of the three, and folds into the existing partition of load and dispatch,
+routing and registration. It classifies `StageError` as a value rather than
+matching it exhaustively, because the landed variant set is wider than the plan
+named.
+
+**`LoadError`'s landed surface, fixed here so `startup-policy` does not
+derive it again.** Nine variants: `Unreadable { path, detail }`,
+`Trust(BundleError)`, `Stage(StageError)`, `Manifest(ManifestError)`,
+`Call(CallError)`, `ConfigurationRefused { plugin, status }`,
+`PluginDefect { plugin, status }`, `CapabilityMismatch { capability, detail }`
+and `Registration(RegistryError)`, with `Display`, `Error` and `From` for the
+three composed types. The classification a consumer applies is by variant, not by
+the status inside one:
+
+| variant | start-up outcome |
+| --- | --- |
+| `Trust`, `Unreadable`, `Manifest` | stop start-up |
+| `Stage`, `Call`, `CapabilityMismatch`, `Registration` | disable that one plugin |
+| `ConfigurationRefused`, `PluginDefect` | a placeholder, after the plugin is unloaded |
+
+`LoadError::Call` carries the landed `CallError`, so an ABI refusal keeps its
+own typed error rather than being restated, and the two setup classes are
+separate variants rather than one status, which is what makes them tellable
+apart. Anything that matched variants against the name list the plan wrote would
+not compile, because the landed set is wider than the plan named and the two
+setup classes are split rather than being one constructor refusal.
+
+**Acceptance criteria 4 and 6 needed no product code.** The plugin-side
+asynchronous constructor and the instance type without `Default` had already
+landed with `abi-initialisation-entry`, and the crate already started no thread,
+so those two tests passed on their first run: one is a compile-time proof that
+compiles an instance type with no `Default` and only an `async fn init`, and the
+other a thread-count measurement.
+
+**The carried risk this ticket owned is closed.** The drop-then-destroy ordering
+on a failed initialisation is now proven at the load seam, where the caller
+drives the hand-off: a test asserts the ledger line
+`instance destroyed after a failed initialisation` on the host the load was
+given, and asserts that no `initialisation resolved` line appeared, so a failed
+initialisation never registers anything.
+
+**Doc edits.** Contract 17.9 gained one paragraph fixing what the capability
+cross-check compares and what it does not, because the decision is
+contract-visible to a producer, and `docs/testing.md` gained one command bullet
+per new test file, as the protocol rule requires.
 
 **Do not reimplement.** No runtime and no thread, still. No second registration
 path. No schema validation changes: `Registry::validate_request` and
 `validate_response` stay the seams. No deadline or cancellation policy in this
 ticket; that is level 4.
 
-**Seams.** One product seam: `load_bundle` driven from
-`crates/plugin-runtime/tests/load.rs` against a real bundle built in the test
-from the fixture cdylib with a hand-written manifest, dispatching one capability
-through the registry and checking the response. The ABI harness and the
-contract tests stay as they are.
+**Seams.** One product seam in two test binaries, both in `plugin-runtime`'s
+integration tests. `crates/plugin-runtime/tests/load.rs` drives `load_bundle`
+with 11 tests against real bundles built inside the test from the fixture
+cdylib's own bytes beside a manifest the test writes by hand, signed with the
+test chain's anchor installed as a root explicitly: a load into a registered
+instance carrying its declared capabilities, one capability served through the
+registry and answering with its own response, each refusal asserting its exact
+`LoadError` variant, the configuration and the host context received before
+registration, the two setup classes, and the ledger line that proves the
+failure ordering. `crates/plugin-runtime/tests/load_threads.rs` holds the
+no-executor measurement in a binary of its own, because the test harness starts
+a thread per test, so a count taken in the other binary would measure the
+harness rather than the load. Both use the new
+`crates/plugin-runtime/tests/support/bundle.rs`, which builds and signs a bundle
+on disk and reuses the landed `support/signer.rs` rather than reimplementing the
+chain, and which `sample-bundle-ci` can reuse. The ABI harness and the contract
+tests stay as they are.
 
-**Interface contract.** `load_bundle` and `Serving`, consumed by
-`startup-policy`, `call-cancellation`, `callback-sink`, `teardown-and-release`
-and `sample-bundle-ci`. The future is caller-driven, so the caller's runtime
-decides when plugin code runs.
+**Interface contract.** `plugin_runtime::load::{load_bundle, Serving,
+LoadError}`, consumed by `startup-policy`, `call-cancellation`, `callback-sink`,
+`teardown-and-release` and `sample-bundle-ci`. Every dependent call site passes
+a `&Host` first: that is what lets `callback-sink` set a sink before a load and
+`sample-bundle-ci` observe an event through it after one, and what makes the
+initialisation ordering readable at all, since a failed load returns no
+`Serving`. `startup-policy` builds the host it passes, and decides whether it
+keeps one registry per plugin or aggregates them, because each load makes its
+own. `teardown-and-release` reaches `Registry::unregister` and the enable and
+disable state through `Serving::registry()`. The future is caller-driven, so the
+caller's runtime decides when plugin code runs.
 
 ## Level 4
 
@@ -916,7 +1045,10 @@ requests also carry the request id; an event carries its topic and payload and
 no request id, because the frozen ABI callback has none; a log carries a typed
 level. Payloads arrive as owned copies taken before the plugin's buffer is
 released. Sink methods cannot fail and must not block, a panic inside one is
-caught in its own frame and recorded, and delivery is ordered per instance. A
+caught in its own frame and recorded, and delivery is ordered per instance. The
+sink is set on the `Host` that the caller passes to the landed `load_bundle`,
+which takes the host first, so a plugin loaded through that entry delivers its
+callbacks to the sink the caller installed. A
 service request's return value is the status the ABI expects, with the answer
 delivered later through the existing completion entry. The host-facing frames
 are asserted panic-free in a dedicated CI step.
@@ -961,23 +1093,56 @@ otherwise from the bundle's file name with no capabilities. Placeholders are
 listable, are excluded from the capabilities an agent would be offered, and
 answer the existing disabled route error carrying the reason.
 
+**The stop-versus-placeholder split, fixed by the landed `LoadError` so this
+ticket does not derive it again.** The policy classifies by variant, not by the
+status inside one: `Trust`, `Unreadable` and `Manifest` stop start-up; `Stage`,
+`Call` (the ABI gate), `CapabilityMismatch` and `Registration` disable that one
+plugin; and the two setup classes, `ConfigurationRefused` and `PluginDefect`,
+produce a placeholder. The setup classes are the effort spec's stories 41 and 42
+read at the load seam: a plugin whose initialisation fails is unloaded and
+replaced by a disabled placeholder, so the failure is visible and the library is
+gone, and a refused unload during that recovery stops start-up, because
+continuing would leave the daemon in a state it cannot describe. A consumer that
+matched `LoadError` against the name list the plan wrote would not compile: the
+landed set is wider than the plan named and the two setup classes are separate
+variants rather than one status.
+
 **Existing abstractions to use.** `BundleError::is_trust_failure()` for the
 stop-versus-disable split, called as a predicate rather than by matching
-`BundleError` variants, `LoadError` for the per-plugin outcomes, and
-`Registry`'s existing entry and route-error surfaces for the placeholder's
-behaviour. The policy itself is a table in the crate, documented in
-`docs/plugin-contract.md`.
+`BundleError` variants, `LoadError` for the per-plugin outcomes, classified by
+variant as above, and `Registry`'s existing entry and route-error surfaces for
+the placeholder's behaviour. The policy builds the `&Host` that `load_bundle`
+takes as its first parameter. Each load registers into a fresh registry, so the
+policy decides whether it keeps one registry per plugin or aggregates every
+`Serving` into one registry the policy owns through `Registry::register`, which
+stays the one registration path, and its disabled placeholders need a registry
+of their own, because a failed load returns no `Serving`. A placeholder named from a manifest whose name carries a dot does not
+route, which the carried risks below record, so the names here must stay dotless
+until the routing rule changes. The policy itself is a table in the crate,
+documented in `docs/plugin-contract.md`.
 
 **Do not reimplement.** No second registry and no second route error. Do not
-turn a trust failure into a placeholder, and do not turn an unreadable file into
-a stop. Do not scan the filesystem recursively or invent a discovery format
-beyond the plugin directory.
+turn a trust failure into a placeholder, and do not turn a container this build
+cannot read into a stop. A bundle file that cannot be read at all is a different
+case: the landed `LoadError::Unreadable` stops start-up, and that is what the
+split above fixes. Do not scan the filesystem recursively or invent a discovery
+format beyond the plugin directory.
 
 **Seams.** One product seam: `start_plugins(dir, config, trust)` tested from
 `crates/plugin-runtime/tests/startup.rs` over a temporary directory holding a
 mixture of good bundles, one per refusal kind, including the unknown container
 version case, which is the only refusal that degrades without its manifest ever
 being read.
+
+**A wording conflict in the effort map, for the finalize pass.** The map's
+abort list, in its `## Decisions so far`, names "a plugin defect" beside the
+cases that really do abort start-up, which contradicts stories 41 and 42 and
+this section. The landed split is what this spec records: a plugin whose
+initialisation fails is unloaded and replaced by a disabled placeholder, and
+only a refused unload during that recovery stops start-up. The effort map's
+abort-list wording is corrected by the finalize pass, so the two artifacts do
+not disagree once this reconcile lands, and no ticket re-plans against the map's
+sentence in the meantime.
 
 ## Level 5
 
@@ -989,12 +1154,15 @@ plugin's shutdown entry, drop every future, destroy the instance, unload the
 library, and report the ledger entries added. An instance that cannot be
 released stays mapped and is reported, which covers a shutdown that returns a
 non-ok status, a quarantined instance whose abandoned poll never returns, and an
-unload refused for any reason. Disabling and enabling are registry state only:
-they refuse or accept new calls and touch neither in-flight calls nor the
-library. The daemon's shutdown deadline ends the wait and produces the report.
+unload refused for any reason. Disabling and enabling are registry state only,
+reached through the landed `Serving::registry()`: they refuse or accept new
+calls and touch neither in-flight calls nor the library. The daemon's shutdown
+deadline ends the wait and produces the report.
 
 **Existing abstractions to use.** `Instance::unload`, `Instance::shutdown`,
-the ordering ledger, `instance.is_quarantined()`, and `Registry::enable`. The
+the ordering ledger, `instance.is_quarantined()`, and `Serving::registry()`,
+which is the landed path to both `Registry::unregister` and `Registry::enable`,
+because the load entry registers each instance into a registry of its own. The
 unload guards stay: the in-flight set, the last `Arc`, and the rule that the
 table is dead after `destroy_instance`, as the hazard findings settled. No
 outstanding-clone gate is added.
@@ -1019,7 +1187,11 @@ signed bundle holding the C fixture's library and a hand-written manifest,
 signed with the test key, and a CI step runs an integration test that loads that
 bundle through the public load entry, dispatches a capability, observes at
 least one event through the sink, and releases the instance with the ledger
-asserting the teardown order. The packaging step signs exactly what the verifier
+asserting the teardown order. The entry takes the host first, so the test builds
+the host with its sink, loads through it, and reads the events that sink
+recorded, and the hand-written manifest's `name` must not carry a dot, or the
+registered instance does not route, as the carried risks record. The packaging
+step signs exactly what the verifier
 signs (`DOMAIN_TAG || header || chain || archive`, with the signature's own
 bytes absent) and writes the root's certificate as the chain's last link,
 because the anchor is the last link and is trusted by its recomputed key id.
@@ -1062,7 +1234,10 @@ sink plus the release entry. The CI step is the gate.
   consumed and closed at `async-initialisation`'s load seam.
 - `Manifest::parse`, `Manifest::read`, `Manifest::select_library` and the
   `unsafe Loaded::open` in `manifest-and-library`.
-- `load_bundle(...) -> Serving` in `async-initialisation`.
+- `load_bundle(&host, path, config, ctx, &trust) -> Result<Serving, LoadError>`
+  in `async-initialisation`, over two test binaries, `tests/load.rs` and
+  `tests/load_threads.rs`, with the shared signed-bundle builder in
+  `tests/support/bundle.rs`.
 - The instance and call API, plus the ledger, in `call-cancellation`.
 - `Host::with_sink` and the four callbacks in `callback-sink`, plus the
   panic-free build check in its own CI step.
@@ -1144,6 +1319,22 @@ Closed by the level-2 landings:
   `docs/bugs/archive/plugin-contract-c-static-assert-msvc.md`, and its
   pre-archive path no longer exists.
 
+Closed by the level-3 landing:
+
+- The level-1 residual that the runtime seam had no test for an initialisation
+  future that never resolves `Ok` is closed:
+  `crates/plugin-runtime/tests/load.rs` asserts the ledger line
+  `instance destroyed after a failed initialisation` on the host the load was
+  given, which is the drop-then-destroy ordering read at the seam where the
+  caller drives the hand-off.
+- The level-2 residual that the initialisation payload's value types sit behind
+  the `authoring` gate, so the next ticket either wrote the `{"config",
+  "host_context"}` body itself or changed the posture, is settled: the body is
+  written by hand from the two private constants `CONFIG_FIELD` and
+  `HOST_CONTEXT_FIELD`, the host context's field set is kept in step with
+  contract 18 by hand, and that duplication is the recorded cost of the
+  unchanged dependency posture rather than an open choice.
+
 Still open:
 
 - `docs/tasks/metis-plugins/tasks/abi-hazard-fixtures/findings.md` line 74 still
@@ -1161,24 +1352,12 @@ Still open:
 
 Added by the level-1 landings:
 
-- The runtime seam has no test for an initialisation future that never resolves
-  `Ok`, so the host drops it and then destroys the instance pointer. The path is
-  covered only at the raw ABI seams, in
-  `crates/plugin-contract/src/authoring/` and in the ABI harness against the C
-  plugin. `async-initialisation` owns that test, and it is the one place the
-  drop-then-destroy ordering is confirmed where the caller drives the hand-off.
 - The extraction residuals: `StageError::Io` has no test, because provoking a
   real filesystem failure needs mocking; the size limits are enforced on
   declared entry sizes rather than on decompressed output; the
   staging-directory count assertion is process-global and holds only because
   every staging test in that binary takes one file-wide mutex; and two error
   mapping branches are unreachable in practice.
-- The initialisation payload's value types, `Initialisation` and `HostContext`,
-  sit behind `plugin-contract`'s `authoring` feature, which the dependency
-  posture keeps off for `plugin-runtime`. Either the next ticket writes the
-  `{"config", "host_context"}` body itself, keeping the names and
-  `HostContext`'s field set in step by hand, or the posture changes. That is a
-  deliberate choice for the ticket that needs the body, not a settled fact.
 - Contract 17.8 describes the staging directory's name as the process id and a
   counter and omits the timestamp component the code writes, so a second
   implementation reproducing the name exactly would not match until the contract
@@ -1229,6 +1408,35 @@ Added by the level-2 landings:
   crates. A later reader must not quote 84/90, and fixing the contract text is a
   later pass. It is the second dependency number in this effort that did not
   reproduce, after section 17.7's pipeline defect.
+
+Added by the level-3 landing:
+
+- A manifest name that carries a dot does not route, because `Registry::route`
+  recovers the tool half of a qualified name with a first-dot split, so an
+  instance named `dev.metis.test-plugin` answers `RouteError::Unknown`. This
+  ticket worked around it by naming its test chain's instance without a dot and
+  recorded the workaround rather than hiding it. `startup-policy`'s placeholders
+  are named from the manifest and `sample-bundle-ci` writes its own manifest, so
+  both must keep the name dotless, or the routing rule must change first; the
+  landed registry already knows the owner from its routes map, so the fix is one
+  line, and the user's call is whether a remaining ticket carries it or it is
+  filed.
+- `LoadError::Registration` is unreachable with the in-tree fixture, because
+  nothing in the tree makes `Registry::register` refuse, so that variant has no
+  test. Its mapping is a one-line delegation and the variant stays typed.
+- The load seam's thread-count test is an integration binary of its own,
+  `crates/plugin-runtime/tests/load_threads.rs`, matching the landed convention
+  that a thread measurement cannot sit beside tests the harness runs in
+  parallel. A later seam that measures the process must follow the same rule.
+- `fn host_target()` is private to `load.rs` and the test support module derives
+  the same string independently, so level 6's packaging step must re-derive
+  `<os>-<arch>` by hand. A drift between two derivations refuses a bundle that
+  carries this host's library, and an exported helper would be the smaller seam.
+- The runtime still owns neither value type, and the landed body is a
+  hand-written JSON object rather than a typed one. A contract change to the
+  body's field names would reach this crate only by hand, so a reader changing
+  contract 18 must change the two constants in `load.rs` and the tests' own JSON
+  in the same pass.
 
 ## Out of scope for this effort
 
