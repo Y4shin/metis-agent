@@ -3,7 +3,7 @@ type: ticket
 subtype: bug
 title: Fix the waker lifecycle defects the hazard prototype measured
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 size: m
 ---
@@ -87,3 +87,25 @@ agreed they are not blockers:
 ticket started (`task: null` to `task: waker-lifecycle-fix`, the workflow
 runner's own file). It was left unstaged and untouched by this landing, so the
 landing commit carries only this implementation note.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `b30efde`, after the landing
+note above, and passes: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`, `cargo test`, `buf lint`, `buf breaking`, `bash
+scripts/regenerate-contracts.sh --check`, `bash scripts/build-c-plugin.sh`,
+`cargo check -p plugin-contract --no-default-features`, `cargo run -p
+plugin-fixture --bin abi-harness` (PASS, 73 checks), and `bash
+scripts/regenerate-abi-header.sh --check`.
+
+Durable lessons folded into the project docs: `docs/testing.md` already
+describes the waker accounting and the two new fixture capabilities, and
+`docs/tasks/metis-plugins/tasks/abi-hazard-fixtures/findings.md` now carries a
+post-fix note that the first element of `Host::waker_counts()` counts every
+owning reference the host handed out, so its prototype numbers stay readable.
+The one obligation this fix left standing is for the second host
+implementation: the ABI harness still does not release the owning waker
+reference its poll is given, and its `waker_wake` still prints an ordering line
+for a dead slot. `abi-initialisation-entry` rewrites that harness, so the
+obligation is recorded in the effort's arch spec as carried work and belongs
+with that ticket.

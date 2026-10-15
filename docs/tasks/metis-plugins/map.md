@@ -202,11 +202,20 @@ CI.
   release it either; a `wakes_after_drop` increment cannot name the call whose
   future was dropped, because `CallState` carries no request id; and a second
   `wake` on one consumed clone over-releases the `Arc`. These are tickets, not
-  decisions.
+  decisions. All three landed in `waker-lifecycle-fix` (merge `dd7e1bf`): the
+  host releases the one owning waker reference it hands a poll as soon as that
+  poll returns, `CallState` carries the request id so `Host::wakes_after_drop()`
+  names the call a late wake belongs to, and a `MetisWaker` carries a host-side
+  token so a second wake on one consumed clone is refused rather than
+  over-releasing. Two things changed relative to the tickets: the release is in
+  the host (`PluginCall::poll`), not in `crates/plugin-contract/src/authoring/`,
+  and `Host::waker_counts()`'s first element now counts every owning reference
+  the host handed out rather than the plugin's clones.
 - The hazard prototype settles two things the tickets must respect. Hazard one,
   a wake after the future was dropped, is contained by the `Arc` chain and
   recorded as a counter rather than a ledger line, so `docs/plugin-contract.md`
-  section 11 rule 4 needs its wording adjusted. Hazard two, a drop after unload,
+  section 11 rule 4 needs its wording adjusted; `waker-lifecycle-fix` adjusted
+  it, and the record now names the request id of the call it belongs to. Hazard two, a drop after unload,
   faults with `SIGSEGV` but is reachable only through the raw table, because
   `Instance::invoke` ties every future to the instance `Arc` and `unload` refuses
   while one is alive; it lands as a subprocess fault test, and an
