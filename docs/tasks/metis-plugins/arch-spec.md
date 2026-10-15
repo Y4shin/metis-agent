@@ -1011,6 +1011,24 @@ caller's runtime decides when plugin code runs.
 
 ## Level 4
 
+**Landed state, before these chains.** The bug `dotted-instance-names` landed
+after the level-3 landing line, on the landing branch
+`task/dotted-instance-names` as the merge commit `262a7f1`, whose landing line
+carries on to `1b7f1b8`, the commit that records the ticket; the effort
+finalized on main at `270c270`. The rule that landed is the one this spec now
+records: `Registry::route` derives the tool half of a qualified capability name
+from the owner the routing map returned for the exact key, so an instance name
+that carries a dot routes every capability it declares, and a dotted name and
+its undotted neighbour keep separate namespaces. The level-4 placeholders and
+the level-6 hand-written manifest may therefore carry a dot, and the level-3
+residual in the carried risks below is closed. The bug was implemented directly
+by the orchestrating parent at the operator's instruction rather than by a
+tdd-worker chain, and its ticket note says so; the ticket doc is
+`docs/tasks/metis-plugins/tickets/dotted-instance-names/ticket.md`, and the full
+CI gate is green on the landing branch. That landing sits above the level-3
+note's stated base `0bc410b` in the history, so a level-4 chain that relies on
+the rule starts from a commit that carries it.
+
 ### `call-cancellation` (feature, m)
 
 **Exports.** `Instance::cancel_all(deadline) -> CancelReport`, the drop rule on
@@ -1116,10 +1134,13 @@ takes as its first parameter. Each load registers into a fresh registry, so the
 policy decides whether it keeps one registry per plugin or aggregates every
 `Serving` into one registry the policy owns through `Registry::register`, which
 stays the one registration path, and its disabled placeholders need a registry
-of their own, because a failed load returns no `Serving`. A placeholder named from a manifest whose name carries a dot does not
-route, which the carried risks below record, so the names here must stay dotless
-until the routing rule changes. The policy itself is a table in the crate,
-documented in `docs/plugin-contract.md`.
+of their own, because a failed load returns no `Serving`. A placeholder named
+from a manifest whose name carries a dot routes like any other name, so the
+names here may carry a dot. That is the rule `dotted-instance-names` landed, and
+the carried risks below record the closure: `Registry::route` takes the tool
+half from the owner the routing map returned for the exact key, so a dotted name
+and its undotted neighbour keep separate namespaces. The policy itself is a
+table in the crate, documented in `docs/plugin-contract.md`.
 
 **Do not reimplement.** No second registry and no second route error. Do not
 turn a trust failure into a placeholder, and do not turn a container this build
@@ -1189,8 +1210,9 @@ bundle through the public load entry, dispatches a capability, observes at
 least one event through the sink, and releases the instance with the ledger
 asserting the teardown order. The entry takes the host first, so the test builds
 the host with its sink, loads through it, and reads the events that sink
-recorded, and the hand-written manifest's `name` must not carry a dot, or the
-registered instance does not route, as the carried risks record. The packaging
+recorded, and the hand-written manifest's `name` may carry a dot, because
+`dotted-instance-names` landed the routing rule that serves a dotted instance
+name like any other. The packaging
 step signs exactly what the verifier
 signs (`DOMAIN_TAG || header || chain || archive`, with the signature's own
 bytes absent) and writes the root's certificate as the chain's last link,
@@ -1411,16 +1433,23 @@ Added by the level-2 landings:
 
 Added by the level-3 landing:
 
-- A manifest name that carries a dot does not route, because `Registry::route`
-  recovers the tool half of a qualified name with a first-dot split, so an
-  instance named `dev.metis.test-plugin` answers `RouteError::Unknown`. This
-  ticket worked around it by naming its test chain's instance without a dot and
-  recorded the workaround rather than hiding it. `startup-policy`'s placeholders
-  are named from the manifest and `sample-bundle-ci` writes its own manifest, so
-  both must keep the name dotless, or the routing rule must change first; the
-  landed registry already knows the owner from its routes map, so the fix is one
-  line, and the user's call is whether a remaining ticket carries it or it is
-  filed.
+- A manifest name that carries a dot once did not route, because
+  `Registry::route` recovered the tool half of a qualified name with a first-dot
+  split, so an instance named `dev.metis.test-plugin` answered
+  `RouteError::Unknown`. This ticket worked around it by naming its test chain's
+  instance without a dot and recorded the workaround rather than hiding it.
+  Closed by `dotted-instance-names`, which landed the rule change in
+  `crates/plugin-runtime/src/registry.rs` and the test
+  `an_instance_name_carrying_a_dot_routes_like_any_other` in
+  `crates/plugin-runtime/tests/registry.rs`: the tool half comes from the owner
+  the routing map returned for the exact key, so a dotted instance name routes
+  every capability it declares and a dotted name and its undotted neighbour
+  resolve independently. `startup-policy`'s placeholders and
+  `sample-bundle-ci`'s hand-written manifest may therefore carry a dot, and the
+  two sections above say so. The fix is a direct implementation by the
+  orchestrating parent at the operator's instruction rather than a tdd-worker
+  chain delivery, and the landed-state note under `## Level 4` records its
+  commits.
 - `LoadError::Registration` is unreachable with the in-tree fixture, because
   nothing in the tree makes `Registry::register` refuse, so that variant has no
   test. Its mapping is a one-line delegation and the variant stays typed.
