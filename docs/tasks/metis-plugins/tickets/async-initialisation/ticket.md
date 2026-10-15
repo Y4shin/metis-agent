@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: One asynchronous load entry that initialises and registers a plugin
 status: stable
-workflow_state: ready
-blocked_by: [manifest-and-library]
+workflow_state: done
+blocked_by:
+- manifest-and-library
 size: l
 ---
 
@@ -109,3 +110,29 @@ and `sample-bundle-ci` must allow for it; `LoadError::Registration` is
 unreachable with the in-tree fixture and has no test; and the cross-check is
 order-insensitive by name set, so a declaration with several differences reports
 one of them.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `06b6ea0` and passes: `cargo
+fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `buf
+lint`, `buf breaking`, `bash scripts/regenerate-contracts.sh --check`, `bash
+scripts/build-c-plugin.sh`, `bash scripts/check-c-layout-asserts.sh`, `cargo
+check -p plugin-contract --no-default-features`, `cargo run -p plugin-fixture
+--bin abi-harness` and `bash scripts/regenerate-abi-header.sh --check`.
+
+One contradiction this landing exposed is fixed in the effort map, so the two
+artifacts agree: the map's abort list read as if a plugin defect aborts start-up,
+while this effort's spec (stories 41 and 42) and the `startup-policy` ticket both
+make a failed initialisation degrade to a disabled placeholder, with a refused
+unload during that recovery as the abort. The map now says so, and the arch spec
+carries the same split with the classification `startup-policy` applies.
+
+Durable lessons for the tickets that follow. `load_bundle` takes the host first,
+which is what lets `callback-sink` set a sink before a load and `sample-bundle-ci`
+observe an event after one; a failed load returns no `Serving`, so the host
+parameter is also the only way to observe the drop-then-destroy ordering. The
+registry the entry builds is per load and reachable through `Serving::registry()`,
+which `teardown-and-release` uses and `startup-policy` must decide whether to
+aggregate. Manifest names must carry no dot, and the capability cross-check
+compares names only, both of which the later tickets inherit rather than
+re-decide.
