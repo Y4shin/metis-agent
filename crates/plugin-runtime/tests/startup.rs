@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use plugin_contract::abi::{METIS_ABI_MAJOR, MetisAbiError};
+use plugin_contract::abi::{METIS_ABI_MAJOR, MetisAbiError, MetisStatus};
+use plugin_fixture::DEFECTIVE_INITIALISATION;
 use plugin_runtime::CallError;
 use plugin_runtime::bundle::{BundleError, CONTAINER_VERSION, StageError, TrustStore};
 use plugin_runtime::load::LoadError;
@@ -683,5 +684,136 @@ fn a_disabled_plugin_without_a_readable_manifest_is_named_by_its_file_and_carrie
     assert!(
         plugin.capabilities().is_empty(),
         "a plugin whose manifest was never read carries no capabilities"
+    );
+}
+
+#[test]
+fn a_plugin_whose_initialisation_fails_is_replaced_by_its_placeholder() {
+    let mut plugins = Plugins::new();
+    plugins.configure(DEFECTIVE_INITIALISATION);
+    plugins.write(
+        DEFECTIVE_INITIALISATION,
+        DEFECTIVE_INITIALISATION,
+        &Bundle::new(Some(manifest(
+            DEFECTIVE_INITIALISATION,
+            &bundle::CAPABILITIES,
+        ))),
+    );
+
+    let report = report(
+        &plugins,
+        "a plugin whose own setup fails does not stop start-up",
+    );
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    match plugin.reason() {
+        LoadError::PluginDefect { plugin, status } => {
+            assert_eq!(
+                plugin, DEFECTIVE_INITIALISATION,
+                "the refusal names the plugin that failed"
+            );
+            assert_eq!(
+                status,
+                &MetisStatus::Internal,
+                "the plugin's own failure keeps its own status"
+            );
+        }
+        other => panic!("a plugin's own setup failure is its defect, and this is {other}"),
+    }
+    assert_eq!(
+        plugin.name(),
+        DEFECTIVE_INITIALISATION,
+        "the placeholder carries the manifest's name"
+    );
+    let names: Vec<&str> = plugin
+        .capabilities()
+        .iter()
+        .map(|capability| capability.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        bundle::CAPABILITIES,
+        "the placeholder lists what the manifest declared"
+    );
+    assert!(
+        report.serving().is_empty(),
+        "a plugin whose initialisation failed does not serve"
+    );
+
+    // Unloaded, not merely refused: the recovery dropped the plugin's future
+    // and then destroyed the instance the entry handed out, which is the order
+    // the contract fixes, and nothing registered the failed plugin.
+    let ordering = report.host().ordering();
+    assert!(
+        ordering
+            .iter()
+            .any(|line| line.starts_with("instance destroyed after a failed initialisation")),
+        "the failed initialisation unloaded the instance: {ordering:?}"
+    );
+    assert!(
+        !ordering
+            .iter()
+            .any(|line| line.starts_with("initialisation resolved")),
+        "a failed initialisation never resolves Ok, so nothing was registered: {ordering:?}"
+    );
+}
+
+#[test]
+fn one_broken_bundle_among_several_leaves_the_others_loaded_and_serving() {
+    let mut plugins = Plugins::new();
+    for name in ["alpha", "beta"] {
+        plugins.configure(name);
+        plugins.write(
+            name,
+            name,
+            &Bundle::new(Some(manifest(name, &bundle::CAPABILITIES))),
+        );
+    }
+    plugins.write(
+        "broken",
+        "broken",
+        &Bundle::new(Some(manifest("broken", &bundle::CAPABILITIES)))
+            .container_version(CONTAINER_VERSION + 1),
+    );
+
+    let report = report(
+        &plugins,
+        "one broken bundle among several does not stop start-up",
+    );
+
+    let names: Vec<&str> = report
+        .serving()
+        .iter()
+        .map(|serving| serving.name())
+        .collect();
+    assert_eq!(
+        names,
+        ["alpha", "beta"],
+        "the bundles that work are loaded, in the order the directory names them"
+    );
+    let broken = disabled_plugin(&report, "only the broken bundle was disabled");
+    assert_eq!(
+        broken.name(),
+        "broken",
+        "the broken bundle is the one listed as disabled"
+    );
+
+    // Loaded and serving, not merely listed: one of the two answers a call with
+    // its own response.
+    let alpha = report
+        .serving()
+        .iter()
+        .find(|serving| serving.name() == "alpha")
+        .expect("alpha started");
+    let response = block_on(alpha.registry().call(
+        "alpha.tool.echo",
+        &support::request("hello"),
+        7,
+    ))
+    .expect("a started plugin serves a call");
+    assert_eq!(
+        support::decode(&response).echo,
+        "hello",
+        "the response is the started plugin's own"
     );
 }
