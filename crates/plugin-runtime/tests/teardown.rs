@@ -39,6 +39,7 @@ use plugin_runtime::{CallError, Host, PluginCall, RouteError};
 use serde_json::{Value, json};
 use support::block_on;
 use support::bundle;
+use support::signer::{self, TestChain};
 
 /// The name the test chain's leaf-certifying certificate carries, which is the
 /// name the manifest declares and the name the instance is registered under.
@@ -56,22 +57,70 @@ fn context(instance: &str) -> Value {
     json!({ "instance_name": instance, "capability_version": 1 })
 }
 
-/// A serving plugin loaded from the fixture's own signed bundle.
+/// A hand-written manifest for the fixture library, under `name`.
+///
+/// The text is a literal rather than a serialisation of any type in this tree,
+/// because the format belongs to the author. It is written here rather than read
+/// out of the shared support module because that module's manifest carries one
+/// fixed name, and a case here needs two instances that a report can tell apart.
+fn manifest(name: &str) -> String {
+    let target = bundle::host_target();
+    let library = bundle::library_path(&target, &bundle::library_file_name());
+    let declared: String = bundle::CAPABILITIES
+        .iter()
+        .map(|capability| {
+            format!(
+                "\n[[capabilities]]\nname = \"{capability}\"\nkind = \"tool\"\nversion = 1\n\
+                 request_schema = {{ type = \"object\" }}\n\
+                 response_schema = {{ type = \"object\" }}\n"
+            )
+        })
+        .collect();
+    format!(
+        r#"name = "{name}"
+version = "1.0.0"
+abi_major = 1
+min_abi_minor = 2
+
+[libraries]
+{target} = "{library}"
+{declared}
+[config_schema]
+type = "object"
+"#
+    )
+}
+
+/// The chain whose leaf common name is `name`, which is the name the load
+/// compares the manifest against.
+fn chain(name: &str) -> TestChain {
+    let mut specs = signer::standard_specs(3);
+    specs[0].common_name = name.to_string();
+    TestChain::build(&specs, &[1, 2, 3])
+}
+
+/// A signed bundle carrying the fixture's library under a manifest named
+/// `name`, and the trust store that accepts it.
 ///
 /// The bundle file is removed when the guard drops, which is after the load has
 /// read and staged it: the running instance needs no file.
-fn serving(host: &Host) -> Serving {
-    serving_as(host, NAME)
+fn signed_bundle(name: &str) -> (bundle::BundleFile, plugin_runtime::bundle::TrustStore) {
+    let chain = chain(name);
+    let trust = bundle::trust_for(&chain);
+    let entries = bundle::entries(Some(&manifest(name)), &[]);
+    let bytes = signer::signed_bundle(&chain, &bundle::archive(&entries));
+    (bundle::BundleFile::write(&bytes), trust)
 }
 
-/// The same, under the configuration and host context `instance` names.
+/// A serving plugin loaded from a bundle named `bundle`, whose configuration
+/// and host context name `instance`.
 ///
-/// The fixture's constructor compares those two names with each other, and its
-/// reserved names ask for a fault: this is how a case asks the fixture to refuse
-/// one teardown entry. The manifest's name is the chain's leaf common name and
-/// is not what this chooses.
-fn serving_as(host: &Host, instance: &str) -> Serving {
-    let (file, trust) = bundle::bundle_file(Some(&bundle::manifest(&bundle::CAPABILITIES)));
+/// The two names are given separately because the fixture's own constructor
+/// compares the configuration with the host context, and its reserved names ask
+/// for a fault: a case asks the fixture to refuse one teardown entry by naming
+/// the instance it initialised, while the bundle it came from keeps its own name.
+fn serving_with(host: &Host, bundle: &str, instance: &str) -> Serving {
+    let (file, trust) = signed_bundle(bundle);
     match block_on(load_bundle(
         host,
         file.path(),
@@ -82,6 +131,11 @@ fn serving_as(host: &Host, instance: &str) -> Serving {
         Ok(serving) => serving,
         Err(error) => panic!("the fixture's own bundle loads, and this one refused: {error}"),
     }
+}
+
+/// A serving plugin loaded under the name the fixture's own bundle declares.
+fn serving(host: &Host) -> Serving {
+    serving_with(host, NAME, NAME)
 }
 
 /// Polls one call once.
@@ -301,7 +355,7 @@ fn a_shutdown_that_answers_a_non_ok_status_leaves_the_library_mapped() {
     // The fixture's own reserved name asks its teardown entry to refuse, which
     // is a status no in-tree plugin could reach any other way: `stopped` is
     // infallible, and the adapter answers `internal` for a panic inside it.
-    let serving = serving_as(&host, REFUSING_SHUTDOWN);
+    let serving = serving_with(&host, NAME, REFUSING_SHUTDOWN);
     let name = serving.name().to_string();
 
     let report = block_on(serving.release(deadline()));
@@ -470,5 +524,104 @@ fn a_quarantined_instance_keeps_its_library_resident() {
     assert!(
         !ledger.iter().any(|line| line.contains("library unloaded")),
         "nothing here unloads a library: {ledger:#?}"
+    );
+}
+
+#[test]
+fn the_shutdown_deadline_ends_the_wait_and_the_report_names_every_instance() {
+    let host = Host::new();
+    // Two instances a report can tell apart by name: one whose call the caller
+    // never drops, and one whose abandoned poll quarantined it.
+    let waiting = serving_with(&host, "waiting", "waiting");
+    let instance = Arc::clone(waiting.instance());
+    let mut call = instance
+        .invoke("tool.cancellable", 9, &support::request("waits"))
+        .expect("the fixture's cancellable capability starts");
+    assert!(
+        matches!(poll_once(&mut call), Poll::Pending),
+        "the cancellable capability parks on its token"
+    );
+    drop(instance);
+    let quarantined = serving_with(&host, "quarantined", "quarantined");
+    quarantined
+        .instance()
+        .quarantine("a poll was abandoned by the watchdog");
+
+    // The daemon's own shutdown deadline: one reading, given to both releases.
+    let deadline = Instant::now() + Duration::from_millis(80);
+    let waiting_report = block_on(waiting.release(deadline));
+    assert!(
+        Instant::now() >= deadline,
+        "the wait ends at the deadline rather than before it"
+    );
+    let quarantined_report = block_on(quarantined.release(deadline));
+
+    // The report names every instance that could not be released. The release
+    // entry is per instance, so this is one report each and the daemon is what
+    // aggregates them.
+    let reports = [&waiting_report, &quarantined_report];
+    let unreleased: Vec<&str> = reports
+        .iter()
+        .filter(|report| !report.released())
+        .map(|report| report.name())
+        .collect();
+    assert_eq!(
+        unreleased,
+        vec!["waiting", "quarantined"],
+        "every instance that could not be released is named"
+    );
+    assert!(
+        reports.iter().all(|report| report.deadline() == deadline),
+        "every report names back the deadline it was given"
+    );
+    assert!(
+        waiting_report
+            .to_string()
+            .starts_with("waiting could not be released at the drain step"),
+        "the report's own words name the instance and the step: {waiting_report}"
+    );
+
+    // The call the caller never dropped is what ended the wait, and the report
+    // names it by id rather than by a count alone.
+    assert_eq!(
+        waiting_report.refusal(),
+        Some(&ReleaseRefusal::FuturesInFlight(vec![9])),
+        "the call still in flight at the deadline is named"
+    );
+    assert!(
+        waiting_report
+            .ledger()
+            .iter()
+            .any(|line| line.contains("still in flight at the deadline")),
+        "the refusal is recorded: {:#?}",
+        waiting_report.ledger()
+    );
+    assert!(
+        !waiting_report
+            .ledger()
+            .iter()
+            .any(|line| line.contains("instance quiesced")),
+        "nothing quiesces while a future is alive: {:#?}",
+        waiting_report.ledger()
+    );
+    assert!(
+        waiting_report.resident().is_some(),
+        "the library of an instance that could not be released stays mapped"
+    );
+    assert_eq!(
+        quarantined_report.refusal(),
+        Some(&ReleaseRefusal::Quarantined),
+        "the second instance is unreleased for its own reason"
+    );
+
+    // The caller's own drop is what turns the deadline into the recorded
+    // unacknowledged cancel, which is the level-4 rule read at this seam.
+    drop(call);
+    assert!(
+        host.ordering()
+            .iter()
+            .any(|line| line.contains("cancel unacknowledged")),
+        "a call dropped after the deadline is recorded: {:#?}",
+        host.ordering()
     );
 }
