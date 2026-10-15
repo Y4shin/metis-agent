@@ -7,12 +7,14 @@ status: stable
 # arch-spec, metis-plugins
 
 Effort-wide architecture spec, shared by every ticket chain in this effort. Each
-section below gives one pending ticket its planned public surface, the existing
-abstractions it must build on, what it must not reimplement, the seams the
-tdd-worker tests at, and the interface contract its dependents call. The
-spec-reconciler folds each landed ticket's committed deviation report back into
-this file, one editing pass per level, and the doc-gate on this repo's prose
-applies here too: no em-dashes, plain vocabulary, the glossary's terms.
+section below gives one ticket its landed public surface, the existing
+abstractions it built on, what it must not reimplement, the seams the tdd-worker
+tested at, and the interface contract its dependents call. Where the landed
+surface differs from the plan, the section says so and records the superseded
+shape beside it. The spec-reconciler folded each landed ticket's committed
+deviation report back into this file, one editing pass per level, and the
+doc-gate on this repo's prose applies here too: no em-dashes, plain vocabulary,
+the glossary's terms.
 
 ## Source of truth for the target state
 
@@ -115,8 +117,8 @@ serving = load_bundle(&host, path, config, ctx, trust) -> Result<Serving, LoadEr
 instance.cancel_all(deadline: Instant) -> CancelReport                       call-cancellation
 Host::with_sink(sink) + Host::for_instance(name)                             callback-sink
 start_plugins(dir, config, trust) -> Result<StartupReport, StartupStop>      startup-policy
-serving.release(deadline: Instant) -> ReleaseReport                          teardown-and-release
-pack-sample-bundle + one end-to-end CI test                                 sample-bundle-ci
+serving.release(deadline: Instant).await -> ReleaseReport                     teardown-and-release
+sample bundle builder + one end-to-end CI test                                sample-bundle-ci
 ```
 
 ## Level 0
@@ -1260,7 +1262,9 @@ qualified: &str, body: &[u8], request_id: u64) -> Result<Vec<u8>, RouteError>`.
 `DisabledPlugin` carries `name()`, `reason() -> &LoadError` and `capabilities()`,
 where the reason is the load's own typed error rather than a restatement of it.
 `StartupStop` carries `path()` and `error()` and implements `Display` and
-`Error`.
+`Error`; `teardown-and-release` then widened it with `serving()` and
+`into_serving()` and narrowed its derives to `Debug`, recorded under
+`## Level 5`.
 
 **The directory discovery rule.** Every regular file directly in the directory is
 one bundle, named by its file's stem, sorted, with no recursion and no discovery
@@ -1401,21 +1405,96 @@ sentence in the meantime.
 
 ## Level 5
 
+**Landed state.** The level-5 ticket `teardown-and-release` landed on the landing
+branch `task/teardown-and-release` as the merge commit `2e28431`
+("ticket(teardown-and-release): One release entry, quarantine and shutdown
+reporting"), whose parents are `ffd7ae2` (the landing branch tip, the
+`startup-policy` finalize commit) and `f784b74` (the working branch tip, ten
+`wip:` commits from `099dda7`). The merge was clean, the landed tree is
+byte-identical to the verified `f784b74`, and the working branch was deleted
+after it. The ticket diff over `ffd7ae2` is six files, 1309 insertions and 11
+deletions. The level-6 chain was cut from `bc61feb`, which the
+`sample-bundle-ci` note records as this ticket's landing. That base carries the
+asynchronous consuming `Serving::release` with `ReleaseReport` and
+`ReleaseRefusal`, the additive `Serving::registry_mut`, the stop hand-over
+through `StartupStop::serving()` and `into_serving()` with the narrowed
+`StartupStop` derives, the fixture's `REFUSING_SHUTDOWN` name, the new
+`crates/plugin-runtime/tests/teardown.rs`, and the teardown command bullet in
+`docs/testing.md`. Nothing else lands between this ticket and `sample-bundle-ci`.
+
 ### `teardown-and-release` (feature, m)
 
-**Exports.** `Serving::release(deadline: std::time::Instant) -> ReleaseReport`:
-unregister the instance, cancel or drain in-flight calls to the caller's
-deadline, call the plugin's shutdown entry, drop every future, destroy the
-instance, unload the library, and report the ledger entries added. The deadline
-is the same `std::time::Instant` the landed `Instance::cancel_all` takes, which
-is the coherence the level-4 landing left open, and the report is the caller's
-record rather than a wait of the runtime's. An instance that cannot be released
-stays mapped and is reported, which covers a shutdown that returns a non-ok
-status, a quarantined instance whose abandoned poll never returns, and an unload
-refused for any reason. Disabling and enabling are registry state only, reached
-through each `Serving::registry()`: they refuse or accept new calls and touch
-neither in-flight calls nor the library. The daemon's shutdown deadline ends the
-wait and produces the report.
+**Exports.** The plan fixed `Serving::release(deadline: std::time::Instant) ->
+ReleaseReport`. The landed entry consumes the `Serving` and is asynchronous:
+
+```rust
+pub async fn release(self, deadline: std::time::Instant) -> ReleaseReport
+```
+
+It unregisters the instance, cancels or drains in-flight calls to the caller's
+deadline, calls the plugin's shutdown entry, drops every future, destroys the
+instance, unloads the library, and reports the ledger entries added, in that
+order. The await is what lets it drain: the runtime hands each `PluginCall` back
+to the caller and keeps no handle on it, so "drop every future" is the caller's
+own drop and the release can only wait for it. The wait is a `poll_fn` that wakes
+once and returns `Pending`, with the deadline read in the loop condition, so the
+loop yields instead of spinning the caller's thread, and the crate still arms no
+timer and holds no default deadline. A caller that never drops a call reads
+`ReleaseRefusal::FuturesInFlight` at its deadline rather than a hang. The
+deadline is the same `std::time::Instant` the landed `Instance::cancel_all`
+takes, which is the coherence the level-4 landing left open, and the report is
+the caller's record rather than a wait of the runtime's. An instance that cannot
+be released stays mapped and is reported, which covers a shutdown that returns a
+non-ok status, a quarantined instance whose abandoned poll never returns, and an
+unload refused for any reason. The daemon's shutdown deadline ends the wait and
+produces the report.
+
+**The report types.** Two new public types landed at the crate root beside
+`Serving`, `ReleaseReport` and `ReleaseRefusal`, because the plan fixed only the
+signature and described the report's content in prose:
+
+```rust
+impl ReleaseReport {
+    fn name(&self) -> &str;
+    fn deadline(&self) -> Instant;
+    fn cancelled(&self) -> &CancelReport;
+    fn released(&self) -> bool;
+    fn refusal(&self) -> Option<&ReleaseRefusal>;
+    fn resident(&self) -> Option<&Arc<Loaded>>;
+    fn ledger(&self) -> &[String];
+}
+pub enum ReleaseRefusal {
+    Quarantined,
+    FuturesInFlight(Vec<u64>),
+    Shutdown(CallError),
+    Unload(CallError),
+}
+```
+
+`ReleaseReport` implements `Display`, and `ReleaseRefusal` carries `step()`,
+`Display` and `Error`. `resident()` is the library reference the release keeps
+when the instance could not be released, so that instance's library stays mapped
+after the report is read, and it is the only remaining handle to it.
+`ReleaseRefusal::step()` names `unload` for a quarantined instance, because the
+step a quarantine refuses is the unload, and `drain` for calls still in flight.
+The spec named no step vocabulary before this landing, so that wording is this
+ticket's.
+
+**Disabling and enabling.** They are registry state only and touch neither
+in-flight calls nor the library: they refuse or accept new calls, and enabling
+needs no reload. The plan's path, each `Serving::registry()`, could not serve the
+criterion, because `Registry::enable` takes `&mut self`; the additive
+`Serving::registry_mut(&mut self) -> &mut Registry` is the landed path and the
+surface a daemon toggles a plugin with. `registry()` is unchanged and
+`StartupReport::call` still uses it.
+
+**The fixture's part.** `plugin-fixture` gained the reserved instance name
+`REFUSING_SHUTDOWN` (`fixture-refusing-shutdown`) and its one field, whose
+teardown raises the panic the authoring adapter contains. The authoring `stopped`
+hook is infallible, so that panic is the only route to a shutdown entry that
+answers a status other than `ok`. The name joins the existing
+`DEFECTIVE_INITIALISATION` convention; a hand-written fault cdylib was rejected
+in its favour.
 
 **What the level-4 landings hand it.** Three things this ticket must follow.
 `Serving::registry()` is read per serving plugin, because `start_plugins` keeps
@@ -1427,16 +1506,22 @@ this seam, and the ledger the report names will carry the two cancellation lines
 `call <id> released <n> service request(s) the host still held` and `call <id>
 cancel unacknowledged: the plugin never resolved it as cancelled`. And a caller
 that composes the two surfaces handles `start_plugins`'s `Result`: a stop returns
-no `StartupReport`, and the `Serving` values a pass started before the stop are
-dropped without being unloaded, so unloading a `Serving` a stopped pass left
-dropped is this ticket's, whether it adds a release-on-stop path or requires the
-caller to release what it holds before the pass can stop.
+no `StartupReport`, and the landed answer to the dropped-`Serving` gap is a
+hand-over rather than a release inside the policy. `StartupStop` carries the
+`Serving` values a pass started, in start order, through `serving()` and
+`into_serving()`, and unloads nothing on that path, so the caller releases what
+it is handed. Release-on-stop with an immediate deadline was rejected because the
+deadline is the caller's and the runtime holds no timer and no default. That
+landing narrowed `StartupStop`'s derives from `Debug, Clone, PartialEq, Eq` to
+`Debug`, with a manual `Debug` for `Serving`, so a caller that cloned or compared
+one must adapt; nothing in the tree did, and the startup tests were updated.
 
 **Existing abstractions to use.** `Instance::unload`, `Instance::shutdown`,
 `Instance::cancel_all(deadline: Instant)` and its `CancelReport`, the ordering
-ledger, `instance.is_quarantined()`, `Serving::registry()`, which is the landed
-path to both `Registry::unregister` and `Registry::enable`, because the load entry
-registers each instance into a registry of its own, and the landed
+ledger, `instance.is_quarantined()`, `Serving::registry()` for
+`Registry::unregister` and the additive `Serving::registry_mut()` for
+`Registry::enable`, because the load entry registers each instance into a
+registry of its own, and the landed
 `LoadError::UnloadRefused { plugin, step, status }`, which is the typed outcome a
 refused `destroy_instance` already answers on the load path. The unload guards
 stay: the in-flight set, the last `Arc`, and the rule that the table is dead after
@@ -1447,62 +1532,163 @@ added, and that typed refusal does not imply one.
 forced unmap of a library that might still run. No live teardown or
 reconfiguration: unload happens at shutdown.
 
-**Seams.** One product seam: `Serving::release(deadline: Instant)` with the
-ledger as the assertion, tested from `crates/plugin-runtime/tests/teardown.rs`.
-One subprocess fault test for a drop after unload, because the behaviour under
-test is a fault; it runs as a child process and asserts the signal, matching the
-hazard prototype's method.
+**Seams.** One product seam: the awaited `Serving::release(self, deadline)`, the
+public instance and report surface, and the ledger as the assertion, tested from
+`crates/plugin-runtime/tests/teardown.rs`, 842 lines and nine test functions, of
+which a run passes eight and ignores one. The ignored one is the faulting child
+the drop-after-unload case spawns as a subprocess of its own test binary and
+reads as the signal the child died with, because the behaviour under test is a
+fault; the case asserts `SIGSEGV`, matching the hazard prototype's method, is
+Unix-gated, and prints `[skip]` and returns off Unix, following the pipe test's
+convention. On this Linux host it ran for real and the child's marker line
+proves the fault happens after the unload. Four cases had no failing first run,
+because the whole refusal set landed with criterion 1's slice; sensitivity was
+proved by mutation instead, where removing the drain loop fails criteria 1 and 5
+and removing the quarantine gate fails criteria 3 and 5, matching the
+`call-cancellation` precedent for a criterion that could not be RED first.
+`docs/testing.md` gained the teardown command bullet and one sentence on the
+startup bullet. No `docs/plugin-contract.md` edit: contract section 11 rule 7
+already states the teardown order.
+
+**Interface contract.** `Serving::release(self, deadline: Instant).await`,
+`ReleaseReport`, `ReleaseRefusal` and `Serving::registry_mut()` are consumed by
+`sample-bundle-ci` and by a daemon composing the start-up pass. Each call site
+awaits the release on an owned `Serving` and drops its own calls, which is what
+completes the drain, and a caller that handles `StartupStop::into_serving()`
+releases each `Serving` it is handed.
 
 ## Level 6
 
+**Landed state.** The level-6 ticket `sample-bundle-ci` landed as the gate
+`crates/plugin-runtime/tests/sample_bundle.rs`, five cases, with its packaging
+builder in `crates/plugin-runtime/tests/support/sample.rs`. The working branch
+`ticket/sample-bundle-ci` held three `wip:` commits from the base `bc61feb` to
+the tip `cb03433`, and merged into `task/sample-bundle-ci` as `1485188`: six
+files, 724 insertions and 10 deletions, with no file under
+`crates/plugin-runtime/src/`, no `Cargo.toml`, no `Cargo.lock`, no contract text
+and no generated artifact in the diff. The gate was re-run on the landing branch
+at `1485188` and reports the same five passes. All five acceptance criteria hold
+and the boxes in the ticket doc stay unchecked, as in every previous landing in
+this effort.
+
 ### `sample-bundle-ci` (feature, m)
 
-**Exports.** The end-to-end gate, not new runtime surface. A packaging step
-(`scripts/pack-sample-bundle.sh` or an equivalent test-support builder) writes a
-signed bundle holding the C fixture's library and a hand-written manifest,
-signed with the test key, and a CI step runs an integration test that drives the
-three landed entries: `load_bundle(&host, path, config, host_context, &trust)`
-with a host built by `Host::with_sink`, so the test reads the events its own sink
-recorded rather than the accessors, which answer nothing once a sink is
-installed; a capability dispatched through the `Serving` the load returned; and
-the release entry, `Serving::release(deadline: Instant)`, with the ledger
-asserting the teardown order. The hand-written manifest's `name` may carry a dot,
-because `dotted-instance-names` landed the routing rule that serves a dotted
-instance name like any other, and a gate that also drives `start_plugins` follows
-the landed naming rule: the bundle file's stem is the name the policy knows the
-bundle by and the key its configuration is resolved under, so the sample file is
-named after its plugin. The packaging step signs exactly what the verifier signs
-(`DOMAIN_TAG || header || chain || archive`, with the signature's own bytes
-absent) and writes the root's certificate as the chain's last link, because the
-anchor is the last link and is trusted by its recomputed key id. The same test
-fails when one byte of the bundle is altered or when the chain is signed by a key
-that is not a configured root. `docs/testing.md` and
-`.github/workflows/ci.yml` gain the step, and the daemon's compiled-in root set
-stays empty.
+**Exports.** No new runtime surface. The gate drives the three landed public
+entries: `load_bundle(&host, path, config, host_context, &trust)` with a host
+built by `Host::with_sink`, so the test reads the events its own sink recorded
+rather than the accessors, which answer nothing once a sink is installed; a
+capability dispatched through the `Serving` the load returned, by
+`Serving::registry().call`; and the release entry,
+`Serving::release(deadline).await`, with the ledger asserting the teardown
+order. Four of the five cases read that seam. The fifth,
+`the_test_key_is_not_a_compiled_in_root`, also calls the landed
+`plugin_runtime::bundle::verify_bundle` directly, because the claim it makes is
+about the compiled-in root set, which no load path can observe without a bundle
+it accepts. The only test-support names are `sample::NAME` and the `sample::`
+constants, which reach no consumer outside the test binary.
 
-Four landed rules constrain the packaging step. Every entry declares mode
-`0600`, because the extractor refuses any other declared mode and the `zip`
-writer writes `0o644` when a producer chooses none, so the step calls
+**The packaging step is a test-support builder, not a script.** The plan allowed
+`scripts/pack-sample-bundle.sh` or an equivalent test-support builder; the
+builder landed. It compiles the C fixture through `scripts/build-c-plugin.sh`
+once per process behind a mutex, assembles the archive through the shared
+archive writer, signs it with the shared test signer's fixed key, and writes it
+to a temporary file that is removed when its guard drops rather than committing
+an artifact that would go stale against the freshly compiled library. The signer
+holds the test key, so a shell script would need a second signer or a cargo
+helper binary. The consequence to record is that the tree has no
+producer-facing packaging command: the SDK CLI remains the only packer for a real
+author, and this ticket added no `scripts/` command.
+
+**The manifest and the library disagree through the load entry.** The plan put
+the refusal inside the packer; the runtime exposes no capability-declaration read
+without an initialised instance, so the disagreement is refused by the landed
+capability cross-check instead, and both directions are asserted as
+`LoadError::CapabilityMismatch` naming the capability that differed. The
+hand-written manifest and its capability list are literals in the support module
+rather than a serialisation of any type in the tree, so the disagreement is a
+real one rather than a list read back out of the library, which is the point of
+using the C fixture as the sample plugin.
+
+**The C fixture gained one event emission.** `crates/plugin-fixture/c/c-plugin.c`
+gained one static helper and one guarded call, so the ready capability emits the
+topic `cplugin.ready` with the body `{"ready":true}`. The fixture emitted no
+event at all before this landing, so the criterion that the gate observes an
+event through the sink was unreachable without it, and this is the one
+product-code change in the diff and the ticket's only change outside its named
+file set. The guard is the same presence-by-size rule the file already applies
+to `service_request`, and the payload is released through the plugin's own
+`release_buffer` entry. The ABI harness is unaffected at `82 checks PASS` with
+its allocation ledger at 6/6/0, and the file still compiles clean under gcc and
+clang. A reviewer who rejects that hunk should read the criterion against the
+service request the `c.timer` capability already raises, dispatch that instead,
+and revert the hunk.
+
+**The names.** The sample bundle's manifest name is the dotless `cplugin`, the
+fixture's own name, and the file is written through the shared `BundleFile`
+helper, whose name is `metis-load-test-<pid>-<nanos>-<n>.metisbnd`. The gate does
+not drive `start_plugins`, so the file-stem naming rule is not exercised here and
+the plan's condition on it does not apply to what landed. A later
+`start_plugins`-driven gate that reuses that helper would register the plugin
+under the generated stem and must rename the file or the helper first. The
+dotted-instance-name rule stays covered by `tests/registry.rs` rather than by this
+gate.
+
+**The CI step.** `.github/workflows/ci.yml` gained a `Sample bundle gate` step in
+the `check` job, directly after the ABI header regeneration check and before the
+`no-panic` step, running `devenv shell -- cargo test -p plugin-runtime --test
+sample_bundle`, which fails the job on any failure. `docs/testing.md` records the
+same command as protocol number 12, with a run-commands block for it, and the CI
+paragraph now names the sample gate before the `no-panic` check. That paragraph's
+count of contract and ABI commands stays accurate, because the gate is a sixth
+step rather than one of the five ABI commands. The daemon's compiled-in root set
+stays empty, so no shipped build trusts the test key.
+
+**Four landed rules constrain the builder.** Every entry declares mode `0600`,
+because the extractor refuses any other declared mode and the `zip` writer writes
+`0o644` when a producer chooses none, so the builder calls
 `unix_permissions(0o600)` on every entry. The archive holds exactly one file per
 target directory and no directory entries, which much ZIP tooling writes by
-default and the extractor refuses. The entry count, per-entry and total limits
-are the landed ones, 256, 64 MiB and 256 MiB, four times the numbers the
-approved plan proposed. And the target directory is named `<os>-<arch>` exactly
-as the extracting host derives it, because extraction matches the string
-literally.
+default and the extractor refuses, so the builder writes `manifest.toml` at the
+root and `lib/<os>-<arch>/libcplugin.so` and nothing else. The entry count,
+per-entry and total limits are the landed ones, 256, 64 MiB and 256 MiB, four
+times the numbers the approved plan proposed. And the target directory is named
+`<os>-<arch>` exactly as the extracting host derives it, because extraction
+matches the string literally.
 
-**Existing abstractions to use.** The test signer, the vectors and the
-packaging helper the earlier tickets built, the C fixture and its hand-written
-manifest, the ABI harness's one-line-per-check style, and the runtime's support
-module that rebuilds the fixture before loading it, so a stale library cannot be
-tested.
+**Pinned literals the gate asserts.** The manifest declares `min_abi_minor = 2`,
+the response is asserted against `{"echo":"c.ready","bytes":5}`, the event
+against `{"ready":true}`, and the release ledger against four substring
+positions, `unregistered < quiesced < destroyed < library unloaded`. A later
+change to the ready capability's response, to that event's body, to the ABI
+minor, or to a ledger line's wording breaks the gate; the ledger assertion is
+substring-based, so a reworded line breaks the gate rather than weakening the
+check silently. The same test fails when one byte of the bundle is altered and
+when the chain is signed by a key that is not a configured root, and both
+failures are asserted as the landed trust refusals.
+
+**Existing abstractions to use.** The gate reuses the shared test signer
+(`signer::signed_bundle`, `standard_specs`), the archive writer and its helpers
+(`bundle::archive`, `host_target()`, `library_path`, `MANIFEST`, `BundleFile`),
+the C fixture's build script, and the runtime's support helpers (`block_on`,
+`repository_root`). It adds no third derivation of `<os>-<arch>`: the sample
+module calls the shared test-side `bundle::host_target()`. One pre-existing
+duplication it did not add to: `tests/support/bundle.rs` and `tests/manifest.rs`
+still carry a test-side copy of that derivation while `crates/plugin-runtime/src/
+load.rs` derives the same string privately.
 
 **Do not reimplement.** No second packaging format, no second loader, no SDK.
 The manifest is hand-written and stays hand-written: the C fixture is the proof
-that the format is writable without a generator.
+that the format is writable without a generator. `docs/plugin-contract.md`, the
+generated ABI header, the proto tree, `buf.yaml`, `Cargo.toml` and `Cargo.lock`
+are untouched by this ticket.
 
 **Seams.** The single end-to-end seam, which is the public load entry plus the
-sink plus the release entry. The CI step is the gate.
+sink plus the routed capability plus the awaited release entry, and the CI step is
+the gate. Only the gate case was genuinely RED first; it ran the whole path and
+failed on the missing event, which confirmed the builder, the manifest
+cross-check, the routing and the release ledger before the fixture change. The
+other four cases exercise landed behaviour, passed on their first run and are the
+criteria's coverage rather than new production code.
 
 ## Testing seams, collected
 
@@ -1530,9 +1716,15 @@ sink plus the release entry. The CI step is the gate.
 - `LoadError`'s ten variants and the widened `RouteError::Disabled { name, reason
   }`, read by `startup-policy` and by every later consumer of the load and routing
   surfaces.
-- `Serving::release(deadline: Instant)` in `teardown-and-release`, plus the
-  subprocess fault test.
-- The end-to-end bundle gate in `sample-bundle-ci`.
+- `Serving::release(self, deadline: Instant).await`, `ReleaseReport`,
+  `ReleaseRefusal` and `Serving::registry_mut()` in `teardown-and-release`,
+  tested from `crates/plugin-runtime/tests/teardown.rs`, plus the Unix-gated
+  subprocess fault test for a drop after unload.
+- The end-to-end bundle gate in `sample-bundle-ci`: the public load entry with a
+  sink, a routed capability and the awaited release, tested from
+  `crates/plugin-runtime/tests/sample_bundle.rs` over the builder in
+  `crates/plugin-runtime/tests/support/sample.rs`, and run as the `Sample bundle
+  gate` CI step.
 - The ABI harness, the contract tests, the C plugin build, the layout assertion
   check (`bash scripts/check-c-layout-asserts.sh`) and the header regeneration
   check continue to gate every change.
@@ -1573,7 +1765,9 @@ sink plus the release entry. The CI step is the gate.
   `cargo tree -p plugin-runtime --edges normal --prefix none | grep -v '(*)' |
   sort -u | wc -l`, and the `grep` filter is needed because `cargo tree` prints
   a repeated subtree as a marker line that survives `sort -u`. No later ticket
-  adds a dependency without the same measurement.
+  adds a dependency without the same measurement. Neither `teardown-and-release`
+  nor `sample-bundle-ci` added a dependency, so the measured pair above stands
+  unchanged at 97 crates for normal edges.
 
 ## Carried risks from the landed tickets
 
@@ -1636,12 +1830,22 @@ Still open:
   taken against the prototype and stay valid, but the first element now counts
   every owning waker reference the host handed out, and the correction sits in
   the post-fix note a few lines below it rather than on line 74 itself.
+- The level-4 residual that the in-flight `NotFound` rule is recorded in this
+  spec and the effort map but not in `docs/plugin-contract.md` stays open:
+  `teardown-and-release` edited no contract text, because section 11 rule 7
+  already states the teardown order, so one sentence there is still owed.
 - The two landing notes do not agree on the waker landing's commit: the ticket
   note records the merge commit `dd7e1bf`, and the review and the bundle landing
   record the tip of `task/waker-lifecycle-fix` as `b30efde`. Confirm which
   commit landed the waker fix before the effort is archived. No code or contract
   fact depends on the difference, because every level-1 chain builds on
   `7306244`.
+- The level-4 note says a level-5 chain starts from `b56396f`, while the
+  `teardown-and-release` landing note names its landing branch tip as `ffd7ae2`
+  and calls that the `startup-policy` finalize commit. Confirm which commit is
+  the level-5 base before the effort is archived. No code or contract fact
+  depends on the difference: the level-6 chain was cut from `bc61feb`, which the
+  `sample-bundle-ci` note records as the teardown landing.
 
 Added by the level-1 landings:
 
@@ -1716,8 +1920,10 @@ Added by the level-3 landing:
   the routing map returned for the exact key, so a dotted instance name routes
   every capability it declares and a dotted name and its undotted neighbour
   resolve independently. `startup-policy`'s placeholders and
-  `sample-bundle-ci`'s hand-written manifest may therefore carry a dot, and the
-  two sections above say so. The fix is a direct implementation by the
+  `sample-bundle-ci`'s hand-written manifest may therefore carry a dot;
+  `startup-policy` uses the rule, while the sample bundle's landed manifest name
+  is the dotless `cplugin` and the rule stays covered by `tests/registry.rs`, as
+  the level-6 section records. The fix is a direct implementation by the
   orchestrating parent at the operator's instruction rather than a tdd-worker
   chain delivery, and the landed-state note under `## Level 4` records its
   commits.
@@ -1810,6 +2016,77 @@ Added by the level-4 landings:
   the recorded resolution's wording for that key (the name the load reports)
   disagrees with the landed rule, because the initialisation payload is built
   before the load reads the manifest.
+
+Closed by the level-5 landing:
+
+- The level-4 residual that a stop mid-pass dropped the `Serving` values it had
+  already started, without unloading them, is closed: `StartupStop::serving()`
+  and `into_serving()` hand the started plugins back in start order and unload
+  nothing on that path, so the caller releases what it is handed. Release-on-stop
+  with an immediate deadline was rejected because the runtime holds no deadline
+  of its own. The cost is a public-surface change: `StartupStop`'s derives
+  narrowed from `Debug, Clone, PartialEq, Eq` to `Debug`, and any consumer that
+  cloned or compared one must adapt. Nothing in the tree did.
+
+Added by the level-5 landing:
+
+- `Instance::unload` records the ledger line `instance destroyed` before it
+  checks what the `destroy_instance` entry answered, so a refused destroy leaves
+  a line that is not true before the error returns. It is pre-existing, no
+  in-tree test reaches it, and the release's own refusal line is the honest
+  record; moving the line after the status check is a one-line fix for a later
+  pass.
+- The refused-`destroy_instance` branch of `Instance::unload` has no test for a
+  served instance, because `crates/plugin-runtime/tests/fixtures/
+  refusing_destroy.rs` fails initialisation and can therefore never produce a
+  `Serving`. The release reports that branch as `ReleaseRefusal::Unload` and
+  records its own line for it, but the path is unexercised.
+- The ordering ledger carries no instance attribution, so a report's ledger
+  slice could include concurrent activity on the same host. Every test in the
+  ticket gives each release its own host, where the slice is exact, and a daemon
+  that releases several instances on one host must not read the slice as one
+  instance's.
+- `Serving::registry_mut()` and `StartupStop::serving()`/`into_serving()` are
+  additive public surface a daemon consumes, and `StartupStop`'s derive
+  narrowing is a breaking change to a landed type. No in-tree consumer was
+  affected beyond the updated startup tests.
+- The release test file holds nine test functions, of which a run passes eight
+  and ignores one (the faulting child the subprocess case spawns), and four of
+  them had no failing first run because the whole refusal set landed with
+  criterion 1. Sensitivity was proved by mutation instead: removing the drain
+  loop fails criteria 1 and 5, removing the quarantine gate fails criteria 3
+  and 5. The subprocess fault test asserts `SIGSEGV` and is Unix-gated, so off
+  Unix it prints `[skip]` and returns.
+
+Added by the level-6 landing:
+
+- The gate is Linux-shaped: the builder hard-codes `libcplugin.so`, the same
+  assumption the ABI harness already makes, and the `windows` CI job compiles
+  `api-contracts` and `daemon` with `--all-targets` and does not build
+  `plugin-runtime`'s tests, so the composed bundle path is proven on Linux only.
+- The C plugin's ledger is process-wide static state shared by the two gate cases
+  that load it, and nothing in the gate asserts its numbers.
+- No producer-facing packaging command exists in the tree: the builder is a test
+  support module, so the SDK CLI remains the only packer for a real author, and a
+  consumer that wants the sample bundle on disk must call the support module or
+  write its own packer. `scripts/pack-sample-bundle.sh` was not added.
+- The gate pins the fixture's response, its event body and the manifest's ABI
+  demand as exact literals, and its ledger assertion is substring-based, so a
+  reworded ledger line breaks the gate rather than weakening the check silently.
+- The C fixture gained an event emission (`c.ready` emits the topic
+  `cplugin.ready` with the body `{"ready":true}`), which the ticket's file set
+  did not name. It is the only product-code change in that diff and it is what
+  makes the criterion that the gate observes an event reachable. If a reviewer
+  rejects it, the criterion reads against the service request the `c.timer`
+  capability raises and the hunk is reverted.
+- The gate's bundle file is named by the shared `BundleFile` helper rather than
+  after its plugin, so `start_plugins`'s file-stem naming rule is not exercised
+  by this gate. A later `start_plugins`-driven gate that reuses that helper would
+  register the plugin under the generated stem and must rename the file or the
+  helper first.
+- `LoadError::Registration` stays untested, as the level-3 and level-4 entries
+  above already record: nothing in the tree makes `Registry::register` refuse,
+  and the gate exercises the load path without it.
 
 ## Out of scope for this effort
 
