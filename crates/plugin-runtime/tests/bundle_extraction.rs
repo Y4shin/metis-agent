@@ -36,6 +36,12 @@ const MANIFEST: &str = "manifest.toml";
 /// The library's file name inside a target directory.
 const LIBRARY_FILE: &str = "sample_plugin.so";
 
+/// The manifest's content, which extraction does not parse.
+const MANIFEST_BYTES: &[u8] = b"name = \"dev.metis.test-plugin\"\n";
+
+/// The library's content, which extraction only copies.
+const LIBRARY_BYTES: &[u8] = b"the library's bytes, which are the point";
+
 /// The lock every test that stages takes, so a test that counts staging
 /// directories is not racing another test of this binary.
 static STAGING: Mutex<()> = Mutex::new(());
@@ -69,6 +75,10 @@ fn extract_archive(archive: &[u8], target: &str) -> Result<StagedBundle, StageEr
 }
 
 /// The staging directory names the process's temporary directory holds.
+///
+/// A test that stages takes [`lock`] for its whole body, so no other test of
+/// this binary creates or removes one while this counts. `refusal` takes the
+/// lock itself; a test that stages directly takes it first.
 fn staging_directories() -> BTreeSet<String> {
     std::fs::read_dir(std::env::temp_dir())
         .expect("the temporary directory is readable")
@@ -111,6 +121,36 @@ impl TestArchive {
         self.entry(name, bytes, options);
     }
 
+    /// A file entry that declares `mode` as its Unix mode.
+    fn file_declaring_mode(&mut self, name: &str, bytes: &[u8], mode: u32) {
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .unix_permissions(mode);
+        self.entry(name, bytes, options);
+    }
+
+    /// A file entry that declares the raw external attributes `attributes`.
+    fn file_declaring_attributes(&mut self, name: &str, bytes: &[u8], attributes: u32) {
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .external_attributes(attributes);
+        self.entry(name, bytes, options);
+    }
+
+    /// A symbolic link entry, which the archive's rules do not allow.
+    fn symlink(&mut self, name: &str, target: &str) {
+        self.writer
+            .add_symlink(name, target, SimpleFileOptions::default())
+            .expect("the symlink entry is added");
+    }
+
+    /// A directory entry, which the archive's rules do not allow.
+    fn directory(&mut self, name: &str) {
+        self.writer
+            .add_directory(name, SimpleFileOptions::default())
+            .expect("the directory entry is added");
+    }
+
     fn entry(&mut self, name: &str, bytes: &[u8], options: SimpleFileOptions) {
         self.writer
             .start_file(name, options)
@@ -127,14 +167,61 @@ impl TestArchive {
     }
 }
 
+/// A well-formed archive for `target`: the root manifest and that target's one
+/// library file.
+fn well_formed_archive(target: &str) -> Vec<u8> {
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.deflated_file(&library_entry(target, LIBRARY_FILE), LIBRARY_BYTES);
+    archive.finish()
+}
+
+/// A well-formed archive for `target` plus one more entry, added last, so a
+/// refusal has to remove what the extraction already wrote.
+fn archive_then(target: &str, add: impl FnOnce(&mut TestArchive)) -> Vec<u8> {
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.deflated_file(&library_entry(target, LIBRARY_FILE), LIBRARY_BYTES);
+    add(&mut archive);
+    archive.finish()
+}
+
+/// The refusal an archive earns, with the assertion that it left no staging
+/// directory behind: a refusal removes what it staged before it answers.
+fn refusal(archive: &[u8], target: &str) -> StageError {
+    let _guard = lock();
+    let before = staging_directories();
+    let error = extract_archive(archive, target).expect_err("the archive must be refused");
+    assert_eq!(
+        staging_directories(),
+        before,
+        "a refusal left a staging directory behind"
+    );
+    error
+}
+
+/// The offset of `needle` in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Flips one byte of the stored bytes `needle`, so the entry's checksum no
+/// longer matches the data it holds.
+fn corrupt_stored_data(archive: &mut [u8], needle: &[u8]) {
+    let at = find(archive, needle).expect("the stored bytes are in the archive");
+    archive[at] ^= 0xff;
+}
+
+/// The well-formed case: every later test's baseline, and the one archive a
+/// refusal test modifies rather than replaces.
 #[test]
 fn a_well_formed_bundle_stages_the_manifest_and_this_hosts_library() {
-    let manifest_bytes: &[u8] = b"name = \"dev.metis.test-plugin\"\n";
-    let library_bytes: &[u8] = b"not a library, but these bytes are the point";
-    let mut archive = TestArchive::new();
-    archive.file(MANIFEST, manifest_bytes);
-    archive.deflated_file(&library_entry(TARGET, LIBRARY_FILE), library_bytes);
-    let archive = archive.finish();
+    let _guard = lock();
+    let manifest_bytes = MANIFEST_BYTES;
+    let library_bytes = LIBRARY_BYTES;
+    let archive = well_formed_archive(TARGET);
 
     let staged = extract_archive(&archive, TARGET).expect("a well-formed bundle stages");
 
@@ -150,5 +237,149 @@ fn a_well_formed_bundle_stages_the_manifest_and_this_hosts_library() {
     assert_eq!(
         staged.library_path(),
         staged.root().join("lib").join(TARGET).join(LIBRARY_FILE)
+    );
+}
+
+#[test]
+fn an_archive_that_is_not_a_zip_is_refused() {
+    assert!(matches!(
+        refusal(b"this is not a ZIP archive at all", TARGET),
+        StageError::ArchiveUnreadable { .. }
+    ));
+}
+
+#[test]
+fn a_bundle_without_this_hosts_library_is_refused() {
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file(&library_entry(OTHER_TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    assert_eq!(
+        refusal(&archive.finish(), TARGET),
+        StageError::MissingTargetLibrary {
+            target: TARGET.to_string()
+        }
+    );
+}
+
+#[test]
+fn a_target_directory_holding_two_files_is_refused() {
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    archive.file(&library_entry(TARGET, "second.so"), LIBRARY_BYTES);
+    assert_eq!(
+        refusal(&archive.finish(), TARGET),
+        StageError::AmbiguousTargetLibrary {
+            target: TARGET.to_string(),
+            files: 2
+        }
+    );
+}
+
+#[test]
+fn an_absolute_entry_name_is_refused() {
+    let archive = archive_then(TARGET, |archive| archive.file("/etc/passwd", b"escaped"));
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::AbsoluteEntryName {
+            name: "/etc/passwd".to_string()
+        }
+    );
+}
+
+#[test]
+fn an_entry_name_that_carries_a_parent_directory_is_refused() {
+    let archive = archive_then(TARGET, |archive| archive.file("../../escape", b"escaped"));
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::ParentEntryName {
+            name: "../../escape".to_string()
+        }
+    );
+}
+
+#[test]
+fn a_symlink_entry_is_refused() {
+    let archive = archive_then(TARGET, |archive| {
+        archive.symlink(&library_entry(TARGET, "escape.so"), "/etc/passwd");
+    });
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::EntryIsSymlink {
+            name: library_entry(TARGET, "escape.so")
+        }
+    );
+}
+
+#[test]
+fn a_directory_entry_is_refused() {
+    let archive = archive_then(TARGET, |archive| {
+        archive.directory(&format!("lib/{TARGET}/extra"));
+    });
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::EntryIsDirectory {
+            name: format!("lib/{TARGET}/extra/")
+        }
+    );
+}
+
+#[test]
+fn an_entry_declaring_another_file_type_is_refused() {
+    // A FIFO: not a regular file, and not a directory or a symlink either.
+    let mode = 0o010000 | 0o600;
+    let archive = archive_then(TARGET, |archive| {
+        archive.file_declaring_attributes(&library_entry(TARGET, "fifo.so"), b"x", mode << 16);
+    });
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::EntryIsNotRegularFile {
+            name: library_entry(TARGET, "fifo.so"),
+            mode
+        }
+    );
+}
+
+#[test]
+fn an_entry_declaring_another_mode_is_refused() {
+    // A regular file with the usual permissions: the host writes 0o600, so a
+    // declaration of anything else is refused rather than applied.
+    let archive = archive_then(TARGET, |archive| {
+        archive.file_declaring_mode(&library_entry(TARGET, "world.so"), b"x", 0o644);
+    });
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::EntryModeRefused {
+            name: library_entry(TARGET, "world.so"),
+            mode: 0o100644
+        }
+    );
+}
+
+#[test]
+fn an_entry_whose_bytes_do_not_read_is_refused() {
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, b"stored bytes whose checksum will not match");
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    let mut archive = archive.finish();
+    corrupt_stored_data(&mut archive, b"stored bytes whose checksum");
+    assert!(matches!(
+        refusal(&archive, TARGET),
+        StageError::EntryUnreadable { name, .. } if name == MANIFEST
+    ));
+}
+
+#[test]
+fn a_bundle_without_a_root_manifest_still_stages() {
+    // Whether a manifest is there is the manifest step's question, not
+    // extraction's: extraction answers where the file would be.
+    let _guard = lock();
+    let mut archive = TestArchive::new();
+    archive.file(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES);
+    let staged = extract_archive(&archive.finish(), TARGET).expect("the library alone stages");
+    assert!(!staged.manifest_path().exists());
+    assert_eq!(
+        std::fs::read(staged.library_path()).expect("the library is staged"),
+        LIBRARY_BYTES
     );
 }

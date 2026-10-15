@@ -48,6 +48,21 @@ const STAGING_DIRECTORY_MODE: u32 = 0o700;
 /// filesystem.
 const STAGED_FILE_MODE: u32 = 0o600;
 
+/// The mask of an entry's declared permission bits.
+const PERMISSION_MASK: u32 = 0o7777;
+
+/// The mask of an entry's declared file type bits.
+const FILE_TYPE_MASK: u32 = 0o170000;
+
+/// A declared regular file.
+const FILE_TYPE_REGULAR: u32 = 0o100000;
+
+/// A declared directory.
+const FILE_TYPE_DIRECTORY: u32 = 0o040000;
+
+/// A declared symbolic link.
+const FILE_TYPE_SYMLINK: u32 = 0o120000;
+
 /// How many names are tried before the staging directory is called
 /// unavailable.
 const STAGING_ATTEMPTS: u32 = 16;
@@ -118,8 +133,6 @@ pub enum StageError {
     /// An entry's name is not usable as a relative path: it is empty once its
     /// separators are removed, or it carries a NUL byte.
     UnusableEntryName { name: String },
-    /// An entry's name is not text this build can read.
-    UnreadableEntryName { index: usize, detail: String },
     /// An entry is a symbolic link.
     EntryIsSymlink { name: String },
     /// An entry is a directory. The archive's layout does not need one: the
@@ -178,10 +191,6 @@ impl std::fmt::Display for StageError {
             StageError::UnusableEntryName { name } => {
                 write!(f, "the entry name {name:?} is not a usable relative path")
             }
-            StageError::UnreadableEntryName { index, detail } => write!(
-                f,
-                "the name of the entry at index {index} does not read: {detail}"
-            ),
             StageError::EntryIsSymlink { name } => {
                 write!(f, "the entry {name} is a symbolic link")
             }
@@ -253,6 +262,7 @@ fn stage(
         })?;
 
     let mut library: Option<PathBuf> = None;
+    let mut target_files: usize = 0;
 
     for index in 0..archive.len() {
         // The metadata pass reads no entry's bytes, so an archive is refused on
@@ -266,12 +276,14 @@ fn stage(
                     })?;
             let name = entry
                 .name()
-                .map_err(|error| StageError::UnreadableEntryName {
-                    index,
-                    detail: error.to_string(),
+                .map_err(|error| StageError::ArchiveUnreadable {
+                    detail: format!(
+                        "the name of the entry at index {index} does not read: {error}"
+                    ),
                 })?
                 .into_owned();
-            let entry_path = PathBuf::from(&name);
+            let entry_path = entry_path(&name)?;
+            check_entry(&name, entry.is_dir(), entry.unix_mode())?;
             (name, entry_path)
         };
 
@@ -279,6 +291,7 @@ fn stage(
         let destination = match &kind {
             Entry::Manifest => root.join(MANIFEST_NAME),
             Entry::TargetLibrary(file_name) => {
+                target_files += 1;
                 root.join(LIBRARY_DIRECTORY).join(target).join(file_name)
             }
             Entry::Other => continue,
@@ -289,6 +302,12 @@ fn stage(
         }
     }
 
+    if target_files > 1 {
+        return Err(StageError::AmbiguousTargetLibrary {
+            target: target.to_string(),
+            files: target_files,
+        });
+    }
     let Some(library) = library else {
         return Err(StageError::MissingTargetLibrary {
             target: target.to_string(),
@@ -314,8 +333,8 @@ enum Entry {
 /// Classifies an archive-relative path.
 ///
 /// A path reaches a destination only by matching one of the archive's two
-/// shapes exactly, so an entry that names a parent directory, an absolute path
-/// or a deeper tree matches nothing and is not written.
+/// shapes exactly, so an entry that names anything else matches nothing and is
+/// not written.
 fn classify(relative: &Path, target: &str) -> Entry {
     let names: Vec<&OsStr> = relative
         .components()
@@ -334,6 +353,100 @@ fn classify(relative: &Path, target: &str) -> Entry {
         }
         _ => Entry::Other,
     }
+}
+
+/// The archive-relative path an entry name denotes, or the refusal it earns.
+///
+/// Both separators are read, so a name is judged by what it would mean on
+/// either platform rather than by what this host's `Path` makes of it.
+fn entry_path(name: &str) -> Result<PathBuf, StageError> {
+    let unusable = || StageError::UnusableEntryName {
+        name: name.to_string(),
+    };
+    if is_absolute(name) {
+        return Err(StageError::AbsoluteEntryName {
+            name: name.to_string(),
+        });
+    }
+    let mut path = PathBuf::new();
+    for part in name.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                return Err(StageError::ParentEntryName {
+                    name: name.to_string(),
+                });
+            }
+            part => {
+                if part.contains('\0') {
+                    return Err(unusable());
+                }
+                path.push(part);
+            }
+        }
+    }
+    if path.as_os_str().is_empty() {
+        return Err(unusable());
+    }
+    Ok(path)
+}
+
+/// Whether a name is absolute by this host's rules or by Windows's.
+///
+/// A name that is absolute on Windows would replace the staging root when it
+/// were joined to it, so it is refused on every host rather than only there.
+fn is_absolute(name: &str) -> bool {
+    if name.starts_with('/') || name.starts_with('\\') {
+        return true;
+    }
+    let mut characters = name.chars();
+    matches!(
+        (characters.next(), characters.next()),
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic()
+    )
+}
+
+/// Checks one entry's declared type and its declared mode.
+///
+/// The checks are the contract's, and they apply to every entry of the archive,
+/// whether or not this host's load needs it. An entry that declares no mode is
+/// accepted: the host writes its own mode either way, so a producer is not
+/// required to declare one.
+fn check_entry(name: &str, is_dir: bool, mode: Option<u32>) -> Result<(), StageError> {
+    if is_dir {
+        return Err(StageError::EntryIsDirectory {
+            name: name.to_string(),
+        });
+    }
+    let Some(mode) = mode else {
+        return Ok(());
+    };
+    match mode & FILE_TYPE_MASK {
+        FILE_TYPE_DIRECTORY => {
+            return Err(StageError::EntryIsDirectory {
+                name: name.to_string(),
+            });
+        }
+        FILE_TYPE_SYMLINK => {
+            return Err(StageError::EntryIsSymlink {
+                name: name.to_string(),
+            });
+        }
+        FILE_TYPE_REGULAR | 0 => {}
+        _ => {
+            return Err(StageError::EntryIsNotRegularFile {
+                name: name.to_string(),
+                mode,
+            });
+        }
+    }
+    if mode & PERMISSION_MASK != STAGED_FILE_MODE {
+        return Err(StageError::EntryModeRefused {
+            name: name.to_string(),
+            mode,
+        });
+    }
+    Ok(())
 }
 
 /// Writes one entry's bytes to `path`.
