@@ -116,6 +116,61 @@ pub fn trust_for(chain: &TestChain) -> TrustStore {
     TrustStore::empty().with_root(chain.anchor().public_key())
 }
 
+/// The capability names the fixture declares, in the order it declares them.
+///
+/// They are literals rather than a list read out of the library, because the
+/// manifest an author writes is hand-written: a list read from the library
+/// would make the entry's cross-check vacuous.
+pub const CAPABILITIES: [&str; 10] = [
+    "tool.echo",
+    "tool.pending",
+    "tool.cancellable",
+    "tool.stubborn",
+    "tool.panic",
+    "tool.panic_drop",
+    "tool.blocking",
+    "tool.deferred",
+    "tool.wake_deferred",
+    "tool.newer",
+];
+
+/// The manifest an author writes by hand, declaring exactly the capability
+/// names it is given and this host's library.
+///
+/// The text is a literal, not a serialisation of any type in this tree: the
+/// format belongs to the author, and a hand-written manifest is what proves it.
+pub fn manifest<S: AsRef<str>>(names: &[S]) -> String {
+    let target = host_target();
+    let capabilities: String = names
+        .iter()
+        .map(|name| {
+            let name = name.as_ref();
+            format!(
+                "\n[[capabilities]]\nname = \"{name}\"\nkind = \"tool\"\nversion = 1\n\
+                 request_schema = {{ type = \"object\" }}\n\
+                 response_schema = {{ type = \"object\" }}\n"
+            )
+        })
+        .collect();
+    format!(
+        r#"# A hand-written manifest: the proof that packaging a plugin needs no
+# generator. The host trusts this list for discovery, and the library's own
+# declaration is the cross-check.
+name = "{INSTANCE_NAME}"
+version = "1.0.0"
+abi_major = 1
+min_abi_minor = 2
+
+[libraries]
+{target} = "{library}"
+{capabilities}
+[config_schema]
+type = "object"
+"#,
+        library = library_path(&target, &library_file_name()),
+    )
+}
+
 /// A signed bundle on disk and the trust store that accepts it.
 pub fn bundle_file(manifest: Option<&str>) -> (BundleFile, TrustStore) {
     let chain = chain();

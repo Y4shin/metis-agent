@@ -26,23 +26,10 @@ use support::block_on;
 use support::bundle;
 use support::{decode, request};
 
-/// The capability names the fixture declares, in the order it declares them.
-///
-/// They are written here as literals because the manifest an author writes is
-/// hand-written: a list read out of the library would make the cross-check
-/// vacuous.
-const CAPABILITIES: [&str; 10] = [
-    "tool.echo",
-    "tool.pending",
-    "tool.cancellable",
-    "tool.stubborn",
-    "tool.panic",
-    "tool.panic_drop",
-    "tool.blocking",
-    "tool.deferred",
-    "tool.wake_deferred",
-    "tool.newer",
-];
+/// The capability names the fixture declares, in the order it declares them,
+/// written as literals in the support module so a manifest that disagrees with
+/// the library is a real disagreement rather than a list read out of it.
+const CAPABILITIES: [&str; 10] = bundle::CAPABILITIES;
 
 /// The name the test chain's leaf-authorising certificate carries, which is the
 /// name the manifest declares and the name the instance is registered under.
@@ -58,40 +45,6 @@ fn config(instance: &str) -> Value {
 /// value type lives behind the contract's authoring gate.
 fn host_context(instance: &str) -> Value {
     json!({ "instance_name": instance, "capability_version": 1 })
-}
-
-/// The manifest an author writes by hand, declaring exactly the capability
-/// names it is given and this host's library.
-fn hand_written<S: AsRef<str>>(names: &[S]) -> String {
-    let target = bundle::host_target();
-    let capabilities: String = names
-        .iter()
-        .map(|name| {
-            let name = name.as_ref();
-            format!(
-                "\n[[capabilities]]\nname = \"{name}\"\nkind = \"tool\"\nversion = 1\n\
-                 request_schema = {{ type = \"object\" }}\n\
-                 response_schema = {{ type = \"object\" }}\n"
-            )
-        })
-        .collect();
-    format!(
-        r#"# A hand-written manifest: the proof that packaging a plugin needs no
-# generator. The host trusts this list for discovery, and the library's own
-# declaration is the cross-check.
-name = "{NAME}"
-version = "1.0.0"
-abi_major = 1
-min_abi_minor = 2
-
-[libraries]
-{target} = "{library}"
-{capabilities}
-[config_schema]
-type = "object"
-"#,
-        library = bundle::library_path(&target, &bundle::library_file_name()),
-    )
 }
 
 /// The refusal a load earned.
@@ -114,7 +67,7 @@ fn matched(instance: &str) -> (Value, Value) {
 #[test]
 fn a_bundle_loads_into_a_registered_instance_with_its_declared_capabilities() {
     let host = Host::new();
-    let (file, trust) = bundle::bundle_file(Some(&hand_written(&CAPABILITIES)));
+    let (file, trust) = bundle::bundle_file(Some(&bundle::manifest(&CAPABILITIES)));
 
     let serving = block_on(load_bundle(
         &host,
@@ -239,7 +192,7 @@ fn a_trusted_bundle_with_no_manifest_is_refused_by_the_manifest_step() {
 #[test]
 fn the_plugin_receives_the_configuration_and_the_host_context_before_it_is_registered() {
     let host = Host::new();
-    let (file, trust) = bundle::bundle_file(Some(&hand_written(&CAPABILITIES)));
+    let (file, trust) = bundle::bundle_file(Some(&bundle::manifest(&CAPABILITIES)));
     let (config, context) = matched("loaded");
 
     let serving = block_on(load_bundle(&host, file.path(), &config, &context, &trust))
@@ -282,7 +235,7 @@ fn the_plugin_receives_the_configuration_and_the_host_context_before_it_is_regis
 #[test]
 fn a_configuration_the_plugin_cannot_read_is_refused_as_the_configuration_class() {
     let host = Host::new();
-    let (file, trust) = bundle::bundle_file(Some(&hand_written(&CAPABILITIES)));
+    let (file, trust) = bundle::bundle_file(Some(&bundle::manifest(&CAPABILITIES)));
     // The configuration was resolved for another instance, which is the
     // fixture's own way of saying that what it was handed does not match what
     // it declared.
@@ -311,7 +264,7 @@ fn a_configuration_the_plugin_cannot_read_is_refused_as_the_configuration_class(
 #[test]
 fn the_plugins_own_setup_failure_is_refused_as_the_plugins_defect() {
     let host = Host::new();
-    let (file, trust) = bundle::bundle_file(Some(&hand_written(&CAPABILITIES)));
+    let (file, trust) = bundle::bundle_file(Some(&bundle::manifest(&CAPABILITIES)));
     // The configuration and the host context agree, so the failure that
     // follows is the plugin's own and not the configuration's.
     let (config, context) = matched(DEFECTIVE_INITIALISATION);
@@ -370,7 +323,7 @@ fn declared_names(replacing: &str, with: &str) -> Vec<String> {
 #[test]
 fn a_manifest_capability_the_library_does_not_report_is_refused_by_name() {
     let host = Host::new();
-    let (file, trust) = bundle::bundle_file(Some(&hand_written(&declared_names(
+    let (file, trust) = bundle::bundle_file(Some(&bundle::manifest(&declared_names(
         "tool.echo",
         "tool.absent",
     ))));
@@ -405,7 +358,7 @@ fn a_library_capability_the_manifest_does_not_declare_is_refused_by_name() {
         .filter(|name| **name != "tool.panic_drop")
         .map(|name| name.to_string())
         .collect();
-    let (file, trust) = bundle::bundle_file(Some(&hand_written(&names)));
+    let (file, trust) = bundle::bundle_file(Some(&bundle::manifest(&names)));
 
     let error = refusal(
         block_on(load_bundle(
@@ -478,7 +431,7 @@ fn an_instance_type_needs_no_default_and_its_constructor_is_asynchronous() {
 #[test]
 fn a_bundled_capability_serves_a_call_through_the_registry() {
     let host = Host::new();
-    let (file, trust) = bundle::bundle_file(Some(&hand_written(&CAPABILITIES)));
+    let (file, trust) = bundle::bundle_file(Some(&bundle::manifest(&CAPABILITIES)));
 
     let serving = block_on(load_bundle(
         &host,
