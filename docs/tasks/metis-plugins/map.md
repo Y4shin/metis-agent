@@ -173,13 +173,32 @@ CI.
   per instance, and a host with no sink is legal. The host's callback frames are
   additionally asserted not to panic with `#[no_panic]` in a dedicated CI run that
   meets that crate's requirements.
+- The two level-0 tickets landed and committed the formats the rest of the effort
+  builds on. A bundle's signature covers the domain tag, the header, the chain and
+  the archive, with the signature bytes deleted rather than zero-filled, under the
+  fixed tag bytes `METIS-PLUGIN-BUNDLE-PAYLOAD`; the chain carries the root's own
+  certificate as its last link and the anchor is trusted by its recomputed key id;
+  `basicConstraints` is the only understood extension, so any other critical
+  extension refuses the chain; and the validity windows carry 60 seconds of skew
+  at each end, which date-bounds the committed vectors at 2040. The refusal split
+  is `BundleError::is_trust_failure()`: a trust failure stops daemon start-up, an
+  unreadable container degrades that one bundle. A wake after the future was
+  dropped is a counted violation that names its request id, and the host releases
+  the one owning waker reference it hands a poll when that poll returns.
+- The ABI harness, the second host implementation, still owes that release, and
+  its `waker_wake` still prints an ordering line for a dead slot. The obligation
+  rides with `abi-initialisation-entry`, which rewrites the harness, rather than
+  with a new task.
 
 ## Fog
 
 - Trust roots and the revocation list: the daemon holds both, compiled in with
-  empty defaults and modified through the configuration file. The file
-  representation, the root set's rotation story and the revocation entry's shape
-  are spec-level detail for `to-spec`.
+  empty defaults and modified through the configuration file. What the runtime
+  owes is settled by `bundle-verification`: `TrustStore` is a plain value the
+  caller builds, every key id is recomputed from the public key, and the runtime
+  never reads a configuration file. The file's representation, the root set's
+  rotation story and the revocation entry's shape belong to `metis-daemon`, which
+  owns configuration resolution, and they are not this effort's question.
 - The exact manifest field names and types, the extraction limits (entry
   count, uncompressed size, permission bits), and whether a v1 bundle may
   carry assets. These are spec-level detail for `to-spec`, not decisions that
