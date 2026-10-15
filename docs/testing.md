@@ -30,8 +30,9 @@ Run if asked (by number):
 
 Every command runs inside the devenv shell as `devenv shell -- <command>`, which
 is where `cargo`, `buf` and the rest exist. The three always-run commands are what
-`.github/workflows/ci.yml` gates on first, and numbers 1 to 8 are the contract and
-plugin ABI commands it runs after them; numbers 3 and 2 resolve their pinned
+`.github/workflows/ci.yml` gates on first, and numbers 1 to 8 and 11 to 12 are
+the contract, plugin ABI and plugin host checks it runs after them; numbers 3 and
+2 resolve their pinned
 plugins from the BSR, so they need the credential described in `docs/dev-env.md`.
 Numbers 9 and 10 are the two runnable walkthroughs, which CI does not run.
 Number 11 is the `no-panic` build check: it runs in a CI step of its own, it is
