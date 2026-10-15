@@ -317,7 +317,9 @@ impl Serving {
         } else {
             match instance.shutdown() {
                 Err(error) => {
-                    host.order(format!("release refused: the shutdown entry answered {error}"));
+                    host.order(format!(
+                        "release refused: the shutdown entry answered {error}"
+                    ));
                     refusal = Some(ReleaseRefusal::Shutdown(error));
                 }
                 Ok(()) => match instance.unload() {

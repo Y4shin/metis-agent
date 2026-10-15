@@ -205,7 +205,10 @@ fn a_release_cancels_the_calls_it_finds_then_quiesces_destroys_and_unloads() {
     assert!(
         report.released(),
         "the instance was released: {}",
-        report.refusal().map(ToString::to_string).unwrap_or_default()
+        report
+            .refusal()
+            .map(ToString::to_string)
+            .unwrap_or_default()
     );
     assert!(report.refusal().is_none());
     assert!(
@@ -324,11 +327,11 @@ fn disabling_refuses_new_calls_and_enabling_accepts_them_with_no_reload() {
         serving.registry_mut().enable(&name, true),
         "the entry is still there to turn on"
     );
-    let answered = block_on(serving.registry().call(
-        &qualified,
-        &support::request("on again"),
-        4,
-    ))
+    let answered = block_on(
+        serving
+            .registry()
+            .call(&qualified, &support::request("on again"), 4),
+    )
     .expect("an enabled entry serves the call again");
     assert_eq!(
         support::decode(&answered).echo,
@@ -397,7 +400,9 @@ fn a_shutdown_that_answers_a_non_ok_status_leaves_the_library_mapped() {
         "the refusal is recorded rather than inferred: {ledger:#?}"
     );
     assert!(
-        !ledger.iter().any(|line| line.contains("instance destroyed")),
+        !ledger
+            .iter()
+            .any(|line| line.contains("instance destroyed")),
         "a plugin that did not quiesce is not destroyed: {ledger:#?}"
     );
     assert!(
@@ -424,7 +429,9 @@ fn an_unload_refused_for_another_reason_leaves_the_library_mapped() {
     );
     match report.refusal() {
         Some(ReleaseRefusal::Unload(error)) => assert!(
-            error.to_string().contains("a call still holds the instance"),
+            error
+                .to_string()
+                .contains("a call still holds the instance"),
             "the refusal is the landed guard's own error: {error}"
         ),
         other => panic!("the unload guard refused, and this is the outcome: {other:?}"),
@@ -518,7 +525,9 @@ fn a_quarantined_instance_keeps_its_library_resident() {
         "a quarantined instance is not asked to quiesce: {ledger:#?}"
     );
     assert!(
-        !ledger.iter().any(|line| line.contains("instance destroyed")),
+        !ledger
+            .iter()
+            .any(|line| line.contains("instance destroyed")),
         "a quarantined instance is not destroyed: {ledger:#?}"
     );
     assert!(
@@ -676,10 +685,7 @@ fn the_release_entry_has_no_outstanding_clone_gate() {
         report.ledger()
     );
     assert!(
-        !report
-            .ledger()
-            .iter()
-            .any(|line| line.contains("refused")),
+        !report.ledger().iter().any(|line| line.contains("refused")),
         "nothing refuses the release over a clone: {:#?}",
         report.ledger()
     );
@@ -774,9 +780,8 @@ fn a_copied_handle_dropped_after_unload_faults_the_process() {
     let mut init = MetisFutureHandle::null();
     // SAFETY: the table is the fixture's own, the host table is live, and the
     // payload buffer is host-owned and valid for the call.
-    let status = unsafe {
-        (loaded.table().init_plugin)(host.api(), init_buffer, &mut instance, &mut init)
-    };
+    let status =
+        unsafe { (loaded.table().init_plugin)(host.api(), init_buffer, &mut instance, &mut init) };
     assert_eq!(
         status,
         MetisStatus::Ok,

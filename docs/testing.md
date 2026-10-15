@@ -432,6 +432,31 @@ Plugin host, documented in `crates/plugin-runtime`:
   `tests/fixtures/refusing_destroy.rs`; and that one broken bundle among several
   leaves the others loaded and serving, which a capability called through the
   started plugin proves.
+- `cargo test -p plugin-runtime --test teardown` -- the one release entry, at
+  `Serving::release(deadline)`, with the ordering ledger as the assertion. Every
+  plugin it releases is loaded from a real signed bundle built inside the test, and
+  the caller owns the poll loop, the deadline and the drop. The run asserts the
+  documented order end to end: the instance leaves its registry, the calls it found
+  are cancelled and the caller's own drops are what drain them, the plugin
+  quiesces, the instance is destroyed, and the library is unloaded, each step on
+  the ledger and each before the step that needs it. It asserts that an instance
+  that cannot be released is reported rather than forced, with its library still
+  mapped and the ledger naming the refusal, for each of the three cases the
+  contract names: a shutdown entry that answered a status other than `ok`, which
+  the fixture's own reserved instance name asks for by raising the panic the
+  adapter contains; a quarantined instance whose abandoned poll may still be
+  running; and an unload the landed guard refused, which a caller that still holds
+  the instance provokes. It asserts that the caller's deadline ends the wait and
+  that a report per instance names every instance that could not be released,
+  which two instances released under one deadline prove. It asserts that disabling
+  an entry through `Serving::registry_mut` refuses a new call without touching the
+  call already in flight or the library, and that enabling accepts a call again on
+  the same instance with no reload. Two properties are asserted rather than
+  assumed: the release has no outstanding-clone gate, which the one waker clone the
+  fixture's `tool.deferred` keeps proves, and a future handle copied out of the
+  table and dropped after its library was unloaded faults the process, which the
+  run reproduces in a subprocess of its own test binary and reads as the signal the
+  child died with.
 - `cargo test --profile no-panic -p plugin-runtime --features no-panic-check
   --no-run` -- the `no-panic` build check, which is command 11 of the protocol
   and runs in a CI step of its own. It is the only place that assertion holds,
