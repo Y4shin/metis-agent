@@ -957,3 +957,75 @@ fn invoking_a_disabled_capability_answers_the_disabled_route_error_with_its_reas
         "a capability nothing declares stays unknown"
     );
 }
+
+#[test]
+fn a_manifest_naming_another_plugin_stops_start_up() {
+    let mut plugins = Plugins::new();
+    // The chain's leaf carries the file's name and the manifest declares
+    // another one, so the bundle says it is a plugin its signature does not.
+    plugins.write(
+        "mismatching",
+        "mismatching",
+        &Bundle::new(Some(manifest("declared-by-manifest", &["tool.echo"]))),
+    );
+
+    let stop = refusal(
+        plugins.start(),
+        "a bundle whose manifest names another plugin cannot start",
+    );
+
+    match stop.error() {
+        LoadError::Manifest(ManifestError::NameMismatch { declared, chain }) => {
+            assert_eq!(declared, "declared-by-manifest");
+            assert_eq!(chain, "mismatching");
+        }
+        other => panic!(
+            "a manifest that is not the chain's name stops start-up, and this outcome is {other}"
+        ),
+    }
+}
+
+#[test]
+fn a_plugin_that_refuses_its_configuration_is_replaced_by_its_placeholder() {
+    let mut plugins = Plugins::new();
+    // No configuration is resolved for this plugin, so the fixture's own
+    // constructor refuses what it was handed: a plugin that cannot read its
+    // configuration is disabled like any other plugin that fails to start.
+    plugins.write(
+        "unconfigured",
+        "unconfigured",
+        &Bundle::new(Some(manifest("unconfigured", &bundle::CAPABILITIES))),
+    );
+
+    let report = report(
+        &plugins,
+        "a plugin that refuses its configuration does not stop start-up",
+    );
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    match plugin.reason() {
+        LoadError::ConfigurationRefused { plugin, status } => {
+            assert_eq!(plugin, "unconfigured");
+            assert_eq!(
+                status,
+                &MetisStatus::InvalidArgument,
+                "invalid_argument is the configuration's class"
+            );
+        }
+        other => panic!(
+            "a configuration the plugin cannot read is the configuration's class, and this is {other}"
+        ),
+    }
+    assert_eq!(
+        plugin.name(),
+        "unconfigured",
+        "the placeholder carries the manifest's name"
+    );
+    let ordering = report.host().ordering();
+    assert!(
+        ordering
+            .iter()
+            .any(|line| line.starts_with("instance destroyed after a failed initialisation")),
+        "the refused plugin was unloaded: {ordering:?}"
+    );
+}

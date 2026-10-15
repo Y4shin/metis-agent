@@ -343,8 +343,8 @@ fn describe(path: &Path, trust: &TrustStore) -> Option<(String, Vec<CapabilityDe
 /// signature this host does not trust, which is evidence something is wrong and
 /// stops start-up, while a container this build cannot read only means one
 /// bundle does not work here. A bundle file that cannot be read at all, a
-/// manifest that is absent or invalid, and an unload that refused are the other
-/// three stops.
+/// manifest that is absent, unreadable, invalid or not the name the bundle's
+/// chain carries, and an unload that refused are the other stops.
 fn stops_startup(error: &LoadError) -> bool {
     match error {
         LoadError::Trust(failure) => failure.is_trust_failure(),
@@ -364,9 +364,11 @@ fn stops_startup(error: &LoadError) -> bool {
         )
         | LoadError::Stage(_)
         | LoadError::Call(_)
-        | LoadError::ConfigurationRefused { .. }
-        | LoadError::PluginDefect { .. }
         | LoadError::CapabilityMismatch { .. }
         | LoadError::Registration(_) => false,
+        // A plugin whose initialisation failed is the same disable with a name
+        // worth reading: it started, refused, and was unloaded before this pass
+        // listed it as a placeholder.
+        LoadError::ConfigurationRefused { .. } | LoadError::PluginDefect { .. } => false,
     }
 }
