@@ -1,0 +1,937 @@
+//! One sink for progress, events, logs and service requests.
+//!
+//! The host delivers every callback to the sink a caller installed when it
+//! built the host, and it names the instance on every one of them. A host with
+//! no sink of its own stays legal and records into the accessors the rest of
+//! the suite reads, and a sink's panic is caught in the callback's own frame
+//! and recorded rather than allowed to reach the plugin's poll.
+
+#[path = "support/mod.rs"]
+mod support;
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::task::{Context, Poll, Waker};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use plugin_contract::abi::MetisStatus;
+use plugin_fixture::payload::{Progress, TimerAnswer};
+use plugin_runtime::sink::{LogLevel, Sink};
+use plugin_runtime::{CallError, Host, Instance, PluginCall};
+
+use support::{block_on, fixture, initialisation_body, request};
+
+/// One test at a time in this binary.
+///
+/// The fixture's buffer ledger is process-wide: `live` counts every buffer the
+/// plugin allocated and has not seen released, across every instance in this
+/// process. A case that reads it therefore has to be the only case running, so
+/// every test here takes this guard.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Which callback a test sink was told to panic on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Progress,
+    Event,
+    Log,
+    Service,
+}
+
+/// One callback as the test sink received it.
+///
+/// The variants are the fields each callback kind carries: every one names the
+/// instance, progress and a service request name their request, an event
+/// carries its topic and payload and no request id, and a log carries its typed
+/// level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Delivered {
+    Progress {
+        instance: String,
+        request_id: u64,
+        payload: Vec<u8>,
+    },
+    Event {
+        instance: String,
+        topic: String,
+        payload: Vec<u8>,
+    },
+    Log {
+        instance: String,
+        level: LogLevel,
+        message: String,
+    },
+    Service {
+        instance: String,
+        service: String,
+        request_id: u64,
+        payload: Vec<u8>,
+    },
+}
+
+/// The test sink: it records what it is handed, answers service requests with
+/// the status it was built with, and panics on the kind it was told to.
+#[derive(Clone)]
+struct Recording {
+    delivered: Arc<Mutex<Vec<Delivered>>>,
+    answer: MetisStatus,
+    panics_on: Option<Kind>,
+}
+
+impl Recording {
+    fn new() -> Recording {
+        Recording {
+            delivered: Arc::new(Mutex::new(Vec::new())),
+            answer: MetisStatus::Ok,
+            panics_on: None,
+        }
+    }
+
+    /// Everything delivered so far, in the order it arrived.
+    fn delivered(&self) -> Vec<Delivered> {
+        self.delivered.lock().unwrap().clone()
+    }
+
+    /// Every delivery of one kind, in order.
+    fn of_kind(&self, want: &str) -> Vec<Delivered> {
+        self.delivered()
+            .into_iter()
+            .filter(|delivered| match delivered {
+                Delivered::Progress { .. } => want == "progress",
+                Delivered::Event { .. } => want == "event",
+                Delivered::Log { .. } => want == "log",
+                Delivered::Service { .. } => want == "service",
+            })
+            .collect()
+    }
+
+    fn record(&self, kind: Kind, delivered: Delivered) {
+        if self.panics_on == Some(kind) {
+            panic!("test sink: a deliberate panic inside a {kind:?} callback");
+        }
+        self.delivered.lock().unwrap().push(delivered);
+    }
+
+    /// A sink that refuses every service request with `answer`.
+    ///
+    /// The status is the frozen callback's return value, which is what makes a
+    /// refusal synchronous: the plugin learns it from the call it made.
+    fn refusing(answer: MetisStatus) -> Recording {
+        Recording {
+            answer,
+            ..Recording::new()
+        }
+    }
+
+    /// A sink that panics inside the given callback kind.
+    fn panicking_on(kind: Kind) -> Recording {
+        Recording {
+            panics_on: Some(kind),
+            ..Recording::new()
+        }
+    }
+}
+
+impl Sink for Recording {
+    fn progress(&self, instance: &str, request_id: u64, payload: Vec<u8>) {
+        self.record(
+            Kind::Progress,
+            Delivered::Progress {
+                instance: instance.to_string(),
+                request_id,
+                payload,
+            },
+        );
+    }
+
+    fn event(&self, instance: &str, topic: &str, payload: Vec<u8>) {
+        self.record(
+            Kind::Event,
+            Delivered::Event {
+                instance: instance.to_string(),
+                topic: topic.to_string(),
+                payload,
+            },
+        );
+    }
+
+    fn log(&self, instance: &str, level: LogLevel, message: &str) {
+        self.record(
+            Kind::Log,
+            Delivered::Log {
+                instance: instance.to_string(),
+                level,
+                message: message.to_string(),
+            },
+        );
+    }
+
+    fn service_request(
+        &self,
+        instance: &str,
+        service: &str,
+        request_id: u64,
+        payload: Vec<u8>,
+    ) -> MetisStatus {
+        self.record(
+            Kind::Service,
+            Delivered::Service {
+                instance: instance.to_string(),
+                service: service.to_string(),
+                request_id,
+                payload,
+            },
+        );
+        self.answer
+    }
+}
+
+/// A host that names one instance, that instance, and the sink it delivers to.
+///
+/// The host handed in is the one the instance carries, which is the one that
+/// names it: the sink is installed once, and the name is what makes every
+/// callback say which plugin spoke.
+fn named_instance(sink: &Recording, name: &str) -> (Host, Arc<Instance>) {
+    let host = Host::with_sink(sink.clone()).for_instance(name);
+    let loaded = fixture();
+    let instance = block_on(
+        loaded
+            .init_plugin(&host, &initialisation_body(name))
+            .expect("the fixture's initialisation entry starts"),
+    )
+    .expect("the fixture initialises with the configuration it declares");
+    (host, instance)
+}
+
+/// Polls one call once.
+///
+/// The waker is the no-op one: every poll here is either ready or parked on a
+/// service the test answers itself, so a wake has nothing to schedule. A real
+/// daemon passes its own task waker, which is the same interface.
+fn poll_once(call: &mut PluginCall) -> Poll<Result<Vec<u8>, CallError>> {
+    let mut context = Context::from_waker(Waker::noop());
+    Pin::new(call).poll(&mut context)
+}
+
+/// Invokes one capability and finishes it, answering any service it asks for.
+///
+/// A fixture capability that asks for a service parks until the host answers,
+/// so the loop polls, answers what arrived with the sink's own answer, and
+/// polls again.
+fn finish(
+    instance: &Arc<Instance>,
+    sink: &Recording,
+    capability: &str,
+    request_id: u64,
+    echo: &str,
+) -> Result<Vec<u8>, CallError> {
+    let mut call = instance
+        .invoke(capability, request_id, &request(echo))
+        .expect("the future starts");
+    let mut answered = false;
+    loop {
+        match poll_once(&mut call) {
+            Poll::Ready(result) => return result,
+            Poll::Pending => {
+                let requests: Vec<(String, u64)> = sink
+                    .delivered()
+                    .into_iter()
+                    .filter_map(|delivered| match delivered {
+                        Delivered::Service {
+                            service,
+                            request_id,
+                            ..
+                        } => Some((service, request_id)),
+                        _ => None,
+                    })
+                    .collect();
+                for (service, request_id) in requests {
+                    if service != "timer" || answered {
+                        continue;
+                    }
+                    let answer = serde_json::to_vec(&TimerAnswer { delay_ms: 5 })
+                        .expect("the fixture's timer answer serialises");
+                    let _ = instance.complete_service(request_id, MetisStatus::Ok, &answer);
+                    answered = true;
+                }
+            }
+        }
+    }
+}
+
+/// Drives one call that asks the host for nothing, to completion.
+///
+/// It is for the cases whose capability needs no service, and it takes no sink
+/// because it has none to consult.
+fn drive(
+    instance: &Arc<Instance>,
+    capability: &str,
+    request_id: u64,
+    echo: &str,
+) -> Result<Vec<u8>, CallError> {
+    let mut call = instance
+        .invoke(capability, request_id, &request(echo))
+        .expect("the future starts");
+    loop {
+        if let Poll::Ready(result) = poll_once(&mut call) {
+            return result;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// The fixture's own buffer ledger: what it allocated, what it saw released,
+/// what is still live, and whether any ownership rule was broken.
+///
+/// The fixture logs this line when its instance is stopped, so it is the
+/// plugin's own account of the host's ownership rather than the host's own.
+fn fixture_accounting(sink: &Recording) -> (usize, usize, usize, usize) {
+    let logs: Vec<String> = sink
+        .of_kind("log")
+        .into_iter()
+        .filter_map(|log| match log {
+            Delivered::Log { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect();
+    let line = logs
+        .iter()
+        .rev()
+        .find(|message| message.contains("FIXTURE_ACCOUNT"))
+        .expect("the fixture logged its ledger when its instance was stopped")
+        .clone();
+    let field = |name: &str| -> usize {
+        line.split_whitespace()
+            .find_map(|word| word.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("the ledger line carries {name}: {line}"))
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} parses in {line}: {error}"))
+    };
+    (
+        field("allocs"),
+        field("frees"),
+        field("live"),
+        field("violations"),
+    )
+}
+
+/// The one event on `topic`, as the sink holds it.
+fn event_on(sink: &Recording, wanted: &str) -> Vec<u8> {
+    let events: Vec<Vec<u8>> = sink
+        .of_kind("event")
+        .into_iter()
+        .filter_map(|event| match event {
+            Delivered::Event { topic, payload, .. } if topic == wanted => Some(payload),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 1, "one {wanted} event arrived: {events:?}");
+    events.into_iter().next().expect("the event is there")
+}
+
+#[test]
+fn each_callback_kind_is_delivered_with_the_instance_name_and_its_fields() {
+    let _guard = one_at_a_time();
+    let sink = Recording::new();
+    let (_host, instance) = named_instance(&sink, "fixture");
+
+    // The fixture logs and emits an event while it initialises, so the two
+    // lifecycle kinds arrive before any call is made.
+    let echo = finish(&instance, &sink, "tool.echo", 1, "wait").expect("the echo call succeeds");
+    let echoed = support::decode(&echo);
+    assert_eq!(echoed.echo, "wait");
+
+    // `tool.pending` reports progress and asks for a timer, which `finish`
+    // answers through the completion entry.
+    finish(&instance, &sink, "tool.pending", 2, "wait").expect("the pending call succeeds");
+
+    let delivered = sink.delivered();
+    assert!(
+        !delivered.is_empty(),
+        "the sink received nothing at all: {delivered:?}"
+    );
+
+    for entry in &delivered {
+        let instance = match entry {
+            Delivered::Progress { instance, .. }
+            | Delivered::Event { instance, .. }
+            | Delivered::Log { instance, .. }
+            | Delivered::Service { instance, .. } => instance,
+        };
+        assert_eq!(
+            instance, "fixture",
+            "every callback names the instance it came from: {entry:?}"
+        );
+    }
+
+    let events = sink.of_kind("event");
+    let topics: Vec<&str> = events
+        .iter()
+        .map(|event| match event {
+            Delivered::Event { topic, .. } => topic.as_str(),
+            other => panic!("only an event is an event: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        topics,
+        vec!["fixture.ready", "fixture.answered"],
+        "the event carries its topic, and an event has no request id to carry"
+    );
+    let ready = match &events[0] {
+        Delivered::Event { topic, payload, .. } => (topic.clone(), payload.clone()),
+        other => panic!("only an event is an event: {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&ready.1).expect("the event payload is JSON"),
+        serde_json::json!({ "ready": true }),
+        "the event carries the payload the plugin emitted"
+    );
+
+    let progress = sink.of_kind("progress");
+    assert_eq!(progress.len(), 1, "one progress report: {progress:?}");
+    match &progress[0] {
+        Delivered::Progress {
+            request_id,
+            payload,
+            ..
+        } => {
+            assert_eq!(*request_id, 2, "progress names the request it belongs to");
+            assert_eq!(
+                serde_json::from_slice::<Progress>(payload).expect("the progress payload is JSON"),
+                Progress {
+                    stage: "working".to_string()
+                },
+                "the progress carries the payload the plugin reported"
+            );
+        }
+        other => panic!("only a progress report is a progress report: {other:?}"),
+    }
+
+    let services = sink.of_kind("service");
+    assert_eq!(services.len(), 1, "one service request: {services:?}");
+    match &services[0] {
+        Delivered::Service {
+            service,
+            request_id,
+            payload,
+            ..
+        } => {
+            assert_eq!(service, "timer");
+            assert_eq!(*request_id, 2, "the request names the id the answer needs");
+            assert_eq!(
+                serde_json::from_slice::<TimerAnswer>(payload).expect("the ask is JSON"),
+                TimerAnswer { delay_ms: 5 },
+                "the service request carries what the plugin asked for"
+            );
+        }
+        other => panic!("only a service request is a service request: {other:?}"),
+    }
+
+    let logs = sink.of_kind("log");
+    assert!(
+        logs.iter().any(|log| matches!(
+            log,
+            Delivered::Log { level: LogLevel::Info, message, .. }
+                if message == "fixture: initialised for fixture"
+        )),
+        "the fixture's own initialisation log arrived with its typed level: {logs:?}"
+    );
+    assert!(
+        logs.iter().all(|log| matches!(log, Delivered::Log { .. })),
+        "a log line is a log line"
+    );
+}
+
+#[test]
+fn a_payload_copy_outlives_the_buffer_the_plugin_handed_over() {
+    let _guard = one_at_a_time();
+    let sink = Recording::new();
+    let (_host, instance) = named_instance(&sink, "fixture");
+
+    finish(&instance, &sink, "tool.echo", 1, "wait").expect("the echo call succeeds");
+    let payload = event_on(&sink, "fixture.answered");
+
+    // The instance is stopped after the callback returned, so the fixture's own
+    // ledger shows whether every buffer it handed out was released by then.
+    instance
+        .shutdown()
+        .expect("nothing is in flight, so the instance quiesces");
+    let (allocs, frees, live, violations) = fixture_accounting(&sink);
+    assert!(allocs > 0, "the plugin allocated buffers: {allocs}");
+    assert_eq!(
+        frees, allocs,
+        "every buffer the plugin allocated was released through its own entry"
+    );
+    assert_eq!(live, 0, "the callback's buffer was released, not kept");
+    assert_eq!(violations, 0, "no ownership rule was broken");
+
+    // The sink still holds what it was handed, after the plugin's buffer and its
+    // contents are gone.
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&payload).expect("the copy is still readable"),
+        serde_json::json!({ "bytes": 4 }),
+        "the copy outlives the buffer it was taken from"
+    );
+}
+
+#[test]
+fn a_payload_copy_outlives_the_buffer_when_the_sink_panics() {
+    let _guard = one_at_a_time();
+    let sink = Recording::panicking_on(Kind::Event);
+    let (_host, instance) = named_instance(&sink, "fixture");
+
+    // The sink panics on the event the echo call emits, inside the callback's
+    // own frame, so the call still finishes.
+    let result = finish(&instance, &sink, "tool.echo", 1, "wait");
+    assert!(
+        result.is_ok(),
+        "a sink that panics does not fail the plugin's call: {result:?}"
+    );
+    assert!(
+        sink.of_kind("event").is_empty(),
+        "the panicking sink recorded nothing, which is what it was asked for"
+    );
+
+    instance
+        .shutdown()
+        .expect("nothing is in flight, so the instance quiesces");
+    let (allocs, frees, live, violations) = fixture_accounting(&sink);
+    assert!(allocs > 0, "the plugin allocated buffers: {allocs}");
+    assert_eq!(
+        frees, allocs,
+        "the buffer was released even though the sink panicked in the callback"
+    );
+    assert_eq!(live, 0, "nothing the plugin handed over is still held");
+    assert_eq!(violations, 0, "no ownership rule was broken");
+}
+
+#[test]
+fn a_panicking_sink_is_caught_and_recorded_and_the_call_still_completes() {
+    let _guard = one_at_a_time();
+    let sink = Recording::panicking_on(Kind::Event);
+    let (host, instance) = named_instance(&sink, "fixture");
+
+    let body =
+        finish(&instance, &sink, "tool.echo", 1, "wait").expect("the plugin's call completes");
+    assert_eq!(
+        support::decode(&body).echo,
+        "wait",
+        "the plugin's own answer is the call's result"
+    );
+
+    let ledger = host.ordering();
+    assert!(
+        ledger.iter().any(|line| {
+            line.contains("the sink panicked")
+                && line.contains("an event")
+                && line.contains("fixture")
+                && line.contains("a deliberate panic")
+        }),
+        "the panic is caught in the callback's own frame and recorded, naming the callback, \
+         the instance and what the panic said: {ledger:?}"
+    );
+
+    // The instance keeps serving: a panic inside a destination is one callback's
+    // trouble, not the plugin's.
+    let second = finish(&instance, &sink, "tool.echo", 2, "wait");
+    assert!(
+        second.is_ok(),
+        "the instance still serves after its sink panicked: {second:?}"
+    );
+}
+
+#[test]
+fn callbacks_from_one_instance_arrive_in_emission_order() {
+    let _guard = one_at_a_time();
+    let sink = Recording::new();
+    let (_host, instance) = named_instance(&sink, "fixture");
+
+    // Each call emits one event whose payload carries the length it answered,
+    // so the emission order is readable from the record rather than assumed.
+    for (request_id, echo) in [(1, "a"), (2, "ab"), (3, "abc")] {
+        let body = finish(&instance, &sink, "tool.echo", request_id, echo)
+            .expect("the echo call succeeds");
+        assert_eq!(support::decode(&body).echo, echo);
+    }
+
+    let events: Vec<(String, usize)> = sink
+        .of_kind("event")
+        .into_iter()
+        .map(|event| match event {
+            Delivered::Event { topic, payload, .. } => (
+                topic,
+                serde_json::from_slice::<serde_json::Value>(&payload)
+                    .expect("the event payload is JSON")["bytes"]
+                    .as_u64()
+                    .unwrap_or(0) as usize,
+            ),
+            other => panic!("only an event is an event: {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(
+        events,
+        vec![
+            ("fixture.ready".to_string(), 0),
+            ("fixture.answered".to_string(), 1),
+            ("fixture.answered".to_string(), 2),
+            ("fixture.answered".to_string(), 3),
+        ],
+        "one instance's callbacks arrive in the order that instance emitted them"
+    );
+}
+
+/// A sink whose one instance's answered event waits for another instance's.
+///
+/// It is how "callbacks from different instances are not ordered against each
+/// other" is measured rather than argued. A delivery for the waiting instance
+/// holds only that instance's lock, so the other instance's delivery can happen
+/// while it waits; one delivery lock shared by every instance would leave the
+/// first waiting until its budget ran out, and `saw_the_other_instance` would be
+/// false.
+#[derive(Clone)]
+struct Rendezvous {
+    delivered: Arc<Mutex<Vec<Delivered>>>,
+    waits_for: String,
+    arrived: Arc<(Mutex<bool>, Condvar)>,
+    saw_the_other_instance: Arc<AtomicBool>,
+}
+
+impl Rendezvous {
+    fn new(waits_for: &str) -> Rendezvous {
+        Rendezvous {
+            delivered: Arc::new(Mutex::new(Vec::new())),
+            waits_for: waits_for.to_string(),
+            arrived: Arc::new((Mutex::new(false), Condvar::new())),
+            saw_the_other_instance: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn saw_the_other_instance(&self) -> bool {
+        self.saw_the_other_instance.load(SeqCst)
+    }
+}
+
+impl Sink for Rendezvous {
+    fn progress(&self, _instance: &str, _request_id: u64, _payload: Vec<u8>) {}
+
+    fn event(&self, instance: &str, topic: &str, payload: Vec<u8>) {
+        self.delivered.lock().unwrap().push(Delivered::Event {
+            instance: instance.to_string(),
+            topic: topic.to_string(),
+            payload,
+        });
+        if topic != "fixture.answered" {
+            return;
+        }
+        let (arrived, condvar) = &*self.arrived;
+        if instance != self.waits_for {
+            *arrived.lock().unwrap() = true;
+            condvar.notify_all();
+            return;
+        }
+        let deadline = Instant::now() + support::BUDGET;
+        let mut flag = arrived.lock().unwrap();
+        while !*flag && Instant::now() < deadline {
+            let (guard, _) = condvar
+                .wait_timeout(flag, Duration::from_millis(10))
+                .expect("the condvar is not poisoned");
+            flag = guard;
+        }
+        self.saw_the_other_instance.store(*flag, SeqCst);
+    }
+
+    fn log(&self, _instance: &str, _level: LogLevel, _message: &str) {}
+
+    fn service_request(
+        &self,
+        _instance: &str,
+        _service: &str,
+        _request_id: u64,
+        _payload: Vec<u8>,
+    ) -> MetisStatus {
+        MetisStatus::NotFound
+    }
+}
+
+#[test]
+fn callbacks_from_different_instances_are_not_ordered_against_each_other() {
+    let _guard = one_at_a_time();
+    let sink = Rendezvous::new("a");
+    let host = Host::with_sink(sink.clone());
+    let loaded = fixture();
+    let a = block_on(
+        loaded
+            .init_plugin(&host.for_instance("a"), &initialisation_body("a"))
+            .expect("the first instance's initialisation starts"),
+    )
+    .expect("the first instance initialises");
+    let b = block_on(
+        loaded
+            .init_plugin(&host.for_instance("b"), &initialisation_body("b"))
+            .expect("the second instance's initialisation starts"),
+    )
+    .expect("the second instance initialises");
+
+    let first = thread::spawn({
+        let a = Arc::clone(&a);
+        move || drive(&a, "tool.echo", 1, "a")
+    });
+    let second = thread::spawn({
+        let b = Arc::clone(&b);
+        move || drive(&b, "tool.echo", 2, "b")
+    });
+
+    first
+        .join()
+        .expect("the first thread finishes")
+        .expect("the first call succeeds");
+    second
+        .join()
+        .expect("the second thread finishes")
+        .expect("the second call succeeds");
+
+    assert!(
+        sink.saw_the_other_instance(),
+        "one instance's callback ran while the other instance's was in flight, so the two \
+         instances are not ordered against each other"
+    );
+    let instances: Vec<String> = sink
+        .delivered
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|delivered| match delivered {
+            Delivered::Event { instance, .. } => Some(instance.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        instances.contains(&"a".to_string()) && instances.contains(&"b".to_string()),
+        "both instances delivered their callbacks: {instances:?}"
+    );
+}
+
+#[test]
+fn an_accepted_service_request_is_answered_later_through_the_completion_entry() {
+    let _guard = one_at_a_time();
+    let sink = Recording::new();
+    let (_host, instance) = named_instance(&sink, "fixture");
+
+    let mut call = instance
+        .invoke("tool.pending", 1, &request("wait"))
+        .expect("the future starts");
+    assert!(
+        matches!(poll_once(&mut call), Poll::Pending),
+        "the capability parks on the answer it asked for"
+    );
+
+    let asked: Vec<(String, u64, Vec<u8>)> = sink
+        .of_kind("service")
+        .into_iter()
+        .filter_map(|delivered| match delivered {
+            Delivered::Service {
+                service,
+                request_id,
+                payload,
+                ..
+            } => Some((service, request_id, payload)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked.len(), 1, "one service request: {asked:?}");
+    let (service, request_id, payload) = asked.into_iter().next().expect("the ask is there");
+    assert_eq!(service, "timer");
+    assert_eq!(
+        request_id, 1,
+        "the answer is addressed with the id the request carried"
+    );
+    assert_eq!(
+        serde_json::from_slice::<TimerAnswer>(&payload).expect("the ask is JSON"),
+        TimerAnswer { delay_ms: 5 }
+    );
+
+    // Nothing is answered until the sink's answer arrives through the existing
+    // completion entry, which is the whole protocol: the sink accepted the
+    // request and the daemon answers it later.
+    assert!(
+        matches!(poll_once(&mut call), Poll::Pending),
+        "no poll resolves the call before the completion"
+    );
+    let answer = serde_json::to_vec(&TimerAnswer { delay_ms: 7 }).expect("the answer serialises");
+    instance
+        .complete_service(request_id, MetisStatus::Ok, &answer)
+        .expect("the instance still holds the call");
+
+    match poll_once(&mut call) {
+        Poll::Ready(Ok(body)) => {
+            assert_eq!(
+                support::decode(&body).echo,
+                "timer 7",
+                "the plugin's own answer"
+            );
+        }
+        other => panic!("the call resolves once the completion arrives: {other:?}"),
+    }
+}
+
+#[test]
+fn a_refused_service_request_is_refused_synchronously() {
+    let _guard = one_at_a_time();
+    let sink = Recording::refusing(MetisStatus::Unsupported);
+    let (_host, instance) = named_instance(&sink, "fixture");
+
+    let mut call = instance
+        .invoke("tool.pending", 1, &request("wait"))
+        .expect("the future starts");
+
+    // The refusal is the callback's return value, so the plugin learns it from
+    // the call it made: the future resolves with that status and nothing is
+    // answered later.
+    match poll_once(&mut call) {
+        Poll::Ready(Err(CallError::Status(status))) => assert_eq!(
+            status,
+            MetisStatus::Unsupported,
+            "the refusal reaches the plugin as the status the sink returned"
+        ),
+        other => panic!("the refused request fails the call: {other:?}"),
+    }
+    assert_eq!(
+        sink.of_kind("service").len(),
+        1,
+        "the request was delivered once and refused once"
+    );
+}
+
+#[test]
+fn a_host_with_no_sink_records_into_the_accessors_its_tests_read() {
+    let _guard = one_at_a_time();
+    // No sink is installed, so the host is the recording one: this is the host
+    // the rest of the suite builds, and its accessors keep answering.
+    let host = Host::new();
+    let loaded = fixture();
+    let instance = block_on(
+        loaded
+            .init_plugin(&host, &initialisation_body("fixture"))
+            .expect("the initialisation entry starts"),
+    )
+    .expect("the fixture initialises");
+
+    let body = drive(&instance, "tool.echo", 1, "wait").expect("the echo call succeeds");
+    assert_eq!(support::decode(&body).echo, "wait");
+
+    assert!(
+        host.logs()
+            .iter()
+            .any(|line| line == "[1] fixture: initialised for fixture"),
+        "a log line is recorded with its level, as it always was: {:?}",
+        host.logs()
+    );
+    assert_eq!(
+        host.events(),
+        vec!["fixture.ready", "fixture.answered"],
+        "event topics are recorded in order, as they always were"
+    );
+
+    let mut call = instance
+        .invoke("tool.pending", 2, &request("wait"))
+        .expect("the future starts");
+    assert!(matches!(poll_once(&mut call), Poll::Pending));
+    let pending = host.pending_services();
+    assert_eq!(
+        pending.len(),
+        1,
+        "the service request is recorded: {pending:?}"
+    );
+    assert_eq!(pending[0].service, "timer");
+    assert_eq!(pending[0].request_id, 2);
+    assert_eq!(
+        serde_json::from_slice::<TimerAnswer>(&pending[0].body).expect("the recorded ask is JSON"),
+        TimerAnswer { delay_ms: 5 }
+    );
+
+    let taken = host
+        .take_service(2)
+        .expect("the host takes the request it answers");
+    assert_eq!(taken.request_id, 2);
+    assert!(host.pending_services().is_empty(), "taking it removed it");
+    let answer = serde_json::to_vec(&TimerAnswer { delay_ms: 5 }).expect("the answer serialises");
+    instance
+        .complete_service(2, MetisStatus::Ok, &answer)
+        .expect("the instance still holds the call");
+    assert!(
+        matches!(poll_once(&mut call), Poll::Ready(Ok(_))),
+        "the answered call finishes through the completion entry"
+    );
+}
+
+#[test]
+fn a_plugin_loaded_through_the_load_entry_delivers_to_the_installed_sink() {
+    let _guard = one_at_a_time();
+    let sink = Recording::new();
+    // The host a daemon builds: one sink, set once before anything is loaded.
+    let host = Host::with_sink(sink.clone());
+    let name = support::bundle::INSTANCE_NAME;
+    let (file, trust) = support::bundle::bundle_file(Some(&support::bundle::manifest(
+        &support::bundle::CAPABILITIES,
+    )));
+
+    let serving = block_on(plugin_runtime::load::load_bundle(
+        &host,
+        file.path(),
+        &serde_json::json!({ "instance": name }),
+        &serde_json::json!({ "instance_name": name, "capability_version": 1 }),
+        &trust,
+    ))
+    .expect("the fixture's own bundle loads through the one entry");
+
+    // The fixture logs and emits an event while it initialises, so the lifecycle
+    // callbacks arrive before any capability is called, and the load is what
+    // named the instance they carry.
+    assert!(
+        sink.of_kind("log").iter().any(|log| matches!(
+            log,
+            Delivered::Log { instance, message, .. }
+                if instance == name && message == &format!("fixture: initialised for {name}")
+        )),
+        "the initialisation log reached the sink, named: {:?}",
+        sink.of_kind("log")
+    );
+    let ready = sink
+        .of_kind("event")
+        .into_iter()
+        .find(|event| matches!(event, Delivered::Event { topic, .. } if topic == "fixture.ready"))
+        .expect("the initialisation event reached the sink");
+    match ready {
+        Delivered::Event { instance, .. } => assert_eq!(
+            instance, name,
+            "the instance the load registered is the instance the sink is told about"
+        ),
+        other => panic!("only an event is an event: {other:?}"),
+    }
+
+    // And a capability served through the registry the load built delivers to
+    // the same sink, named the same way.
+    let body = drive(serving.instance(), "tool.echo", 1, "wait").expect("the echo call succeeds");
+    assert_eq!(support::decode(&body).echo, "wait");
+    let answered = sink
+        .of_kind("event")
+        .into_iter()
+        .find(
+            |event| matches!(event, Delivered::Event { topic, .. } if topic == "fixture.answered"),
+        )
+        .expect("the call's event reached the sink");
+    match answered {
+        Delivered::Event { instance, .. } => assert_eq!(instance, name),
+        other => panic!("only an event is an event: {other:?}"),
+    }
+}
