@@ -26,6 +26,7 @@ Run if asked (by number):
 9. `cargo run -p client --example echo`
 10. `cargo run -p client --example events`
 11. `cargo test --profile no-panic -p plugin-runtime --features no-panic-check --no-run`
+12. `cargo test -p plugin-runtime --test sample_bundle`
 
 Every command runs inside the devenv shell as `devenv shell -- <command>`, which
 is where `cargo`, `buf` and the rest exist. The three always-run commands are what
@@ -35,8 +36,10 @@ plugins from the BSR, so they need the credential described in `docs/dev-env.md`
 Numbers 9 and 10 are the two runnable walkthroughs, which CI does not run.
 Number 11 is the `no-panic` build check: it runs in a CI step of its own, it is
 the only place that assertion holds, and the block below records exactly what it
-proves and what it does not. The `## Run commands` section below documents the
-same commands per area, with what each one proves.
+proves and what it does not. Number 12 is the sample plugin's end-to-end gate:
+it runs as a CI step of its own beside the contract and ABI commands, and the
+block below records what one run of it proves. The `## Run commands` section
+below documents the same commands per area, with what each one proves.
 
 ## Framework
 
@@ -460,6 +463,27 @@ Plugin host, documented in `crates/plugin-runtime`:
   table and dropped after its library was unloaded faults the process, which the
   run reproduces in a subprocess of its own test binary and reads as the signal the
   child died with.
+- `cargo test -p plugin-runtime --test sample_bundle` -- the sample plugin's
+  end-to-end gate, which is command 12 of the protocol and runs in a CI step of
+  its own beside the contract and ABI commands. Every bundle it reads is packaged
+  inside the test: the C fixture's own library, built by the same script the ABI
+  harness runs so a stale library is never packaged, beside a hand-written
+  manifest, written the way an author writes one, signed with the shared test
+  signer's fixed key. The gate drives the three public entries in one run: it
+  loads the bundle through `load_bundle` with a host built by `Host::with_sink`,
+  dispatches the ready capability through the registry the load built and reads
+  its response, reads the event the plugin emitted out of its own sink rather
+  than out of the accessors, which answer nothing once a sink is installed, and
+  releases the instance through `Serving::release`, with the ordering ledger
+  asserting the order the release performed. Three properties are asserted rather
+  than assumed: a manifest that omits a capability the library declares, and one
+  that declares a capability the library does not have, are both refused by the
+  capability cross-check naming the capability that differed, so the gate fails
+  loudly when the manifest and the library disagree; a bundle with one altered
+  byte fails as a trust failure before anything is loaded; and a bundle whose
+  chain is signed by a key the store does not hold as a root is refused the same
+  way. The same run asserts that the daemon's compiled-in root set is empty, so
+  no shipped build trusts the test key.
 - `cargo test --profile no-panic -p plugin-runtime --features no-panic-check
   --no-run` -- the `no-panic` build check, which is command 11 of the protocol
   and runs in a CI step of its own. It is the only place that assertion holds,
@@ -638,12 +662,14 @@ for the Windows target, and by the platform-independent rules tested on Linux:
 shell on push to `main` and on pull requests, followed by the three contract
 commands and the five plugin ABI commands (the C plugin build, the C layout
 assertion check, the authoring-feature-off check, the harness, and the header
-drift check). It then runs the `no-panic` build check as a step of its own,
-because that assertion holds nowhere else: the step is the one place a linker
-sees the annotated frames with the feature on and the profile selected, and
-`docs/testing.md` records what it proves and what it does not. The frontend
-commands are not in CI yet; add them when the frontend has behaviour worth
-gating.
+drift check). It then runs the sample plugin's end-to-end gate as a step of its
+own, beside those checks, so a regression in the composed bundle path fails the
+pipeline rather than only a library seam beneath it. It then runs the `no-panic`
+build check as a step of its own, because that assertion holds nowhere else: the
+step is the one place a linker sees the annotated frames with the feature on and
+the profile selected, and `docs/testing.md` records what it proves and what it
+does not. The frontend commands are not in CI yet; add them when the frontend
+has behaviour worth gating.
 
 A second job, `windows`, runs on `windows-latest` and compiles the Windows local
 transport and the plugin line for the Windows target with
