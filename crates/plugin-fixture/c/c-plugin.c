@@ -21,8 +21,9 @@
  * - a reply-after-drop count: a service the host answers for a future that is
  *   already gone is reported, not dereferenced.
  *
- * Its four capabilities are `c.ready` (ready on the first poll), `c.timer` (asks
- * the host for a timer, then answers), `c.cancel` (parks until cancelled), and
+ * Its four capabilities are `c.ready` (ready on the first poll, and it emits one
+ * event through the host's `emit_event` entry), `c.timer` (asks the host for a
+ * timer, then answers), `c.cancel` (parks until cancelled), and
  * `c.drop_in_flight` (asks for a timer and is dropped before the answer).
  *
  * Initialisation is the `init_plugin` entry: it takes the one payload holding
@@ -358,6 +359,26 @@ static MetisStatus mode_for(const uint8_t *capability, size_t capability_len, mo
     return METIS_STATUS_NOT_FOUND;
 }
 
+/* The one event this plugin emits, from its ready capability.
+ *
+ * A plugin-originated event is the plugin's own buffer, and the host releases
+ * it through this plugin's `release_buffer` entry once it has copied it, which
+ * is why the ledger below balances. The `emit_event` entry is present only when
+ * the host table's `size` covers it, the same rule `issue_timer` applies to
+ * `service_request`. */
+static void emit_ready_event(const struct MetisHostApiV1 *host) {
+    static const char topic[] = "cplugin.ready";
+    if (host == NULL ||
+        host->size < offsetof(struct MetisHostApiV1, emit_event) + sizeof(void *)) {
+        return;
+    }
+    MetisBuffer payload = buf_from_body("{\"ready\":true}");
+    if (payload.ptr == NULL) {
+        return;
+    }
+    host->emit_event(host->user_data, (const uint8_t *)topic, sizeof(topic) - 1, payload);
+}
+
 static MetisStatus issue_timer(ctx_t *ctx) {
     const char *body = "{\"delay_ms\":20}";
     MetisBuffer payload = buf_from_body(body);
@@ -414,6 +435,9 @@ static MetisStatus c_invoke_future(void *instance, const uint8_t *capability, si
 static MetisStatus poll_body(ctx_t *ctx, MetisWaker waker, MetisBuffer *out_value) {
     switch (ctx->mode) {
     case MODE_READY: {
+        /* The event goes out before the response, the way a capability that has
+         * something to say says it while it is still running. */
+        emit_ready_event(ctx->host);
         *out_value = buf_from_body("{\"echo\":\"c.ready\",\"bytes\":5}");
         return out_value->ptr == NULL ? METIS_STATUS_INTERNAL : METIS_STATUS_OK;
     }
