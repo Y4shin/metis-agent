@@ -96,6 +96,17 @@ jobs:
       - name: Plugin ABI header regeneration check
         run: devenv shell -- bash scripts/regenerate-abi-header.sh --check
 
+      # The sample plugin, end to end: the C fixture's library is packaged into a
+      # signed bundle with a hand-written manifest and loaded through the public
+      # entry, one capability is dispatched and its response read, the event the
+      # plugin emitted is read through the installed sink, and the instance is
+      # released with the ordering ledger as the assertion. The same run fails
+      # when the manifest and the library disagree, when one byte of the bundle is
+      # altered, and when the chain is signed by a key that is not a configured
+      # root, and asserts that the daemon's compiled-in root set is empty.
+      - name: Sample bundle gate
+        run: devenv shell -- cargo test -p plugin-runtime --test sample_bundle
+
       # The `no_panic` assertion over the host's four callback hand-off frames.
       # It is a link-time check, so it needs a linker; it needs `panic =
       # "unwind"`, so it cannot run in a profile that aborts; and it needs the
