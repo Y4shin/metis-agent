@@ -19,6 +19,7 @@ use std::io::{Cursor, Write};
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use plugin_contract::abi::{
     METIS_ABI_MAJOR, METIS_ABI_MINOR, MetisAbiError, MetisTablePrefix,
@@ -52,9 +53,16 @@ fn host_target() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
+/// The fixture cdylib this test carries, built once however many bundles the
+/// run builds from it.
+fn fixture_library() -> &'static PathBuf {
+    static LIBRARY: OnceLock<PathBuf> = OnceLock::new();
+    LIBRARY.get_or_init(support::fixture_path)
+}
+
 /// The file name the fixture's own library carries.
 fn library_file_name() -> String {
-    support::fixture_path()
+    fixture_library()
         .file_name()
         .expect("the fixture library has a file name")
         .to_string_lossy()
@@ -63,7 +71,7 @@ fn library_file_name() -> String {
 
 /// The bytes a bundle carries as this host's library: the fixture cdylib.
 fn library_bytes() -> Vec<u8> {
-    std::fs::read(support::fixture_path()).expect("the fixture library this test built reads")
+    std::fs::read(fixture_library()).expect("the fixture library this test built reads")
 }
 
 /// The archive-relative path a library for `target` is carried at.
@@ -238,11 +246,18 @@ fn patched_table(size: usize, major: u32, minor: u32, symbol: &str) -> PathBuf {
         .replace("MAJOR", &major.to_string())
         .replace("MINOR", &minor.to_string());
     std::fs::write(&source, text).expect("the fixture's source is written");
+    // The compiler writes beside the library and the result is moved into
+    // place, so a run that is killed mid-compile leaves no partial library for
+    // the next run to load.
+    let building = directory.join(format!(
+        "lib{name}.building{}",
+        std::env::consts::DLL_SUFFIX
+    ));
     let status = Command::new(rustc())
         .arg("--crate-type=cdylib")
         .arg("--edition=2024")
         .arg("-o")
-        .arg(&library)
+        .arg(&building)
         .arg(&source)
         .status()
         .expect("rustc is runnable from a test, as the fixture build already assumes");
@@ -251,6 +266,7 @@ fn patched_table(size: usize, major: u32, minor: u32, symbol: &str) -> PathBuf {
         "the library that reports the table this test chose builds: {}",
         library.display()
     );
+    std::fs::rename(&building, &library).expect("the built library is moved into place");
     library
 }
 
