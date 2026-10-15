@@ -1432,11 +1432,20 @@ static WAKER_VTABLE: MetisWakerVtable = MetisWakerVtable {
 
 // --- host callbacks -------------------------------------------------------
 //
-// Every callback is an `extern "C"` frame reached from plugin code. Each one
-// takes its instance's delivery lock for as long as it runs, so callbacks from
-// one instance are delivered in emission order, and each one catches its own
-// panic, because only its own frame can: a panic raised inside a sink is
+// Every callback is an `extern "C"` frame reached from plugin code. The frame
+// the plugin calls is a hand-off to a delivery frame of the same shape, and the
+// delivery frame holds its instance's delivery lock for as long as it runs, so
+// callbacks from one instance are delivered in emission order, and catches its
+// own panic, because only its own frame can: a panic raised inside a sink is
 // recorded on the ordering ledger and the plugin's call carries on.
+//
+// Two frames rather than one, because the four hand-off frames carry the
+// `no-panic-check` assertion and a frame only passes it when its every
+// unwinding path is one a caught closure holds. The copy, the plugin's release
+// entry, the ordering ledger and the sink call all carry unwind paths the
+// compiler cannot remove, so the delivery is where they belong; the hand-off
+// frame above it holds the ABI shape and the annotation. What that assertion
+// therefore covers, and what it does not, is written down in `docs/testing.md`.
 
 /// Delivers one callback, catching a panic instead of letting it cross the
 /// frame.
@@ -1470,7 +1479,8 @@ fn panic_detail(panic: &Box<dyn std::any::Any + Send>) -> String {
     "a panic with no message".to_string()
 }
 
-unsafe extern "C" fn host_progress(user_data: *mut c_void, request_id: u64, payload: MetisBuffer) {
+#[inline(never)]
+extern "C" fn deliver_progress(user_data: *mut c_void, request_id: u64, payload: MetisBuffer) {
     // SAFETY: `user_data` is this host's own pointer.
     let target = unsafe { callback_target(user_data) };
     let _delivery = lock(&target.delivery);
@@ -1490,7 +1500,8 @@ unsafe extern "C" fn host_progress(user_data: *mut c_void, request_id: u64, payl
     );
 }
 
-unsafe extern "C" fn host_emit_event(
+#[inline(never)]
+extern "C" fn deliver_event(
     user_data: *mut c_void,
     topic: *const u8,
     topic_len: usize,
@@ -1515,7 +1526,8 @@ unsafe extern "C" fn host_emit_event(
     );
 }
 
-unsafe extern "C" fn host_log(
+#[inline(never)]
+extern "C" fn deliver_log(
     user_data: *mut c_void,
     level: i32,
     message: *const u8,
@@ -1546,7 +1558,8 @@ unsafe extern "C" fn host_log(
     );
 }
 
-unsafe extern "C" fn host_service_request(
+#[inline(never)]
+extern "C" fn deliver_service_request(
     user_data: *mut c_void,
     service: *const u8,
     service_len: usize,
@@ -1575,6 +1588,46 @@ unsafe extern "C" fn host_service_request(
         },
         MetisStatus::Internal,
     )
+}
+
+/// The progress hand-off: the ABI shape, and the delivery one call away.
+#[cfg_attr(feature = "no-panic-check", no_panic::no_panic)]
+unsafe extern "C" fn host_progress(user_data: *mut c_void, request_id: u64, payload: MetisBuffer) {
+    deliver_progress(user_data, request_id, payload);
+}
+
+/// The event hand-off.
+#[cfg_attr(feature = "no-panic-check", no_panic::no_panic)]
+unsafe extern "C" fn host_emit_event(
+    user_data: *mut c_void,
+    topic: *const u8,
+    topic_len: usize,
+    payload: MetisBuffer,
+) {
+    deliver_event(user_data, topic, topic_len, payload);
+}
+
+/// The log hand-off.
+#[cfg_attr(feature = "no-panic-check", no_panic::no_panic)]
+unsafe extern "C" fn host_log(
+    user_data: *mut c_void,
+    level: i32,
+    message: *const u8,
+    message_len: usize,
+) {
+    deliver_log(user_data, level, message, message_len);
+}
+
+/// The service-request hand-off, which is the one callback that answers.
+#[cfg_attr(feature = "no-panic-check", no_panic::no_panic)]
+unsafe extern "C" fn host_service_request(
+    user_data: *mut c_void,
+    service: *const u8,
+    service_len: usize,
+    request_id: u64,
+    payload: MetisBuffer,
+) -> MetisStatus {
+    deliver_service_request(user_data, service, service_len, request_id, payload)
 }
 
 #[cfg(test)]

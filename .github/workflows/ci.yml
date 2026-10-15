@@ -96,6 +96,16 @@ jobs:
       - name: Plugin ABI header regeneration check
         run: devenv shell -- bash scripts/regenerate-abi-header.sh --check
 
+      # The `no_panic` assertion over the host's four callback hand-off frames.
+      # It is a link-time check, so it needs a linker; it needs `panic =
+      # "unwind"`, so it cannot run in a profile that aborts; and it needs the
+      # compiler to see the frames with optimization, so it selects the
+      # workspace's `no-panic` profile at `opt-level = 1`. This step is the one
+      # place the assertion holds, and `docs/testing.md` records what it proves
+      # and what it does not.
+      - name: Plugin host callback panic-free check
+        run: devenv shell -- cargo test --profile no-panic -p plugin-runtime --features no-panic-check --no-run
+
   # The Windows half of the local transport is compiled, never run: no runner in
   # this effort executes a named-pipe test, so the evidence this job produces is
   # compilation for the Windows target. `--all-targets` is what compiles the
