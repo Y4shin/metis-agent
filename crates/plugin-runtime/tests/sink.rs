@@ -11,7 +11,7 @@ mod support;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 
 use plugin_contract::abi::MetisStatus;
@@ -20,6 +20,20 @@ use plugin_runtime::sink::{LogLevel, Sink};
 use plugin_runtime::{CallError, Host, Instance, PluginCall};
 
 use support::{block_on, fixture, initialisation_body, request};
+
+/// One test at a time in this binary.
+///
+/// The fixture's buffer ledger is process-wide: `live` counts every buffer the
+/// plugin allocated and has not seen released, across every instance in this
+/// process. A case that reads it therefore has to be the only case running, so
+/// every test here takes this guard.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Which callback a test sink was told to panic on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +116,14 @@ impl Recording {
             panic!("test sink: a deliberate panic inside a {kind:?} callback");
         }
         self.delivered.lock().unwrap().push(delivered);
+    }
+
+    /// A sink that panics inside the given callback kind.
+    fn panicking_on(kind: Kind) -> Recording {
+        Recording {
+            panics_on: Some(kind),
+            ..Recording::new()
+        }
     }
 }
 
@@ -195,9 +217,10 @@ fn finish(
     instance: &Arc<Instance>,
     sink: &Recording,
     capability: &str,
+    request_id: u64,
 ) -> Result<Vec<u8>, CallError> {
     let mut call = instance
-        .invoke(capability, 1, &request("wait"))
+        .invoke(capability, request_id, &request("wait"))
         .expect("the future starts");
     let mut answered = false;
     loop {
@@ -230,20 +253,70 @@ fn finish(
     }
 }
 
+/// The fixture's own buffer ledger: what it allocated, what it saw released,
+/// what is still live, and whether any ownership rule was broken.
+///
+/// The fixture logs this line when its instance is stopped, so it is the
+/// plugin's own account of the host's ownership rather than the host's own.
+fn fixture_accounting(sink: &Recording) -> (usize, usize, usize, usize) {
+    let logs: Vec<String> = sink
+        .of_kind("log")
+        .into_iter()
+        .filter_map(|log| match log {
+            Delivered::Log { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect();
+    let line = logs
+        .iter()
+        .rev()
+        .find(|message| message.contains("FIXTURE_ACCOUNT"))
+        .expect("the fixture logged its ledger when its instance was stopped")
+        .clone();
+    let field = |name: &str| -> usize {
+        line.split_whitespace()
+            .find_map(|word| word.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("the ledger line carries {name}: {line}"))
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} parses in {line}: {error}"))
+    };
+    (
+        field("allocs"),
+        field("frees"),
+        field("live"),
+        field("violations"),
+    )
+}
+
+/// The one event on `topic`, as the sink holds it.
+fn event_on(sink: &Recording, wanted: &str) -> Vec<u8> {
+    let events: Vec<Vec<u8>> = sink
+        .of_kind("event")
+        .into_iter()
+        .filter_map(|event| match event {
+            Delivered::Event { topic, payload, .. } if topic == wanted => Some(payload),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 1, "one {wanted} event arrived: {events:?}");
+    events.into_iter().next().expect("the event is there")
+}
+
 #[test]
 fn each_callback_kind_is_delivered_with_the_instance_name_and_its_fields() {
+    let _guard = one_at_a_time();
     let sink = Recording::new();
     let (_host, instance) = named_instance(&sink, "fixture");
 
     // The fixture logs and emits an event while it initialises, so the two
     // lifecycle kinds arrive before any call is made.
-    let echo = finish(&instance, &sink, "tool.echo").expect("the echo call succeeds");
+    let echo = finish(&instance, &sink, "tool.echo", 1).expect("the echo call succeeds");
     let echoed = support::decode(&echo);
     assert_eq!(echoed.echo, "wait");
 
     // `tool.pending` reports progress and asks for a timer, which `finish`
     // answers through the completion entry.
-    finish(&instance, &sink, "tool.pending").expect("the pending call succeeds");
+    finish(&instance, &sink, "tool.pending", 2).expect("the pending call succeeds");
 
     let delivered = sink.delivered();
     assert!(
@@ -295,7 +368,7 @@ fn each_callback_kind_is_delivered_with_the_instance_name_and_its_fields() {
             payload,
             ..
         } => {
-            assert_eq!(*request_id, 1, "progress names the request it belongs to");
+            assert_eq!(*request_id, 2, "progress names the request it belongs to");
             assert_eq!(
                 serde_json::from_slice::<Progress>(payload).expect("the progress payload is JSON"),
                 Progress {
@@ -317,7 +390,7 @@ fn each_callback_kind_is_delivered_with_the_instance_name_and_its_fields() {
             ..
         } => {
             assert_eq!(service, "timer");
-            assert_eq!(*request_id, 1, "the request names the id the answer needs");
+            assert_eq!(*request_id, 2, "the request names the id the answer needs");
             assert_eq!(
                 serde_json::from_slice::<TimerAnswer>(payload).expect("the ask is JSON"),
                 TimerAnswer { delay_ms: 5 },
@@ -340,4 +413,67 @@ fn each_callback_kind_is_delivered_with_the_instance_name_and_its_fields() {
         logs.iter().all(|log| matches!(log, Delivered::Log { .. })),
         "a log line is a log line"
     );
+}
+
+#[test]
+fn a_payload_copy_outlives_the_buffer_the_plugin_handed_over() {
+    let _guard = one_at_a_time();
+    let sink = Recording::new();
+    let (_host, instance) = named_instance(&sink, "fixture");
+
+    finish(&instance, &sink, "tool.echo", 1).expect("the echo call succeeds");
+    let payload = event_on(&sink, "fixture.answered");
+
+    // The instance is stopped after the callback returned, so the fixture's own
+    // ledger shows whether every buffer it handed out was released by then.
+    instance
+        .shutdown()
+        .expect("nothing is in flight, so the instance quiesces");
+    let (allocs, frees, live, violations) = fixture_accounting(&sink);
+    assert!(allocs > 0, "the plugin allocated buffers: {allocs}");
+    assert_eq!(
+        frees, allocs,
+        "every buffer the plugin allocated was released through its own entry"
+    );
+    assert_eq!(live, 0, "the callback's buffer was released, not kept");
+    assert_eq!(violations, 0, "no ownership rule was broken");
+
+    // The sink still holds what it was handed, after the plugin's buffer and its
+    // contents are gone.
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&payload).expect("the copy is still readable"),
+        serde_json::json!({ "bytes": 4 }),
+        "the copy outlives the buffer it was taken from"
+    );
+}
+
+#[test]
+fn a_payload_copy_outlives_the_buffer_when_the_sink_panics() {
+    let _guard = one_at_a_time();
+    let sink = Recording::panicking_on(Kind::Event);
+    let (_host, instance) = named_instance(&sink, "fixture");
+
+    // The sink panics on the event the echo call emits, inside the callback's
+    // own frame, so the call still finishes.
+    let result = finish(&instance, &sink, "tool.echo", 1);
+    assert!(
+        result.is_ok(),
+        "a sink that panics does not fail the plugin's call: {result:?}"
+    );
+    assert!(
+        sink.of_kind("event").is_empty(),
+        "the panicking sink recorded nothing, which is what it was asked for"
+    );
+
+    instance
+        .shutdown()
+        .expect("nothing is in flight, so the instance quiesces");
+    let (allocs, frees, live, violations) = fixture_accounting(&sink);
+    assert!(allocs > 0, "the plugin allocated buffers: {allocs}");
+    assert_eq!(
+        frees, allocs,
+        "the buffer was released even though the sink panicked in the callback"
+    );
+    assert_eq!(live, 0, "nothing the plugin handed over is still held");
+    assert_eq!(violations, 0, "no ownership rule was broken");
 }
