@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use plugin_contract::abi::{METIS_ABI_MAJOR, METIS_ABI_MINOR, MetisAbiError};
 use plugin_contract::capability::CapabilityDescriptor;
 use serde::Deserialize;
 use serde_json::Value;
@@ -121,6 +122,33 @@ impl Manifest {
     /// The schema the daemon resolves this plugin's configuration against.
     pub fn config_schema(&self) -> &Value {
         &self.config_schema
+    }
+
+    /// The landed ABI rule, read from the plugin's side.
+    ///
+    /// The manifest declares the major it is built for and the oldest minor it
+    /// needs, so the checks are the table's own rules in the plugin's terms: the
+    /// declared major must be the one this build speaks, and the minor this
+    /// build knows must not be lower than the one the manifest requires. There
+    /// is no range syntax, and a newer minor needs no declaration at all,
+    /// because a newer table is read additively.
+    ///
+    /// The refusals are the landed ones, [`plugin_contract::abi::MetisAbiError`],
+    /// because it is one rule read from two sides rather than two rules.
+    pub fn abi_check(&self) -> Result<(), MetisAbiError> {
+        if self.abi_major != METIS_ABI_MAJOR {
+            return Err(MetisAbiError::MajorMismatch {
+                expected: METIS_ABI_MAJOR,
+                found: self.abi_major,
+            });
+        }
+        if self.min_abi_minor > METIS_ABI_MINOR {
+            return Err(MetisAbiError::MinorMismatch {
+                known: METIS_ABI_MINOR,
+                found: self.min_abi_minor,
+            });
+        }
+        Ok(())
     }
 
     /// The library this host loads, selected from the bundle the manifest came

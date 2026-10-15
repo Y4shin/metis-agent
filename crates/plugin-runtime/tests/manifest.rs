@@ -14,10 +14,19 @@
 
 mod support;
 
+use std::ffi::c_void;
 use std::io::{Cursor, Write};
+use std::mem::size_of;
+use std::path::PathBuf;
+use std::process::Command;
 
+use plugin_contract::abi::{
+    METIS_ABI_MAJOR, METIS_ABI_MINOR, MetisAbiError, MetisTablePrefix,
+    metis_plugin_table_has_init_plugin, metis_read_table,
+};
 use plugin_runtime::bundle::{StagedBundle, TrustStore, extract, verify_bundle};
 use plugin_runtime::manifest::{Manifest, ManifestError};
+use plugin_runtime::{CallError, Loaded};
 use serde_json::json;
 use support::signer::{self, TestChain};
 use zip::write::SimpleFileOptions;
@@ -29,6 +38,13 @@ const NAME: &str = signer::LEAF_COMMON_NAME;
 
 /// The manifest's name at the archive root, as the contract fixes it.
 const MANIFEST: &str = "manifest.toml";
+
+/// The entry symbol this build resolves, which is the frozen name for major 1.
+const ENTRY: &str = "metis_plugin_entry_v1";
+
+/// The entry symbol a plugin built for the next major exports, which this build
+/// cannot resolve at all.
+const OTHER_ENTRY: &str = "metis_plugin_entry_v2";
 
 /// This host's target, spelled the way the contract fixes it: the operating
 /// system and the architecture joined by a hyphen.
@@ -117,14 +133,7 @@ fn staged_with(manifest: Option<&str>) -> StagedBundle {
 /// The text is a literal, not a serialisation of any type in this tree: the
 /// format belongs to the author, and a hand-written manifest is what proves it.
 fn hand_written(name: &str) -> String {
-    let target = host_target();
-    hand_written_with(
-        name,
-        &format!(
-            "{target} = \"lib/{target}/{library}\"",
-            library = library_file_name()
-        ),
-    )
+    hand_written_with(name, &declaration(&host_target()))
 }
 
 /// The same hand-written manifest, with the given `[libraries]` declarations.
@@ -168,6 +177,98 @@ fn other_target() -> String {
         "macos-aarch64".to_string()
     } else {
         "linux-x86_64".to_string()
+    }
+}
+
+/// The `[libraries]` declaration for this host's own library.
+fn declaration(target: &str) -> String {
+    format!(
+        "{target} = \"lib/{target}/{library}\"",
+        library = library_file_name()
+    )
+}
+
+/// The hand-written manifest with its two ABI numbers changed, which is how a
+/// test asks for a manifest this build does not serve.
+fn manifest_needing(name: &str, abi_major: u32, min_abi_minor: u32) -> String {
+    hand_written(name)
+        .replace("abi_major = 1", &format!("abi_major = {abi_major}"))
+        .replace(
+            "min_abi_minor = 2",
+            &format!("min_abi_minor = {min_abi_minor}"),
+        )
+}
+
+/// The repository root, which is where the test's own scratch files live.
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|crates| crates.parent())
+        .expect("the repository root is two levels above this crate")
+        .to_path_buf()
+}
+
+/// The `rustc` the fixture is compiled with.
+///
+/// Every command of this effort runs inside the devenv shell, which is where the
+/// toolchain's `rustc` is on `PATH`; `RUSTC` names it when a caller set that.
+/// The `cargo` this test was run by is not used: in the pinned toolchain it is a
+/// wrapper with no `rustc` beside it.
+fn rustc() -> std::ffi::OsString {
+    std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into())
+}
+
+/// A library whose table reports `size`, `major` and `minor` under `symbol`.
+///
+/// The library is compiled once per set of numbers, from the fixture source in
+/// `tests/fixtures/`, so the reader is shown a table from a plugin built
+/// elsewhere rather than this build's own.
+fn patched_table(size: usize, major: u32, minor: u32, symbol: &str) -> PathBuf {
+    let directory = repository_root().join("target/manifest-tests");
+    std::fs::create_dir_all(&directory).expect("the test's scratch directory is creatable");
+    let name = format!("table-{size}-{major}-{minor}-{symbol}");
+    let library = directory.join(format!("lib{name}{}", std::env::consts::DLL_SUFFIX));
+    if library.exists() {
+        return library;
+    }
+    let source = directory.join(format!("{name}.rs"));
+    let text = include_str!("fixtures/patched_table.rs")
+        .replace("SYMBOL", symbol)
+        .replace("SIZE", &size.to_string())
+        .replace("MAJOR", &major.to_string())
+        .replace("MINOR", &minor.to_string());
+    std::fs::write(&source, text).expect("the fixture's source is written");
+    let status = Command::new(rustc())
+        .arg("--crate-type=cdylib")
+        .arg("--edition=2024")
+        .arg("-o")
+        .arg(&library)
+        .arg(&source)
+        .status()
+        .expect("rustc is runnable from a test, as the fixture build already assumes");
+    assert!(
+        status.success(),
+        "the library that reports the table this test chose builds: {}",
+        library.display()
+    );
+    library
+}
+
+/// Maps a library for a manifest, which is the step this seam is about.
+fn open(library: impl AsRef<std::path::Path>, manifest: &Manifest) -> Result<Loaded, CallError> {
+    // SAFETY: every library these tests map is one this test wrote or built from
+    // the tree it is testing, which is the trust the caller owes `Loaded::open`.
+    unsafe { Loaded::open(library, manifest) }
+}
+
+/// The refusal a mapping earns.
+///
+/// A mapped library is not `Debug`, so the tests read the refusal out by hand
+/// rather than through `expect_err`.
+fn refusal(result: Result<Loaded, CallError>, what: &str) -> CallError {
+    match result {
+        Err(error) => error,
+        Ok(_) => panic!("{what}"),
     }
 }
 
@@ -347,4 +448,173 @@ fn selection_refuses_a_bundle_that_carries_no_library_for_this_host() {
         }),
         "a declaration the bundle does not carry is refused, naming it"
     );
+}
+
+#[test]
+fn a_library_mapped_from_a_bundle_yields_a_table_the_raw_abi_checks_accept() {
+    let target = host_target();
+    let staged = staged_with(Some(&hand_written(NAME)));
+    let manifest = Manifest::read(&staged, NAME).expect("the bundle's manifest loads");
+    let selected = manifest
+        .select_library(&staged, &target)
+        .expect("this host's declaration names the library the bundle carries");
+
+    let loaded =
+        open(&selected, &manifest).expect("the bundle's library maps through its manifest");
+    assert_eq!(
+        loaded.abi(),
+        (METIS_ABI_MAJOR, METIS_ABI_MINOR),
+        "the mapped table reports this build's ABI"
+    );
+
+    // The landing's raw checks accept the mapped library's table, which is what
+    // makes the table usable by everything that comes after this step.
+    let table = loaded.table();
+    // SAFETY: the table is the loaded library's own and is live for as long as
+    // the library is.
+    let read = unsafe { metis_read_table(table) }.expect("the landed gate reads the mapped table");
+    assert!(
+        metis_plugin_table_has_init_plugin(table.size),
+        "the table's size covers the init_plugin entry this build needs"
+    );
+    assert_eq!(read.abi_major, METIS_ABI_MAJOR);
+    assert_eq!(read.abi_minor, METIS_ABI_MINOR);
+}
+
+#[test]
+fn the_mapping_step_refuses_a_manifest_built_for_another_abi_major() {
+    let target = host_target();
+    let text = manifest_needing(NAME, METIS_ABI_MAJOR + 1, METIS_ABI_MINOR);
+    let staged = staged_with(Some(&text));
+    let manifest = Manifest::read(&staged, NAME).expect("the manifest loads");
+    let library = manifest
+        .select_library(&staged, &target)
+        .expect("the library the manifest declares is staged");
+
+    assert_eq!(
+        refusal(
+            open(&library, &manifest),
+            "a plugin built for another major is refused"
+        ),
+        CallError::Version(MetisAbiError::MajorMismatch {
+            expected: METIS_ABI_MAJOR,
+            found: METIS_ABI_MAJOR + 1,
+        }),
+        "a plugin built for another major is refused with the landed error"
+    );
+}
+
+#[test]
+fn the_mapping_step_answers_this_builds_own_minor_demand_before_it_reads_a_library() {
+    // A manifest that needs a minor this build does not know is refused, and
+    // the path is deliberately not a library at all: the demand is decided
+    // before anything is opened, so the refusal is the version one and not the
+    // loader's.
+    let text = manifest_needing(NAME, METIS_ABI_MAJOR, METIS_ABI_MINOR + 1);
+    let staged = staged_with(Some(&text));
+    let manifest = Manifest::read(&staged, NAME).expect("the manifest loads");
+    assert_eq!(manifest.min_abi_minor(), METIS_ABI_MINOR + 1);
+    let not_a_library = staged.root().join("no-library-here");
+    assert_eq!(
+        refusal(
+            open(&not_a_library, &manifest),
+            "this build is older than the plugin needs, and it says so"
+        ),
+        CallError::Version(MetisAbiError::MinorMismatch {
+            known: METIS_ABI_MINOR,
+            found: METIS_ABI_MINOR + 1,
+        }),
+        "the demand is decided before the library is opened"
+    );
+
+    // The other direction is served: a plugin that needs an older minor is read
+    // by this build, which is newer than it asks for.
+    let target = host_target();
+    let text = manifest_needing(NAME, METIS_ABI_MAJOR, METIS_ABI_MINOR - 1);
+    let staged = staged_with(Some(&text));
+    let manifest = Manifest::read(&staged, NAME).expect("the manifest loads");
+    assert_eq!(
+        manifest.min_abi_minor(),
+        METIS_ABI_MINOR - 1,
+        "this test means the manifest to need the older minor"
+    );
+    let library = manifest
+        .select_library(&staged, &target)
+        .expect("the library the manifest declares is staged");
+    open(&library, &manifest).expect("a plugin that needs an older minor is served");
+}
+
+#[test]
+fn the_mapping_step_answers_the_landed_typed_errors_for_a_table_this_build_did_not_write() {
+    let manifest = Manifest::parse(&hand_written(NAME)).expect("the manifest is the format");
+    let prefix = size_of::<MetisTablePrefix>();
+    let slot = size_of::<*const c_void>();
+    let layout = prefix + 8 * slot;
+    let one_entry = prefix + slot;
+
+    // A table that is both stale and too short answers the version, so the
+    // version was decided before any entry's presence was read.
+    let stale = patched_table(one_entry, METIS_ABI_MAJOR, METIS_ABI_MINOR - 1, ENTRY);
+    assert_eq!(
+        refusal(open(&stale, &manifest), "a stale minor is refused"),
+        CallError::Version(MetisAbiError::MinorMismatch {
+            known: METIS_ABI_MINOR,
+            found: METIS_ABI_MINOR - 1,
+        }),
+        "an older minor is refused before any entry is read"
+    );
+
+    // A table that stops before an entry this build needs is refused by name.
+    let short = patched_table(one_entry, METIS_ABI_MAJOR, METIS_ABI_MINOR, ENTRY);
+    assert_eq!(
+        refusal(open(&short, &manifest), "a table too short is refused"),
+        CallError::Version(MetisAbiError::EntryMissing {
+            entry: "destroy_instance",
+        }),
+        "the first entry the reported size does not cover is the one named"
+    );
+
+    // Another major.
+    let other_major = patched_table(layout, METIS_ABI_MAJOR + 1, METIS_ABI_MINOR, ENTRY);
+    assert_eq!(
+        refusal(open(&other_major, &manifest), "another major is refused"),
+        CallError::Version(MetisAbiError::MajorMismatch {
+            expected: METIS_ABI_MAJOR,
+            found: METIS_ABI_MAJOR + 1,
+        })
+    );
+
+    // A newer minor whose table is longer than this build's layout is read: the
+    // additive tolerance is the landed reader's, and this step only reuses it.
+    let newer = patched_table(layout + slot, METIS_ABI_MAJOR, METIS_ABI_MINOR + 1, ENTRY);
+    let loaded = open(&newer, &manifest).expect("a newer minor's table is read");
+    assert_eq!(
+        loaded.abi(),
+        (METIS_ABI_MAJOR, METIS_ABI_MINOR + 1),
+        "the table reports the newer minor this build did not write"
+    );
+    assert_eq!(
+        loaded.table().size,
+        layout + slot,
+        "the reported size is the plugin's own, which is longer than this build's layout"
+    );
+}
+
+#[test]
+fn the_mapping_step_refuses_a_library_with_no_entry_symbol_for_this_major() {
+    let manifest = Manifest::parse(&hand_written(NAME)).expect("the manifest is the format");
+    let layout = size_of::<MetisTablePrefix>() + 8 * size_of::<*const c_void>();
+    let other_major = patched_table(layout, METIS_ABI_MAJOR, METIS_ABI_MINOR, OTHER_ENTRY);
+
+    let error = refusal(
+        open(&other_major, &manifest),
+        "a library built for another major has no entry this host can resolve",
+    );
+    match error {
+        CallError::Load(detail) => assert!(
+            detail.contains(&other_major.display().to_string()),
+            "the refusal says which library could not be loaded: {detail}"
+        ),
+        other => panic!("a missing entry symbol is a load refusal, and this one is {other:?}"),
+    }
 }

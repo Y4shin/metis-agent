@@ -150,6 +150,30 @@ impl Loaded {
         })
     }
 
+    /// Maps a library for a validated manifest.
+    ///
+    /// The manifest's demand is decided first, before the library is opened at
+    /// all: a plugin built for another ABI major, or one that needs a minor this
+    /// build does not know, is refused without a byte of it being read. The
+    /// library is then read through the same version gate [`Loaded::load`] uses,
+    /// so the table's major, its minor and its reported size are the landed
+    /// rules and the landed typed error.
+    ///
+    /// # Safety
+    ///
+    /// The library is arbitrary native code that will run in this process. A
+    /// caller must have established that the path is one it trusts, which for a
+    /// bundle is what the trust policy's acceptance of its signature establishes
+    /// and the extraction that staged it carries forward.
+    pub unsafe fn open(
+        path: impl AsRef<Path>,
+        manifest: &crate::manifest::Manifest,
+    ) -> Result<Loaded, CallError> {
+        manifest.abi_check()?;
+        // SAFETY: the caller vouches for the library, as `Loaded::load` requires.
+        unsafe { Loaded::load(path) }
+    }
+
     /// The ABI version the table reports.
     pub fn abi(&self) -> (u32, u32) {
         self.abi
