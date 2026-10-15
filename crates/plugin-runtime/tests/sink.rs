@@ -477,3 +477,37 @@ fn a_payload_copy_outlives_the_buffer_when_the_sink_panics() {
     assert_eq!(live, 0, "nothing the plugin handed over is still held");
     assert_eq!(violations, 0, "no ownership rule was broken");
 }
+
+#[test]
+fn a_panicking_sink_is_caught_and_recorded_and_the_call_still_completes() {
+    let _guard = one_at_a_time();
+    let sink = Recording::panicking_on(Kind::Event);
+    let (host, instance) = named_instance(&sink, "fixture");
+
+    let body = finish(&instance, &sink, "tool.echo", 1).expect("the plugin's call completes");
+    assert_eq!(
+        support::decode(&body).echo,
+        "wait",
+        "the plugin's own answer is the call's result"
+    );
+
+    let ledger = host.ordering();
+    assert!(
+        ledger.iter().any(|line| {
+            line.contains("the sink panicked")
+                && line.contains("an event")
+                && line.contains("fixture")
+                && line.contains("a deliberate panic")
+        }),
+        "the panic is caught in the callback's own frame and recorded, naming the callback, \
+         the instance and what the panic said: {ledger:?}"
+    );
+
+    // The instance keeps serving: a panic inside a destination is one callback's
+    // trouble, not the plugin's.
+    let second = finish(&instance, &sink, "tool.echo", 2);
+    assert!(
+        second.is_ok(),
+        "the instance still serves after its sink panicked: {second:?}"
+    );
+}
