@@ -36,6 +36,14 @@ toml.workspace = true
 # The bundle extractor's archive reader, with the feature set the workspace
 # table explains: no bzip2, no zstd, no AES, and a pure-Rust deflate backend.
 zip.workspace = true
+# The build-time panic assertion, optional and only for the dedicated CI step.
+no-panic = { workspace = true, optional = true }
+
+[features]
+# The `no_panic` compile-time assertion over the host-facing frames. It is off
+# by default because it needs a linker, `panic = "unwind"` and some
+# optimization, and `docs/testing.md` records it as the only place it holds.
+no-panic-check = ["dep:no-panic"]
 
 [dev-dependencies]
 # The integration test drives a real cdylib. It builds the fixture itself and

@@ -38,9 +38,26 @@ pub mod bundle;
 pub mod load;
 pub mod manifest;
 pub mod registry;
+pub mod sink;
 
 pub use plugin_contract::capability::{CapabilityDescriptor, CapabilityKind, CapabilityList};
 pub use registry::{Entry, Registry, RegistryError, RouteError};
+use sink::{LogLevel, RecordingSink, Records, Sink};
+
+/// Locks a mutex and takes its contents whatever happened to it before.
+///
+/// The host's callbacks are frames a plugin calls into, so a panic raised there
+/// costs more than a value another thread left mid-update: the poison is taken
+/// rather than refused. It is also what keeps the poisoning path of
+/// `Mutex::lock` out of the frames the `no-panic-check` feature asserts are
+/// panic-free.
+// rule: no-panic-check: the frames this helper serves are asserted panic-free,
+// so `Mutex::lock`'s poisoning path is not one of them.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// What can go wrong on the host side of one call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,12 +456,11 @@ fn read_capabilities(
 
 // --- the host -------------------------------------------------------------
 
-/// What the host recorded while a plugin was running.
-#[derive(Default)]
+/// What the host records while a plugin is running, and what it delivers.
 struct HostInner {
-    logs: Mutex<Vec<String>>,
-    events: Mutex<Vec<String>>,
-    services: Mutex<Vec<PendingService>>,
+    /// Where every callback goes. It is set when the host is built and never
+    /// changes, because the daemon decides its destination once.
+    sink: Arc<dyn Sink>,
     /// The ordering ledger: every step unload safety depends on, in order.
     order: Mutex<Vec<String>>,
     /// The plugin's `release_buffer`, which is how a host frees a plugin-owned
@@ -460,6 +476,27 @@ struct HostInner {
     /// The request ids of the wakes that arrived after that call's future was
     /// dropped, in arrival order.
     wakes_after_drop: Mutex<Vec<u64>>,
+}
+
+impl HostInner {
+    fn new(sink: Arc<dyn Sink>) -> HostInner {
+        HostInner {
+            sink,
+            order: Mutex::new(Vec::new()),
+            release_buffer: Mutex::new(None),
+            wakers_handed_out: AtomicUsize::new(0),
+            wakers_released: AtomicUsize::new(0),
+            wakes_after_drop: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Appends one step to the ordering ledger.
+    ///
+    /// It is on the shared state rather than on `Host`, because a callback
+    /// frame holds the target rather than a host.
+    fn order(&self, event: impl Into<String>) {
+        lock(&self.order).push(event.into());
+    }
 }
 
 /// One service the plugin asked for and the host has not answered.
@@ -479,10 +516,47 @@ pub struct PendingService {
 /// it installs catches its own panic, because a callback is an `extern "C"`
 /// frame the plugin calls into and only that frame can catch a panic raised
 /// inside it.
+///
+/// One host serves one library and every instance loaded from it, and each
+/// instance is named by the table its own [`Host::for_instance`] value carries.
+/// A clone of a host shares that value's table, so the clones a daemon keeps
+/// and the instances it loads all deliver to the one sink it installed.
 #[derive(Clone)]
 pub struct Host {
     inner: Arc<HostInner>,
+    /// The default sink's storage, which the accessors read. A host with a sink
+    /// of its own keeps an empty one, so the accessors answer nothing rather
+    /// than somebody else's records.
+    records: Arc<Records>,
+    /// The callback target this host's instances were built with: the shared
+    /// state, the instance name, and the instance's delivery lock.
+    ///
+    /// It is deliberately never read: `user_data` points into this allocation,
+    /// so holding it is what keeps that pointer valid for as long as the host
+    /// and the instances built from it live. The leading underscore says the
+    /// field exists for its lifetime and not for its value, as
+    /// [`Loaded`]'s mapped library does.
+    _target: Arc<CallbackTarget>,
     api: Arc<HostTable>,
+}
+
+/// What a callback's `user_data` points at.
+///
+/// The ABI carries one opaque pointer to every callback, so this is the only
+/// place the instance can be named from: the table belongs to one instance, and
+/// the name and the delivery lock are the instance's own while everything else
+/// is shared with the host.
+struct CallbackTarget {
+    inner: Arc<HostInner>,
+    /// The instance this table speaks for. Empty when no load named one, which
+    /// is what a host driving the raw ABI without a load has.
+    instance: String,
+    /// One delivery at a time, per instance.
+    ///
+    /// Callbacks from one instance are delivered in emission order, and this is
+    /// what orders them: two instances hold different targets, so nothing here
+    /// orders one instance's callbacks against another's.
+    delivery: Mutex<()>,
 }
 
 /// The host table as a value with a stable address.
@@ -500,24 +574,74 @@ unsafe impl Send for HostTable {}
 unsafe impl Sync for HostTable {}
 
 impl Host {
-    /// Builds a host with the full callback set installed.
+    /// Builds a host that records into its own accessors.
+    ///
+    /// This is the host a caller builds when it has no destination of its own:
+    /// logs, event topics and pending service requests are readable through
+    /// [`Host::logs`], [`Host::events`] and [`Host::pending_services`].
     pub fn new() -> Host {
-        let inner = Arc::new(HostInner::default());
-        let mut api = Box::new(MetisHostApiV1 {
+        let records = Arc::new(Records::default());
+        let sink: Arc<dyn Sink> = Arc::new(RecordingSink::new(Arc::clone(&records)));
+        Host::assemble(Arc::new(HostInner::new(sink)), records, String::new())
+    }
+
+    /// Builds a host that delivers every callback to `sink`.
+    ///
+    /// The sink is installed once, when the host is built, and every instance
+    /// loaded through the host and through clones of it delivers there. A host
+    /// built this way records nothing into [`Host::logs`] and its other
+    /// accessors, because the sink is the destination.
+    pub fn with_sink(sink: impl Sink) -> Host {
+        let sink: Arc<dyn Sink> = Arc::new(sink);
+        Host::assemble(
+            Arc::new(HostInner::new(sink)),
+            Arc::new(Records::default()),
+            String::new(),
+        )
+    }
+
+    /// The same host as seen by one instance, which every callback names.
+    ///
+    /// The ABI hands a callback one opaque pointer, so the instance name has to
+    /// travel in the host table the instance was built with. This value carries
+    /// a table of its own that names `instance` and shares the sink, the
+    /// ordering ledger and the rest of the host's state with the host it came
+    /// from, so several instances loaded through one host deliver to one sink
+    /// and each says which instance spoke. A build that loads a bundle does
+    /// this with the manifest's name, which is the name the instance is
+    /// registered under.
+    pub fn for_instance(&self, instance: impl Into<String>) -> Host {
+        Host::assemble(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.records),
+            instance.into(),
+        )
+    }
+
+    /// Builds one host value around one callback target.
+    fn assemble(inner: Arc<HostInner>, records: Arc<Records>, instance: String) -> Host {
+        let target = Arc::new(CallbackTarget {
+            inner: Arc::clone(&inner),
+            instance,
+            delivery: Mutex::new(()),
+        });
+        let mut api = MetisHostApiV1 {
             size: std::mem::size_of::<MetisHostApiV1>(),
             user_data: std::ptr::null_mut(),
             progress: host_progress,
             emit_event: host_emit_event,
             log: host_log,
             service_request: host_service_request,
-        });
-        // The `Arc` is what the callbacks dereference. It is turned into a raw
-        // pointer here and rebuilt in every callback, which is the standard way
-        // to hand a Rust value to C as `user_data`.
-        api.user_data = Arc::into_raw(Arc::clone(&inner)) as *mut c_void;
+        };
+        // The `Arc` is what the callbacks dereference. `Host` holds it too, so
+        // the pointer stays valid for as long as the host and the instance
+        // built from it do.
+        api.user_data = Arc::as_ptr(&target) as *mut c_void;
         Host {
             inner,
-            api: Arc::new(HostTable(*api)),
+            records,
+            _target: target,
+            api: Arc::new(HostTable(api)),
         }
     }
 
@@ -543,24 +667,27 @@ impl Host {
     }
 
     /// Every log line the plugin has sent, in order.
+    ///
+    /// A host built with a sink of its own records nothing here: the sink is
+    /// the destination, and these accessors belong to the recording default.
     pub fn logs(&self) -> Vec<String> {
-        self.inner.logs.lock().unwrap().clone()
+        lock(&self.records.logs).clone()
     }
 
     /// Every event topic the plugin has emitted, in order.
     pub fn events(&self) -> Vec<String> {
-        self.inner.events.lock().unwrap().clone()
+        lock(&self.records.events).clone()
     }
 
     /// The services the plugin has asked for and not been answered.
     pub fn pending_services(&self) -> Vec<PendingService> {
-        self.inner.services.lock().unwrap().clone()
+        lock(&self.records.services).clone()
     }
 
     /// Removes and returns one pending service, which is how a host takes a
     /// request it is about to answer.
     pub fn take_service(&self, request_id: u64) -> Option<PendingService> {
-        let mut services = self.inner.services.lock().unwrap();
+        let mut services = lock(&self.records.services);
         let index = services
             .iter()
             .position(|service| service.request_id == request_id)?;
@@ -579,7 +706,7 @@ impl Host {
     /// gone. The call's own drop is what calls this, so it is not part of the
     /// seam a daemon drives.
     pub(crate) fn cancel_services(&self, request_id: u64) -> Vec<PendingService> {
-        let mut services = self.inner.services.lock().unwrap();
+        let mut services = lock(&self.records.services);
         let mut released = Vec::new();
         services.retain(|service| {
             let mine = service.request_id == request_id;
@@ -593,7 +720,7 @@ impl Host {
 
     /// The ordering ledger: the steps unload safety depends on.
     pub fn ordering(&self) -> Vec<String> {
-        self.inner.order.lock().unwrap().clone()
+        lock(&self.inner.order).clone()
     }
 
     /// How many owning waker references the host handed out, how many were
@@ -620,17 +747,47 @@ impl Host {
     /// instead of being appended to the ledger, which carries the steps unload
     /// safety depends on.
     pub fn wakes_after_drop(&self) -> Vec<u64> {
-        self.inner.wakes_after_drop.lock().unwrap().clone()
+        lock(&self.inner.wakes_after_drop).clone()
     }
 
     pub(crate) fn order(&self, event: impl Into<String>) {
-        self.inner.order.lock().unwrap().push(event.into());
+        self.inner.order(event);
     }
 }
 
 impl Default for Host {
     fn default() -> Self {
         Host::new()
+    }
+}
+
+/// Copies a plugin-owned payload, releases the plugin's buffer, and strips the
+/// ABI's envelope.
+///
+/// The copy is taken before the buffer is released, and the release happens
+/// here, inside the callback, so a sink never holds a reference into plugin
+/// memory and the plugin's buffer is gone by the time the callback returns,
+/// whether or not the sink panicked afterwards. The envelope is stripped
+/// because every other payload this host reads is: the sink is handed the
+/// payload's body, which is the value the plugin serialised.
+///
+/// A buffer that is not one of this build's payloads is a protocol violation,
+/// so it is recorded on the ordering ledger and `None` is returned rather than
+/// bytes no sink could interpret.
+fn take_payload(target: &CallbackTarget, buffer: MetisBuffer) -> Option<Vec<u8>> {
+    let bytes = release_plugin_buffer(&target.inner, buffer);
+    if bytes.is_empty() {
+        return Some(Vec::new());
+    }
+    match metis_payload_body(&bytes) {
+        Ok(body) => Some(body.to_vec()),
+        Err(status) => {
+            target.inner.order(format!(
+                "a callback payload was refused with {}: it is not a payload this build reads",
+                status.as_str()
+            ));
+            None
+        }
     }
 }
 
@@ -641,7 +798,7 @@ fn release_plugin_buffer(inner: &HostInner, buffer: MetisBuffer) -> Vec<u8> {
     }
     // SAFETY: the buffer is a plugin allocation, valid until it is released.
     let bytes = unsafe { slice::from_raw_parts(buffer.ptr, buffer.len) }.to_vec();
-    let release = *inner.release_buffer.lock().unwrap();
+    let release = *lock(&inner.release_buffer);
     if let Some(release) = release {
         // SAFETY: the entry is the table's own, and the buffer is the one the
         // plugin just handed over.
@@ -650,16 +807,16 @@ fn release_plugin_buffer(inner: &HostInner, buffer: MetisBuffer) -> Vec<u8> {
     bytes
 }
 
-/// The `Arc<HostInner>` behind a `user_data` pointer.
+/// The callback target behind a `user_data` pointer.
 ///
 /// # Safety
 ///
-/// `user_data` must be a pointer this module built with `Arc::into_raw`, and the
+/// `user_data` must be a pointer this module built with `Arc::as_ptr`, and the
 /// reference must not outlive the `Arc` it came from.
-unsafe fn host_inner<'a>(user_data: *mut c_void) -> &'a HostInner {
-    // SAFETY: the caller guarantees the pointer came from `Arc::into_raw` on an
-    // `Arc<HostInner>` that is still alive.
-    unsafe { &*(user_data as *const HostInner) }
+unsafe fn callback_target<'a>(user_data: *mut c_void) -> &'a CallbackTarget {
+    // SAFETY: the caller guarantees the pointer came from `Arc::as_ptr` on an
+    // `Arc<CallbackTarget>` that is still alive.
+    unsafe { &*(user_data as *const CallbackTarget) }
 }
 
 // --- the instance ---------------------------------------------------------
@@ -1275,19 +1432,62 @@ static WAKER_VTABLE: MetisWakerVtable = MetisWakerVtable {
 
 // --- host callbacks -------------------------------------------------------
 //
-// Every callback is an `extern "C"` frame reached from plugin code, and each one
-// catches its own panic: only the callback's own frame can.
+// Every callback is an `extern "C"` frame reached from plugin code. Each one
+// takes its instance's delivery lock for as long as it runs, so callbacks from
+// one instance are delivered in emission order, and each one catches its own
+// panic, because only its own frame can: a panic raised inside a sink is
+// recorded on the ordering ledger and the plugin's call carries on.
+
+/// Delivers one callback, catching a panic instead of letting it cross the
+/// frame.
+///
+/// The sink is a caller's code running inside the plugin's poll frame, so a
+/// panic inside it is caught here, in the callback's own frame, recorded on the
+/// ordering ledger, and answered with `fallback` where the callback returns a
+/// status. That is what keeps one bad destination from taking down a plugin.
+fn deliver<T>(target: &CallbackTarget, what: &str, body: impl FnOnce() -> T, fallback: T) -> T {
+    match catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(panic) => {
+            let detail = panic_detail(&panic);
+            target.inner.order(format!(
+                "the sink panicked while delivering {what} for instance {}: {detail}",
+                target.instance
+            ));
+            fallback
+        }
+    }
+}
+
+/// What a caught panic said, as far as the message can be recovered.
+fn panic_detail(panic: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = panic.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "a panic with no message".to_string()
+}
 
 unsafe extern "C" fn host_progress(user_data: *mut c_void, request_id: u64, payload: MetisBuffer) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: `user_data` is this host's own pointer.
-        let inner = unsafe { host_inner(user_data) };
-        let body = release_plugin_buffer(inner, payload);
-        println!(
-            "[runtime] progress for request {request_id}: {} bytes",
-            body.len()
-        );
-    }));
+    // SAFETY: `user_data` is this host's own pointer.
+    let target = unsafe { callback_target(user_data) };
+    let _delivery = lock(&target.delivery);
+    deliver(
+        target,
+        "a progress report",
+        || {
+            let Some(body) = take_payload(target, payload) else {
+                return;
+            };
+            target
+                .inner
+                .sink
+                .progress(&target.instance, request_id, body);
+        },
+        (),
+    );
 }
 
 unsafe extern "C" fn host_emit_event(
@@ -1296,18 +1496,23 @@ unsafe extern "C" fn host_emit_event(
     topic_len: usize,
     payload: MetisBuffer,
 ) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: `user_data` is this host's own pointer, and the topic is
-        // borrowed for the call.
-        let inner = unsafe { host_inner(user_data) };
-        let topic = unsafe { slice::from_raw_parts(topic, topic_len) };
-        let _ = release_plugin_buffer(inner, payload);
-        inner
-            .events
-            .lock()
-            .unwrap()
-            .push(String::from_utf8_lossy(topic).to_string());
-    }));
+    // SAFETY: `user_data` is this host's own pointer.
+    let target = unsafe { callback_target(user_data) };
+    let _delivery = lock(&target.delivery);
+    deliver(
+        target,
+        "an event",
+        || {
+            // SAFETY: the topic is borrowed for the call.
+            let topic = unsafe { slice::from_raw_parts(topic, topic_len) };
+            let topic = String::from_utf8_lossy(topic);
+            let Some(body) = take_payload(target, payload) else {
+                return;
+            };
+            target.inner.sink.event(&target.instance, &topic, body);
+        },
+        (),
+    );
 }
 
 unsafe extern "C" fn host_log(
@@ -1316,17 +1521,29 @@ unsafe extern "C" fn host_log(
     message: *const u8,
     message_len: usize,
 ) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: `user_data` is this host's own pointer, and the message is
-        // borrowed for the call.
-        let inner = unsafe { host_inner(user_data) };
-        let message = unsafe { slice::from_raw_parts(message, message_len) };
-        inner
-            .logs
-            .lock()
-            .unwrap()
-            .push(format!("[{level}] {}", String::from_utf8_lossy(message)));
-    }));
+    // SAFETY: `user_data` is this host's own pointer.
+    let target = unsafe { callback_target(user_data) };
+    let _delivery = lock(&target.delivery);
+    deliver(
+        target,
+        "a log line",
+        || {
+            // SAFETY: the message is borrowed for the call.
+            let message = unsafe { slice::from_raw_parts(message, message_len) };
+            let message = String::from_utf8_lossy(message);
+            // The frozen callback carries levels 0 to 3. A value outside them
+            // is a protocol violation, so it is recorded rather than turned
+            // into a fifth level this build would have invented.
+            let Some(level) = LogLevel::from_abi(level) else {
+                target.inner.order(format!(
+                    "a log arrived at level {level}, which is not one of the four"
+                ));
+                return;
+            };
+            target.inner.sink.log(&target.instance, level, &message);
+        },
+        (),
+    );
 }
 
 unsafe extern "C" fn host_service_request(
@@ -1336,26 +1553,28 @@ unsafe extern "C" fn host_service_request(
     request_id: u64,
     payload: MetisBuffer,
 ) -> MetisStatus {
-    let caught = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: `user_data` is this host's own pointer, and the service name
-        // is borrowed for the call.
-        let inner = unsafe { host_inner(user_data) };
-        let service = unsafe { slice::from_raw_parts(service, service_len) };
-        let service = String::from_utf8_lossy(service).to_string();
-        // The payload is plugin-owned and released here, from inside the
-        // callback, which is the reentrancy the contract allows.
-        let body = release_plugin_buffer(inner, payload);
-        if service != "timer" {
-            return MetisStatus::NotFound;
-        }
-        inner.services.lock().unwrap().push(PendingService {
-            service,
-            request_id,
-            body,
-        });
-        MetisStatus::Ok
-    }));
-    caught.unwrap_or(MetisStatus::Internal)
+    // SAFETY: `user_data` is this host's own pointer.
+    let target = unsafe { callback_target(user_data) };
+    let _delivery = lock(&target.delivery);
+    deliver(
+        target,
+        "a service request",
+        || {
+            // SAFETY: the service name is borrowed for the call.
+            let service = unsafe { slice::from_raw_parts(service, service_len) };
+            let service = String::from_utf8_lossy(service);
+            // The payload is plugin-owned and released here, from inside the
+            // callback, which is the reentrancy the contract allows.
+            let Some(body) = take_payload(target, payload) else {
+                return MetisStatus::InvalidArgument;
+            };
+            target
+                .inner
+                .sink
+                .service_request(&target.instance, &service, request_id, body)
+        },
+        MetisStatus::Internal,
+    )
 }
 
 #[cfg(test)]
