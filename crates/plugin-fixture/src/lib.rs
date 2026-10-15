@@ -68,6 +68,17 @@ pub struct Fixture;
 /// The descriptor version every capability but the gated one advertises.
 const CAPABILITY_VERSION: u32 = 1;
 
+/// The instance name that asks the fixture's own constructor to fail.
+///
+/// A failed initialisation falls into two classes: one that means the
+/// configuration does not match what the plugin declared, and one that means
+/// the plugin is defective. A configuration the fixture cannot read is only
+/// ever the first, so this name is how a host asks for the second: the
+/// configuration and the host context agree, and the plugin's own setup fails
+/// with a status that speaks about the plugin rather than about the
+/// configuration.
+pub const DEFECTIVE_INITIALISATION: &str = "fixture-defective-initialisation";
+
 /// The capability a newer plugin build advertises: its descriptor version is
 /// one a host of this revision does not support.
 ///
@@ -157,6 +168,13 @@ impl Plugin for Fixture {
                 "the configuration was resolved for {} and this instance is {}",
                 config.instance, context.instance_name
             )));
+        }
+        if config.instance == DEFECTIVE_INITIALISATION {
+            // The other class: the configuration is the one this instance was
+            // resolved for, and the plugin's own setup fails anyway.
+            return Err(PluginError::Internal(
+                "fixture: a deliberately defective initialisation".to_string(),
+            ));
         }
         // A log and an event at initialisation time are how the lifecycle half
         // of both routes is exercised: the callbacks belong to the host table,

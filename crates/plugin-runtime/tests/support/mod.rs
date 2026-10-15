@@ -26,6 +26,7 @@ use plugin_fixture::payload::{
 };
 use plugin_runtime::{Host, Loaded};
 
+pub mod bundle;
 pub mod signer;
 
 /// How long a case may spin before it is called stuck.
