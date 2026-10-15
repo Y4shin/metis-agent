@@ -731,14 +731,32 @@ impl Instance {
 
     /// Marks a call's cancellation token. The plugin's future is expected to
     /// resolve as `Cancelled` on its next poll.
+    ///
+    /// An id this instance does not hold is answered as the frozen `NotFound`
+    /// status and the plugin is not called: the in-flight set is the host's own
+    /// record of what it holds, and the plugin's call registry is process-wide,
+    /// so entering the plugin with an id that belongs elsewhere would mark
+    /// another instance's call.
     pub fn cancel(&self, request_id: u64) -> Result<(), CallError> {
+        self.mark_cancel(request_id).map_err(CallError::Status)
+    }
+
+    /// The token-marking step, typed as the frozen status.
+    ///
+    /// The instance-wide form loops over this rather than over [`Instance::cancel`],
+    /// because the loop has no error variant of this crate's own to invent: an
+    /// id that left the in-flight set between the loop reading it and the token
+    /// being marked is the frozen `NotFound`.
+    fn mark_cancel(&self, request_id: u64) -> Result<(), MetisStatus> {
+        if !self.in_flight.lock().unwrap().contains(&request_id) {
+            return Err(MetisStatus::NotFound);
+        }
         // SAFETY: the instance is live and the function pointer is its own.
         let status = unsafe { (self.loaded.table().cancel)(self.handle, request_id) };
-        if status == MetisStatus::Ok {
-            Ok(())
-        } else {
-            Err(CallError::Status(status))
+        if status != MetisStatus::Ok {
+            return Err(status);
         }
+        Ok(())
     }
 
     /// Hands the plugin the host's answer to a service request.
