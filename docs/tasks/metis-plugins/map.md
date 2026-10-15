@@ -199,15 +199,17 @@ CI.
   never reads a configuration file. The file's representation, the root set's
   rotation story and the revocation entry's shape belong to `metis-daemon`, which
   owns configuration resolution, and they are not this effort's question.
-- The exact manifest field names and types, the extraction limits (entry
-  count, uncompressed size, permission bits), and whether a v1 bundle may
-  carry assets. These are spec-level detail for `to-spec`, not decisions that
-  block a ticket.
-- Which artifact is the sample plugin: the existing `plugin-fixture`
-  packaged as a bundle, or a new crate. The recommendation is the fixture,
-  packaged by a script and loaded through `plugin-runtime` in an integration
-  test, so the C plugin's hand-written manifest is exercised in the same
-  gate. `to-tickets` settles it.
+- Whether a v1 bundle may carry assets: the landed extractor stages the root
+  manifest plus exactly one file per target directory, with the entry count,
+  per-entry size and total size limits recorded in `docs/plugin-contract.md`
+  section 17.8 and the declared-mode rule fixed at `0600`. A producer that needs
+  several files per target needs a later ticket, because the rule is what
+  `sample-bundle-ci` must write against today.
+- The sample plugin is settled rather than open: the existing `plugin-fixture`,
+  packaged into a signed bundle with a hand-written manifest by a script and
+  loaded through `plugin-runtime` in an integration test, so the C plugin's
+  hand-written manifest is exercised in the same gate. `sample-bundle-ci` owns
+  it.
 - `docs/bugs/plugin-contract-c-static-assert-msvc.md` is open and sits in
   this effort's territory: `plugin-contract`'s build script compiles a C
   translation unit whose `_Static_assert` message form MSVC rejects, so

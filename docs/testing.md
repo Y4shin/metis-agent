@@ -296,6 +296,19 @@ Plugin host, documented in `crates/plugin-runtime`:
   nothing. The vectors are regenerated with `cargo test -p plugin-runtime --test
   bundle_verification -- --ignored`, which rewrites them from the signer after a
   deliberate format change; no other test writes a committed file.
+- `cargo test -p plugin-runtime --test bundle_extraction` -- the extractor at
+  `extract(verified, target)`, the seam `manifest-and-library` and
+  `async-initialisation` read next. Every archive it reads is built inside the
+  test: a well-formed bundle and hostile ones, so the refusals are exercised
+  against archives the test wrote rather than against a committed fixture, and
+  the declared sizes of a hostile archive's entries are rewritten after the
+  writer produced them. The run asserts each refusal's own typed error, that an
+  archive holding several targets stages only this host's files, that every
+  entry is validated even when this host does not stage it, that a refused
+  extraction removes its staging directory and a dropped `StagedBundle` removes
+  its own, that a staged file and its directories carry the host's own modes,
+  and that the entry count, per-entry size and total declared size limits are
+  enforced at their edges.
 
 Daemon state, documented in `crates/daemon`:
 

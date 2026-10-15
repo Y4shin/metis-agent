@@ -30,6 +30,9 @@ ed25519-dalek.workspace = true
 x509-cert.workspace = true
 der.workspace = true
 sha2.workspace = true
+# The bundle extractor's archive reader, with the feature set the workspace
+# table explains: no bzip2, no zstd, no AES, and a pure-Rust deflate backend.
+zip.workspace = true
 
 [dev-dependencies]
 # The integration test drives a real cdylib. It builds the fixture itself and

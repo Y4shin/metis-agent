@@ -489,3 +489,90 @@ verification ticket:
 The test signer that builds the committed vectors is a dev-dependency, on
 `x509-cert`'s `builder` feature and on `ed25519-dalek`'s `alloc` and `pkcs8`
 features, so no shipped build compiles a signing path.
+
+### 17.8 The archive and the extraction rules
+
+A bundle's archive is a ZIP file. The archive root carries `manifest.toml`, and
+each target the bundle supports is a directory under `lib/` named by that
+target's string. A target is one string, the operating system and the
+architecture joined by a hyphen exactly as `std::env::consts::OS` and
+`std::env::consts::ARCH` spell them, so `linux-x86_64` and `macos-aarch64`. A
+target's library path is `lib/<target>/<file name>`, and a target directory
+holds exactly one file.
+
+`plugin_runtime::bundle::extract(verified, target)` turns a verified bundle into
+a staging directory, or into a typed refusal. It stages the root manifest and
+this host's target directory and nothing else, so a bundle that carries several
+targets stages only the files this host's load needs. Every entry is validated
+whether or not this host's target needs it, and an entry outside those two
+places is validated and skipped rather than written.
+
+The refusals, in the order they are decided:
+
+1. the bytes are not a ZIP archive this build can read;
+2. the archive holds more than 256 entries;
+3. an entry's name is absolute (a leading `/` or `\`, or a Windows volume such
+   as `C:`), carries a `..` component, is empty once its separators are
+   removed, or carries a NUL byte;
+4. an entry is a symbolic link, a directory (its name ends in `/`, or its
+   declared type says so), or any other type that is not a regular file, so a
+   hard link, a device, a socket and a FIFO are all refused;
+5. an entry declares permission bits other than `0600`, the mode this host
+   writes. A declaration of `0600` is accepted with or without the
+   regular-file type bit beside it, and so is an entry whose external
+   attributes are zero, which declares no mode at all. A producer that declares
+   a mode must declare the mode the host itself would write; the `zip` writer
+   declares `0o644` when a producer does not choose one, so a producer sets it;
+6. an entry declares an uncompressed size above 64 MiB, or the entries'
+   declared sizes add up to more than 256 MiB between them. The per-entry limit
+   is checked first, so the archive total answers for an archive whose entries
+   are each inside their own limit;
+7. an entry this host stages does not read: its checksum disagrees, its stream
+   is malformed, or its compression method is one this build does not read;
+8. the archive holds no file directly under `lib/<target>/` (the bundle carries
+   no library for this host), or it holds more than one (which one is the
+   library is not decided).
+
+Only the declared sizes are summed and checked for the entries this host does
+not stage, and only the staged entries' bytes are read and checksummed, so a
+target this host does not load is never decompressed.
+
+The limits are the ones `plugin_runtime::bundle` exports: `MAX_ENTRIES` (256),
+`MAX_ENTRY_SIZE` (64 MiB) and `MAX_UNCOMPRESSED_SIZE` (256 MiB). A bundle
+carries one file per target plus the manifest, so the entry count leaves room
+for a producer that also carries assets while keeping the walk over the archive
+bounded, and the size limits bound what an archive can cost this host before a
+byte of it is written.
+
+**Staging.** `extract` creates one directory under `std::env::temp_dir()`, named
+`metis-plugin-stage-` followed by this process's id, the current time in
+nanoseconds and a counter, so a sweep after a crash can find what a killed
+process left and two processes staging at once cannot pick the same name. A
+staged directory is `0700`
+and a staged file is `0600`; no mode an entry declares ever reaches the
+filesystem. A refusal removes the staging directory before it is answered, so a
+refused extraction leaves nothing behind and what an extraction staged before
+the refusal is removed with it. A successful extraction returns a
+`StagedBundle`, which owns the directory and removes it when it is dropped, so a
+caller holds it until the load is finished with the library.
+
+`StagedBundle::root()` is the staging directory, `::manifest_path()` is
+`<root>/manifest.toml` and `::library_path()` is the staged library of this
+host's target. Whether a manifest is there is the manifest step's question
+rather than extraction's: extraction answers where the file would be, and a
+bundle with no root manifest still stages, so the step that reads the manifest
+can refuse it for what it is.
+
+**Dependencies.** The archive is read by the `zip` crate with its default
+features off and only its pure-Rust deflate backend on, so no bzip2, zstd,
+lzma, AES or C zlib path enters the reader; stored entries need no backend at
+all. Measured at `plugin-runtime` for the extraction ticket:
+
+- `cargo tree -p plugin-runtime --edges normal --prefix none | grep -v '(*)' |
+  sort -u | wc -l`: 85 crates before, 91 after, so the extractor adds six,
+  `zip` itself the only direct one, beside `flate2`, `zlib-rs`, `crc32fast`,
+  `indexmap` and `typed-path`.
+- The same pipe without `--edges normal`, which includes the test-only signer:
+  101 crates before, 107 after.
+- `crc32fast` is the only added crate with a build script, and its script reads
+  `rustc --version` to select cfg flags and compiles nothing.
