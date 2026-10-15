@@ -1029,3 +1029,72 @@ fn a_plugin_that_refuses_its_configuration_is_replaced_by_its_placeholder() {
         "the refused plugin was unloaded: {ordering:?}"
     );
 }
+
+#[test]
+fn an_ambiguous_target_library_disables_that_one_plugin() {
+    let mut plugins = Plugins::new();
+    let target = support::bundle::host_target();
+    plugins.write(
+        "two-libraries",
+        "two-libraries",
+        &Bundle::new(Some(manifest("two-libraries", &[]))).with_entry(
+            &support::bundle::library_path(&target, "libsecond.so"),
+            b"a second library under the same target",
+        ),
+    );
+
+    let report = report(
+        &plugins,
+        "an archive with two libraries for this host does not stop start-up",
+    );
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    match plugin.reason() {
+        LoadError::Stage(StageError::AmbiguousTargetLibrary { target, files }) => {
+            assert_eq!(target, &support::bundle::host_target());
+            assert_eq!(*files, 2, "the refusal names how many files it found");
+        }
+        other => panic!(
+            "an archive with two libraries for this host disables one plugin, and this is {other}"
+        ),
+    }
+}
+
+#[test]
+fn a_manifest_naming_a_library_the_bundle_does_not_carry_disables_that_one_plugin() {
+    let mut plugins = Plugins::new();
+    // The archive carries the fixture's library and the manifest declares
+    // another file, so the declaration names something that is not there.
+    plugins.write(
+        "declared-absent",
+        "declared-absent",
+        &Bundle::new(Some(manifest_declaring(
+            "declared-absent",
+            &[],
+            &support::bundle::host_target(),
+            "libabsent.so",
+            1,
+            2,
+        ))),
+    );
+
+    let report = report(
+        &plugins,
+        "a manifest naming a library the bundle lacks does not stop start-up",
+    );
+    let plugin = disabled_plugin(&report, "one bundle was disabled");
+
+    match plugin.reason() {
+        LoadError::Manifest(ManifestError::LibraryNotStaged { target, path }) => {
+            assert_eq!(target, &support::bundle::host_target());
+            assert!(
+                path.ends_with("libabsent.so"),
+                "the refusal names the path the declaration names: {}",
+                path.display()
+            );
+        }
+        other => panic!(
+            "a manifest that names a library the bundle lacks disables one plugin, and this is {other}"
+        ),
+    }
+}
