@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Call cancellation, its unknown ids and its drop rule
 status: stable
-workflow_state: ready
-blocked_by: [async-initialisation]
+workflow_state: done
+blocked_by:
+- async-initialisation
 size: m
 ---
 
@@ -38,3 +39,80 @@ into a released context.
 ## Blocked by
 
 - `async-initialisation`
+
+## Implementation notes
+
+Landed on `task/call-cancellation` as the merge commit `ea61c72`
+("ticket(call-cancellation): Call cancellation, its unknown ids and its drop
+rule"), parents `c3e361e` (the landing branch tip) and `385e538` (the working
+branch `ticket/call-cancellation`, eight `wip:` commits, one per acceptance
+criterion). The merge was clean with no conflicts and the landing tree is
+byte-identical to the verified `385e538` (`git diff 385e538 HEAD` is empty), so
+every source file landed exactly as verified. The branch
+`ticket/call-cancellation` was deleted after the merge.
+
+The ticket diff over `c3e361e` is `crates/plugin-runtime/src/lib.rs` (+163/-5),
+the new `crates/plugin-runtime/tests/cancellation.rs` (422 lines, six cases, one
+per acceptance criterion) and `docs/testing.md` (+19, the command bullet for the
+new test file). The ABI, the status space and `docs/plugin-contract.md` are
+untouched.
+
+The verifier ran against `385e538`: `cargo fmt --check` clean, `cargo clippy
+--all-targets -- -D warnings` clean, `cargo test -p plugin-runtime --test
+cancellation` 6 passed, and the full `cargo test` 323 passed across 52 test
+binaries with no failures. All six acceptance criteria were checked against the
+code and hold. `buf lint`, `buf breaking` and `regenerate-contracts.sh --check`
+were not run: they need the BSR credential and this ticket changes no contract.
+
+The worker recorded these divergences from the arch spec, and the deviation
+report and the verifier both agree they are not blockers:
+
+- `cancel_all` takes `std::time::Instant`, a deadline type the plan left untyped.
+  `teardown-and-release` plans `Serving::release(deadline)` and must consume the
+  same type or a coherence pass is needed.
+- `CancelReport { deadline, cancelled, refused }` and
+  `RefusedCancel { request_id, status }` are new public types; the plan named
+  only `CancelReport`. `cancelled` is sorted ascending by request id, and a
+  dependent must not assume any other ordering or that the report is exhaustive
+  (it cancels a snapshot of the in-flight set).
+- `Instance::cancel` and `Instance::complete_service` are now gated on the
+  instance's own in-flight set, so a caller that cancels or answers an id it does
+  not own gets the frozen `NotFound` where it previously reached the plugin.
+  `callback-sink` must treat that refusal as expected rather than an error.
+- `Host::cancel_services(request_id)` is `pub(crate)`, not public; the call's
+  drop is its only caller.
+- "Every buffer the host still holds for it" is read as the host-held copy of
+  each outstanding service-request payload, since the host retains no
+  plugin-allocated buffer for a live call.
+- Two ledger lines are added, both only where they say something: `call <id>
+  released <n> service request(s) the host still held` (n > 0) and `call <id>
+  cancel unacknowledged: the plugin never resolved it as cancelled`.
+- Criteria 1 and 6 had no separate failing first run: criterion 1's behaviour was
+  already landed by `waker-lifecycle-fix`, and criterion 6 is an API-shape
+  property satisfied by the same code as criterion 5.
+
+Residual risks carried forward: the `Instant` deadline choice is not yet shared
+with `teardown-and-release`; `cancel_all` cancels a snapshot, so calls started
+after the pass are the caller's loop to own; and the ordering ledger stays an
+unbounded `Vec<String>`, which the two new lines follow.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `66a4ad3` and all eleven commands
+pass, including the contract and plugin commands: `cargo fmt --check`, `cargo
+clippy --all-targets -- -D warnings`, `cargo test`, `buf lint`, `buf breaking`,
+`bash scripts/regenerate-contracts.sh --check`, `bash
+scripts/build-c-plugin.sh`, `bash scripts/check-c-layout-asserts.sh`, `cargo
+check -p plugin-contract --no-default-features`, `cargo run -p plugin-fixture
+--bin abi-harness` (82 checks) and `bash scripts/regenerate-abi-header.sh
+--check`.
+
+Durable lessons for the tickets that follow. The host, not the plugin, is the
+authority on which call an instance holds: the plugin's own call registry is
+process-wide, so a cancel or a service completion for an id this instance does
+not hold is answered `NotFound` before the plugin is entered, and
+`callback-sink` must treat that refusal as expected rather than as an error.
+`teardown-and-release` takes the same `std::time::Instant` deadline type and
+owns the loop that waits. The two new ledger lines are the evidence for an
+unacknowledged cancel and for a reclaimed context, so a test asserts the text
+rather than a counter.

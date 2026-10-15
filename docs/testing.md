@@ -369,6 +369,25 @@ Plugin host, documented in `crates/plugin-runtime`:
   mapping, the plugin's asynchronous initialisation and registration add no
   thread of their own. It has its own binary because the test harness starts a
   thread per test.
+- `cargo test -p plugin-runtime --test cancellation` -- cancellation as it was
+  decided: the caller owns the deadline and the drop, and the runtime holds no
+  timer and no default deadline. The run asserts that a cancelled fixture call
+  reaches its caller as the frozen `Cancelled` status and that the plugin's own
+  log shows the cancel reached it; that an id the instance does not hold, an id
+  that has already finished and an id another instance holds are each answered
+  as the frozen `NotFound` without the plugin being entered, which the second
+  instance's still unmarked token proves, and that a second cancel of a live id
+  is accepted; that a call dropped before the plugin acknowledged its cancel is
+  recorded on the ordering ledger, leaves the instance unquarantined and is
+  followed by a call that succeeds; that a drop releases the service-request
+  copies the host still held for that call alone and makes a completion for the
+  released id answer `NotFound` without reaching the plugin, while another
+  call's completion is still delivered; that the instance-wide loop marks every
+  call on one instance and reports the deadline it was handed, the ids it marked
+  and nothing refused; and that the instance-wide form is a synchronous
+  function of the caller's deadline, so the runtime waits for no cancellation:
+  the test polls nothing after it, the call is still in flight, and the caller's
+  own drop is what turns the unacknowledged cancel into the ledger entry.
 
 Daemon state, documented in `crates/daemon`:
 
