@@ -107,8 +107,9 @@ consumes exactly the surface its predecessor exported, and nothing else.
 ```text
 verify_bundle(bytes, &TrustStore) -> Result<VerifiedBundle, BundleError>   bundle-verification
 staged = extract(verified, target: &str) -> Result<StagedBundle, StageError> bundle-extraction
-manifest = Manifest::parse(text, &CapabilityList) -> Result<Manifest, ..>   manifest-and-library
-loaded = Loaded::open(lib_path, &Manifest)                                  manifest-and-library
+manifest = Manifest::parse(text) -> Result<Manifest, ManifestError>          manifest-and-library
+manifest = Manifest::read(&StagedBundle, common_name) -> Result<Manifest, ..> manifest-and-library
+loaded = unsafe { Loaded::open(lib_path, &Manifest) }                       manifest-and-library
 init = loaded.init_plugin(&host, body) -> Result<PluginInit, CallError>     abi-initialisation-entry
 serving = load_bundle(path, config, ctx, trust) -> Result<Serving, ..>      async-initialisation
 instance.cancel_all(deadline) -> CancelReport                               call-cancellation
@@ -581,7 +582,8 @@ No async runtime and no executor: the entry returns a table-defined future, the
 host polls it, and `no_plugin_thread` now measures the thread count across
 initialisation too. No serde types across the boundary, only the JSON envelope.
 The counters entry is deleted rather than flagged off. The MSVC static assertion
-form is untouched, so `c-static-assert-msvc` still owns that fix. The do-not
+form was untouched by this ticket, which left that fix to
+`c-static-assert-msvc`. The do-not
 list held in full, and no dependency changed at all.
 
 **Seams.** Two. The ABI harness
@@ -612,81 +614,199 @@ consumes the same table and the new authoring shape.
 
 ## Level 2
 
+**Landed state.** Both level-2 tickets landed, and a level-3 chain starts from
+`2af38ab`, the last commit of the `manifest-and-library` landing line.
+`c-static-assert-msvc` landed on the landing branch `task/c-static-assert-msvc`:
+its merge commit is `e1099f5`, from the working branch tip `963227f` over the
+landing branch tip `d1a86a2`, and the landing line carries on to `51879e8`,
+which records the ticket. `manifest-and-library` landed on
+`task/manifest-and-library`: its merge commit is `fa95fe9`, from the working
+branch tip `e269bda` over the landing branch tip `51879e8`, which is the
+`c-static-assert-msvc` landing, and the landing line carries on to `2af38ab`.
+That base therefore carries the C89 assertion form, the scoped MSVC warning
+denial and the new layout check script in `plugin-contract`; the archived bug
+record; the widened `windows` CI job; the `plugin_runtime::manifest` module with
+its unsafe `Loaded::open` mapping step; contract section 17.9; and the runtime
+test fixture that is compiled at test time. Nothing else lands between these two
+tickets and the level-3 ticket.
+
 ### `c-static-assert-msvc` (bug, s)
 
-**Exports.** No product surface change. The contract's C translation unit
-compiles under MSVC's C mode with warnings denied, so the Windows job widens
-from `api-contracts` alone to the daemon, and the recorded gap in
-`docs/testing.md` narrows or closes.
+**Exports.** No product surface change and no ABI byte moved: the header, the
+slot constants, the table size and `METIS_ABI_MINOR` are unchanged. What changed
+is how the contract's C translation unit is written and checked, so the unit
+needs no C11 flag at all.
 
-**Do not reimplement.** Do not drop the layout check or move it to a place MSVC
-can silently skip. A deliberate mismatch must still fail the build under gcc and
-clang, which is the test that proves the fix did not trade the check for
-compilation.
+- Every layout assertion is now `METIS_C_LAYOUT_ASSERT(condition, name)`, a
+  typedef of a `char` array whose length is `condition ? 1 : -1`, so a false
+  condition is a negative array length, which gcc, clang and `cl.exe` all reject
+  as an error, and the array's name carries the check into the diagnostic. The
+  form is valid C89 onwards, so the file no longer depends on any compiler's
+  default C standard and the check cannot be skipped by asking for an older one.
+  `_Alignof` became `__alignof`, which all three compilers accept in every mode;
+  the exported `metis_c_align_*` measurements use it too, and
+  `crates/plugin-contract/tests/c_layout.rs` still compares them with Rust's
+  `align_of`.
+- `crates/plugin-contract/build.rs` still pins `-std=c11` for gcc and clang,
+  through `flag_if_supported` as before, and no longer passes `-Wall` and
+  `-Wextra` that way, because `cl.exe` read them as its own all-warnings level.
+  It sets `warnings_into_errors(true)` only when `CARGO_CFG_TARGET_ENV` is
+  `msvc`, which denies warnings on the MSVC invocation (`-WX` over the `-W4`
+  `cc` asks for by default). The denial is scoped rather than blanket, because
+  at `-O0` this host's glibc promotes its own fortify warning to an error under
+  `-Werror`, which would fail every debug build here; the new script holds gcc
+  and clang to a warnings-denied compile instead.
+- `scripts/check-c-layout-asserts.sh` is new and is command 8 of
+  `docs/testing.md`, and `.github/workflows/ci.yml` runs it as its own step. For
+  each of gcc and clang it compiles the unit with warnings denied in `-std=c11`
+  and in strict ISO C89 (`-std=c89 -pedantic-errors`, the strongest bar
+  available here for `cl.exe`'s legacy mode), and it compiles a copy with one
+  assertion deliberately broken, which must fail in all four compiles. It
+  refuses to run when the deliberate substitution did not apply, so the negative
+  half cannot pass by compiling an unchanged file.
+- The `windows` CI job widened from `cargo +nightly check -p api-contracts` to
+  `cargo +nightly check -p api-contracts -p daemon --all-targets`, so MSVC
+  compiles the daemon and the whole plugin line. `docs/testing.md` records the
+  narrowed gap and the re-measured local reproduction, where `daemon` for the
+  Windows target still stops in the nix-wrapped clang, which refuses that target
+  itself.
 
-**Seams.** The bug doc `docs/bugs/plugin-contract-c-static-assert-msvc.md` and
-its recorded reproduction, the C plugin build under the pinned compilers, and
-the CI workflow file.
+**Do not reimplement.** The layout check was not dropped and was not moved to a
+place MSVC can silently skip. A deliberate mismatch still fails the build under
+gcc and clang, and the new script's negative half proves it in both modes under
+both compilers, so the fix did not trade the check for compilation. The
+assertion form stays inside the C89 subset, because the recorded MSVC invocation
+carries no `/std:` flag and `cl.exe` therefore compiles `.c` files in its legacy
+mode.
+
+**Seams.** The archived bug record
+`docs/bugs/archive/plugin-contract-c-static-assert-msvc.md`, which records the
+defect, its measured root cause and its resolution, and which has replaced the
+path `docs/bugs/plugin-contract-c-static-assert-msvc.md` that no longer exists;
+the new pinned script, which is the check for the modes no host build reaches;
+the C plugin build under gcc and clang; and `.github/workflows/ci.yml`, whose
+`windows` job now compiles the daemon.
+
+**Residual.** No `cl.exe` exists on this host, so the exact MSVC invocation and
+the widened `windows` job have never executed. The first run of that job on a
+runner with MSVC is the only proof of those two halves; the strict-C89 compile
+under gcc and clang, on a tree byte-identical to the landing tip, is the
+strongest evidence available here.
 
 ### `manifest-and-library` (feature, m)
 
-**Exports.** `plugin_runtime::manifest`: a `Manifest` type with
-`Manifest::parse(text: &str) -> Result<Manifest, ManifestError>`, the plugin
-identity and version, `abi_major`, `min_abi_minor`, per-target library paths,
-the capability list with each capability's name, kind, version, request schema
-and response schema, and the configuration schema. Plus target selection, which
-returns this host's library path from a `StagedBundle`, and the mapping step
-that turns a validated manifest plus a selected library into a `Loaded` with a
-table the existing raw ABI checks accept.
+**Exports.** `plugin_runtime::manifest`, declared as `pub mod manifest`, landed
+as `crates/plugin-runtime/src/manifest.rs`. A `Manifest` value has private
+fields, so `Manifest::parse` is the only way to obtain one and the value is
+proof that the text it came from was the format. Its surface is:
 
-The refusals are distinguishable: absent manifest, invalid manifest naming what
-is wrong, no library for this target, a missing entry symbol, a major mismatch,
-an older minor refused before any entry is read, and a table too short for an
-entry this build needs.
+- `Manifest::parse(text: &str) -> Result<Manifest, ManifestError>`, the text
+  form. It takes the text alone and decides nothing about identity.
+- `Manifest::read(staged: &StagedBundle, common_name: &str) -> Result<Manifest,
+  ManifestError>`, the staged-bundle form. It tests that the staged manifest
+  path resolves rather than assuming it, reads the text, parses it, and compares
+  the declared `name` against the chain's leaf common name. The caller passes
+  that name, because `StagedBundle` does not carry it: it comes from
+  `VerifiedBundle::leaf_common_name()` at the verification step.
+- The named accessors `name()`, `version()`, `abi_major()`, `min_abi_minor()`,
+  `libraries()`, `capabilities()` and `config_schema()`, which keep the fields
+  private while a dependent reads them.
+- `Manifest::select_library(&StagedBundle, target: &str) -> Result<PathBuf,
+  ManifestError>`, which resolves only this host's declaration against the
+  staging directory and answers the path, or the refusal that it is not there.
+- `Manifest::abi_check() -> Result<(), MetisAbiError>`, the manifest's ABI
+  demand read from the plugin's side. The declared `abi_major` must equal this
+  build's major, and this build's minor must not be below the declared
+  `min_abi_minor`. A requirement older than this build's minor is legal and
+  served; a newer one is refused. That is the direction parent decision
+  `compatibility-policy` C4 fixes, and this check is this ticket's bundle-load
+  gate on the minor bump. An older table is still refused by the landed table
+  gate before any entry is read.
+- `ManifestError`, six struct variants in the crate's existing error style
+  (`CallError`'s shape: a plain enum, `Display`, `std::error::Error`, no panic
+  path): `Absent`, `Unreadable`, `Invalid`, `NoTargetLibrary`,
+  `LibraryNotStaged` and `NameMismatch`. `Manifest` is `PartialEq` and not `Eq`,
+  because a capability's schemas are JSON.
+- The mapping step, `unsafe Loaded::open(path, &Manifest) -> Result<Loaded,
+  CallError>`, which carries the same obligation as the landed `Loaded::load`
+  because it maps arbitrary native code. It decides the manifest's demand with
+  `manifest.abi_check()?` first and then delegates to the unchanged
+  `Loaded::load`, so the table's major, minor and reported size stay the landed
+  `metis_read_table` rules.
 
-Two of those refusals are narrower than the plan placed them, because extraction
+The refusals are distinguishable: an absent manifest and an unreadable one are
+separate values, an invalid manifest names what is wrong with its text, a
+manifest declares no library for this host or declares one the bundle does not
+carry there, and a declared name is not the name the chain carries. The entry
+symbol, the major mismatch and the table too short for an entry this build needs
+are the landed `MetisAbiError` values that `Loaded::load` already answers, so
+this ticket adds no second version rule.
+
+Two of the refusals are narrower than the plan placed them, because extraction
 landed first. `StageError::MissingTargetLibrary` (the archive holds no file under
 `lib/<target>/`) and `StageError::AmbiguousTargetLibrary` (it holds more than
-one) are extraction's, so this ticket's "no library for this target" refusal is
-the manifest's own case: a manifest that declares no library for this host. The
-two stay distinguishable, and `startup-policy` maps both to its disable reason
-rather than collapsing them. `StagedBundle::manifest_path()` may name a file
-that is not there, because extraction deliberately stages a bundle with no root
-manifest, so this ticket tests existence rather than assuming the path resolves,
-which is what keeps its absent-manifest refusal reachable.
+one) are extraction's, and the manifest side carries two of its own:
+`NoTargetLibrary`, a manifest that declares nothing for this host, and
+`LibraryNotStaged`, a declaration that names a file the bundle does not carry
+there. The four stay distinguishable, and `startup-policy` maps them to its
+disable reason rather than collapsing them, classifying both error types by
+value because each landed variant set is wider than the plan named.
+`StagedBundle::manifest_path()` may name a file that is not there, because
+extraction deliberately stages a bundle with no root manifest, so `read` tests
+existence rather than assuming the path resolves, which is what keeps its
+absent-manifest refusal reachable.
 
-The mapping step reads the amended table, so it uses
-`METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT` and
-`metis_plugin_table_has_init_plugin(size)` in place of the create-instance
-names, and it checks the manifest's `min_abi_minor` against the landed
-`METIS_ABI_MINOR` 2. That check is this ticket's only bundle-load gate on the
-minor bump, and it spells this host's target the one way contract 17.8 fixes,
-because extraction matches the string literally.
+The mapping step names no slot and no removed entry, unlike the plan's letter.
+`Manifest::abi_check` covers the demand from the manifest's side, and the
+presence rule for `init_plugin` is enforced one layer down by the landed
+`metis_read_table`, which names `init_plugin` and answers
+`MetisAbiError::EntryMissing { entry: "init_plugin" }`. `select_library` spells
+this host's target the one way contract 17.8 fixes, because extraction matches
+the string literally.
 
-**Existing abstractions to use.** `toml` for the text format, added to the
-workspace dependency table. `plugin_contract::capability::CapabilityDescriptor`
-for the capability list, so the manifest's list and the library's report are the
-same type. `Loaded` and `MetisAbiError` for the mapping and the version gate,
-unchanged. `ManifestError` follows the existing error style.
+**Existing abstractions to use.** `toml` 0.9 for the text format, added once to
+the workspace dependency table with `default-features = false` and only `parse`,
+`serde` and `std` on, so no display or writing path is compiled in.
+`plugin_contract::capability::CapabilityDescriptor` for the capability list, so
+the manifest's list and the library's report are the same type. `Loaded::load`
+and `MetisAbiError` for the mapping and the version gate, unchanged.
+`ManifestError` follows the existing error style.
 
 **Do not reimplement.** No second capability descriptor type. No schema
 inference in the manifest: the schemas are declared text, and the library's
 `list_capabilities` is the cross-check, which is `async-initialisation`'s step.
-No new ABI rules: the version checks stay the landed ones. Do not cross-check
-the capability list here; the cross-check needs a live instance and belongs to
-the load entry.
+No new ABI rules: the version checks stay the landed ones. The capability list
+is not cross-checked here; the cross-check needs a live instance and belongs to
+the load entry. The do-not list held in full, and the only difference from its
+letter is the mapping step's slot: no create-instance name survives in the diff,
+and the presence rule is enforced by `metis_read_table` rather than by a second
+call in this module.
 
-**Seams.** One product seam: `Manifest::parse` plus `Loaded::open(lib_path,
-&Manifest)` driven from `crates/plugin-runtime/tests/manifest.rs` against a
-staged bundle whose manifest is hand-written, so the format is provably not
-generator-only. The existing raw ABI checks and the ABI harness must still pass
-on a library mapped from a bundle.
+**Seams.** One product seam: `Manifest::parse`, `Manifest::read`,
+`Manifest::select_library` and `unsafe Loaded::open` driven from
+`crates/plugin-runtime/tests/manifest.rs` (11 tests, one per acceptance
+criterion plus the supporting cases), against a bundle the test builds from the
+fixture cdylib's own bytes and a manifest the test writes by hand, so the format
+is provably not generator-only. The four ABI refusals are driven against a
+library the test compiles itself from
+`crates/plugin-runtime/tests/fixtures/patched_table.rs`, a cdylib source
+carrying `SIZE`, `MAJOR`, `MINOR` and `SYMBOL` placeholders that the test
+substitutes into and compiles with `rustc` at test time, because no library in
+the tree reports a minor, a major or a size this build did not write. One test
+reads the example out of contract 17.9 and parses it, so the documented format
+and the read format cannot drift. The existing raw ABI checks and the ABI
+harness still pass on a library mapped from a bundle.
 
-**Interface contract.** The validated `Manifest` value and `ManifestError`'s
+**Interface contract.** The validated `Manifest` value, `Manifest::read`,
+`Manifest::select_library`, `Manifest::abi_check` and `ManifestError`'s six
 variants, consumed by `async-initialisation` (cross-check and registration),
-`startup-policy` (the disable reasons) and `sample-bundle-ci` (the hand-written
-manifest). The contract gains the manifest's field names and types as the format
-an author writes by hand.
+`startup-policy` (the disable reasons, classified rather than matched
+exhaustively) and `sample-bundle-ci` (the hand-written manifest, written against
+17.9). `async-initialisation` needs one `unsafe` block for `Loaded::open`, and
+its stated justification is the trust the bundle's signature verification
+established, carried forward by the extraction that staged the file. The
+contract gains the manifest's field names and types as the format an author
+writes by hand, in section 17.9.
 
 ## Level 3
 
@@ -709,10 +829,16 @@ plugin is defective, or the configuration does not match what the plugin
 declared. The capability cross-check refuses with the name of the capability
 that differed.
 
-Three landed facts shape this ticket. The initialisation call is
+Four landed facts shape this ticket. The initialisation call is
 `Loaded::init_plugin(&host, body) -> Result<PluginInit, CallError>` plus the
 public `PluginInit` future and `CallError::Init`, which was `CallError::Create`,
-so this ticket drives that surface rather than reaching the raw table. It
+so this ticket drives that surface rather than reaching the raw table. The
+mapping step is the landed `unsafe Loaded::open(path, &Manifest)`, which carries
+the same obligation as `Loaded::load` because it maps arbitrary native code, so
+the load entry contains one `unsafe` block whose justification is the trust the
+bundle's signature verification established and the extraction that staged the
+file; `open` decides the manifest's demand with `abi_check` before it delegates
+to `Loaded::load`. The load entry also
 confirms at its own seam that the failure ordering is the contract's: a
 `PluginInit` that never resolves `Ok` drops the plugin's future and then calls
 `destroy_instance` on the instance pointer. That runtime-seam test is this
@@ -822,16 +948,18 @@ manifest that declares no library for this host, an ABI mismatch, a manifest
 that disagrees with the library, and an unknown container version disable that
 one plugin and leave the daemon running. The missing and ambiguous refusals
 are extraction's, `StageError::MissingTargetLibrary` and
-`StageError::AmbiguousTargetLibrary`, and the manifest's own no-library refusal
-is `ManifestError`'s, so the three stay distinguishable even though they share
-one disable reason and the report names which one refused. `StageError` is
-classified as a value rather than matched exhaustively, because its landed
-variant set is wider than the plan named. `StartupReport` lists the
-serving instances and the disabled placeholders, each with its name and reason,
-and a placeholder is built from the manifest when one was readable, otherwise
-from the bundle's file name with no capabilities. Placeholders are listable, are
-excluded from the capabilities an agent would be offered, and answer the
-existing disabled route error carrying the reason.
+`StageError::AmbiguousTargetLibrary`, and the manifest side carries two,
+`ManifestError::NoTargetLibrary` and `ManifestError::LibraryNotStaged`, so the
+four stay distinguishable even though they share one disable reason and the
+report names which one refused. Both `StageError` and `ManifestError` are
+classified as values rather than matched exhaustively, because each landed
+variant set is wider than the plan named: `ManifestError` has six variants, of
+which the plan named neither `Unreadable` nor `NameMismatch`. `StartupReport`
+lists the serving instances and the disabled placeholders, each with its name
+and reason, and a placeholder is built from the manifest when one was readable,
+otherwise from the bundle's file name with no capabilities. Placeholders are
+listable, are excluded from the capabilities an agent would be offered, and
+answer the existing disabled route error carrying the reason.
 
 **Existing abstractions to use.** `BundleError::is_trust_failure()` for the
 stop-versus-disable split, called as a predicate rather than by matching
@@ -932,7 +1060,8 @@ sink plus the release entry. The CI step is the gate.
   with `StageError` classified rather than matched exhaustively.
 - `Loaded::init_plugin` and `PluginInit` in `abi-initialisation-entry`,
   consumed and closed at `async-initialisation`'s load seam.
-- `Manifest::parse` plus `Loaded::open` in `manifest-and-library`.
+- `Manifest::parse`, `Manifest::read`, `Manifest::select_library` and the
+  `unsafe Loaded::open` in `manifest-and-library`.
 - `load_bundle(...) -> Serving` in `async-initialisation`.
 - The instance and call API, plus the ledger, in `call-cancellation`.
 - `Host::with_sink` and the four callbacks in `callback-sink`, plus the
@@ -941,8 +1070,9 @@ sink plus the release entry. The CI step is the gate.
 - `Serving::release(deadline)` in `teardown-and-release`, plus the subprocess
   fault test.
 - The end-to-end bundle gate in `sample-bundle-ci`.
-- The ABI harness, the contract tests, the C plugin build and the header
-  regeneration check continue to gate every change.
+- The ABI harness, the contract tests, the C plugin build, the layout assertion
+  check (`bash scripts/check-c-layout-asserts.sh`) and the header regeneration
+  check continue to gate every change.
 
 ## Dependency posture
 
@@ -962,8 +1092,16 @@ sink plus the release entry. The CI step is the gate.
   crates before and 91 after for normal edges, six added with `zip` the only
   direct one beside `flate2`, `zlib-rs`, `crc32fast`, `indexmap` and
   `typed-path`, and 101 before and 107 after with the dev edges counted.
-  `crc32fast` is the only added crate with a build script, and its script reads
-  `rustc --version` to select cfg flags and compiles nothing. The pipeline is
+- `manifest-and-library` added `toml` 0.9 with its default features off and
+  only `parse`, `serde` and `std` on, referenced as `.workspace = true`. The
+  reader adds six crates, `toml` itself, `toml_parser`, `toml_datetime`,
+  `serde_spanned` and `winnow` twice, at 0.7.15 for `toml` and 1.0.4 for
+  `toml_parser`, and none of them has a build script that compiles anything.
+  The pipeline below measured 91 crates before and 97 after. Contract 17.9
+  records 84 and 90, which does not reproduce and contradicts 17.8's own 91
+  after; the correct pair is 91 and 97, and fixing that contract text is a
+  later pass.
+- The pipeline is
   `cargo tree -p plugin-runtime --edges normal --prefix none | grep -v '(*)' |
   sort -u | wc -l`, and the `grep` filter is needed because `cargo tree` prints
   a repeated subtree as a marker line that survives `sort -u`. No later ticket
@@ -992,6 +1130,20 @@ Closed by the level-1 landings:
   equals released, and records a late wake as a request id rather than an
   ordering line.
 
+Closed by the level-2 landings:
+
+- The level-1 residual that `manifest-and-library` had no bundle-load gate on
+  the ABI minor bump is closed by the landed `Manifest::abi_check`, which
+  refuses a manifest requiring a minor newer than this build's and serves an
+  older requirement. The residual's sentence described a case that cannot
+  refuse anything, since an older requirement is legal. The direction is the
+  one parent decision `compatibility-policy` C4 fixes, and the older-table
+  refusal stays with the landed table gate.
+- The dangling path in this spec's `c-static-assert-msvc` seam is closed: the
+  bug record moved to
+  `docs/bugs/archive/plugin-contract-c-static-assert-msvc.md`, and its
+  pre-archive path no longer exists.
+
 Still open:
 
 - `docs/tasks/metis-plugins/tasks/abi-hazard-fixtures/findings.md` line 74 still
@@ -1015,10 +1167,6 @@ Added by the level-1 landings:
   `crates/plugin-contract/src/authoring/` and in the ABI harness against the C
   plugin. `async-initialisation` owns that test, and it is the one place the
   drop-then-destroy ordering is confirmed where the caller drives the hand-off.
-- `manifest-and-library` has no bundle-load gate on the ABI minor bump: nothing
-  in the landed code refuses a bundle at load time for a manifest whose
-  `min_abi_minor` is older than `METIS_ABI_MINOR` 2. That refusal is that
-  ticket's, and it is the only gate on the bump at that stage.
 - The extraction residuals: `StageError::Io` has no test, because provoking a
   real filesystem failure needs mocking; the size limits are enforced on
   declared entry sizes rather than on decompressed output; the
@@ -1035,6 +1183,52 @@ Added by the level-1 landings:
   counter and omits the timestamp component the code writes, so a second
   implementation reproducing the name exactly would not match until the contract
   names all three.
+
+Added by the level-2 landings:
+
+- No `cl.exe` exists on this repository's host, so the exact MSVC invocation and
+  the widened `windows` CI job have never executed. The first run of that job on
+  a runner with MSVC is the only proof of those two halves; the strict-C89
+  compile under gcc and clang, on a tree byte-identical to the landing tip, is
+  the strongest evidence available here.
+- Three documents described the MSVC bug as open at its pre-archive path
+  `docs/bugs/plugin-contract-c-static-assert-msvc.md`: this spec's
+  `c-static-assert-msvc` seam, `docs/tasks/metis-plugins/map.md:223` and
+  `.work/handoff/metis-plugins.md:205`. This reconcile closes the arch spec's
+  copy; the other two belong to their own owners.
+- The archived bug record's frontmatter still carries `fix_commit: 9cef2c0`,
+  the third commit on the working branch rather than the landing commit. The
+  bug-closure step must read the archive path, since the pre-archive path no
+  longer exists, and record `git rev-parse task/c-static-assert-msvc`, which is
+  `e1099f5`.
+- A manifest-side refusal's `Display` names the plugin table rather than the
+  manifest, because `abi_check` returns the landed `MetisAbiError` and that is
+  one rule read from two sides. The landed errors are `MajorMismatch` and
+  `MinorMismatch`; rewording their messages for the manifest side is a later
+  change.
+- `Manifest::select_library` resolves the declared path against the staging
+  directory without shape-checking it against contract 17.8's
+  `lib/<target>/<file name>`, so a signed manifest that declares an absolute
+  path or one carrying `..` can name a library outside the staging root. A
+  signed plugin is trusted, so this is deferred hardening rather than an
+  escalation, and the contract's own form is what a later pass should check.
+- The manifest expresses JSON schemas as TOML, so a `null` default cannot be
+  written at all and a TOML date-time arrives as an object carrying
+  `$__toml_private_datetime`. Contract 17.9 states both limits, and the SDK's
+  generator and the sample bundle's hand-written manifest must respect them;
+  moving the schema fields to JSON text is the deferred alternative.
+- The runtime test suite now needs a `rustc` on `PATH`, because
+  `crates/plugin-runtime/tests/fixtures/patched_table.rs` is compiled at test
+  time and deliberately does not compile as it stands. The same fixture asserts
+  acceptance of a newer-minor table rather than the fault-level "stops at this
+  build's layout", which stays measured at the landed seams,
+  `crates/plugin-contract/tests/abi.rs` and the ABI harness.
+- Contract 17.9's recorded dependency pair, 84 crates before and 90 after, does
+  not reproduce and contradicts section 17.8's own 91 after. The pipeline 17.9
+  names measures 91 before and 97 after, and the delta of six matches the named
+  crates. A later reader must not quote 84/90, and fixing the contract text is a
+  later pass. It is the second dependency number in this effort that did not
+  reproduce, after section 17.7's pipeline defect.
 
 ## Out of scope for this effort
 
