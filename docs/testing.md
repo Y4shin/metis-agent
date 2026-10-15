@@ -2,8 +2,8 @@
 
 > Status: the commands below are the protocol the effort's chains and CI run.
 > Every one named there exists and is green on `main` except the Windows
-> compile-only job and the gaps `docs/testing.md` records in the Windows local
-> transport block.
+> compile-only job, whose daemon half has never run, and the gaps
+> `docs/testing.md` records in the Windows local transport block.
 
 ## Test protocol
 
@@ -22,15 +22,16 @@ Run if asked (by number):
 5. `cargo check -p plugin-contract --no-default-features`
 6. `cargo run -p plugin-fixture --bin abi-harness`
 7. `bash scripts/regenerate-abi-header.sh --check`
-8. `cargo run -p client --example echo`
-9. `cargo run -p client --example events`
+8. `bash scripts/check-c-layout-asserts.sh`
+9. `cargo run -p client --example echo`
+10. `cargo run -p client --example events`
 
 Every command runs inside the devenv shell as `devenv shell -- <command>`, which
 is where `cargo`, `buf` and the rest exist. The three always-run commands are what
-`.github/workflows/ci.yml` gates on first, and numbers 1 to 7 are the contract and
+`.github/workflows/ci.yml` gates on first, and numbers 1 to 8 are the contract and
 plugin ABI commands it runs after them; numbers 3 and 2 resolve their pinned
 plugins from the BSR, so they need the credential described in `docs/dev-env.md`.
-Numbers 8 and 9 are the two runnable walkthroughs, which CI does not run. The
+Numbers 9 and 10 are the two runnable walkthroughs, which CI does not run. The
 `## Run commands` section below documents the same commands per area, with what
 each one proves.
 
@@ -261,7 +262,16 @@ Plugin ABI, documented in `crates/plugin-contract/src/abi` and
   `crates/plugin-contract/build.rs` on every build, so `cargo build`,
   `cargo clippy` and `cargo test` all carry that check; the numbers it
   measured are compared with Rust's by
-  `crates/plugin-contract/tests/c_layout.rs`.
+  `crates/plugin-contract/tests/c_layout.rs`. That host build compiles the file
+  in this host's default C mode, which is not the mode the Windows target
+  compiles it in, so `bash scripts/check-c-layout-asserts.sh` pins the modes a
+  host build cannot: it compiles the unit under gcc and under clang with
+  warnings denied, in `-std=c11` and in strict ISO C89 (`-std=c89
+  -pedantic-errors`, the closest available bar to the legacy C mode `cl.exe`
+  compiles `.c` files in), and it compiles a copy with one assertion
+  deliberately broken, which must fail in every one of those four compiles.
+  The negative half is what keeps the fix from trading the layout check for
+  compilation.
 - The authoring surface (the capability-name-routed `Plugin` trait, its
   fallible asynchronous constructor, and the boxed-future helper that replaces
   `async-ffi`) is behind `plugin-contract`'s `authoring` feature, which is off by
@@ -418,16 +428,24 @@ effort:
 - The `windows` CI job runs on `windows-latest` and compiles for the Windows
   target with `cargo +nightly check -p api-contracts -p daemon --all-targets`.
   That compiles the pipe front-end, the connector, the descriptor and token
-  calls, and the pipe test binary, and runs nothing.
+  calls, the pipe test binary, and the whole plugin line the daemon reaches
+  (`plugin-runtime`, `plugin-contract` and its C layout assertions), and runs
+  nothing. It is the only place in this effort where MSVC compiles the plugin
+  line, and its first run on a Windows runner is what proves that half.
 - Reproducing that check on this Linux host needs the rustup nightly toolchain
   first on `PATH`, because the `rustc` inside `devenv shell` has no Windows std:
   `devenv shell -- bash -c 'export PATH="$HOME/.rustup/toolchains/nightly-2026-10-12-x86_64-unknown-linux-gnu/bin:$PATH"; cargo check -p api-contracts --all-targets --target x86_64-pc-windows-msvc'`.
   From `devenv shell` alone the same command fails `E0463` with "can't find crate
   for `std`". Measured at finalize: `-p api-contracts` and `-p client` both pass
-  for the Windows target, and `-p daemon` stops in `plugin-contract`'s C build
-  script, where the nix-wrapped clang cannot target `x86_64-pc-windows-msvc`. A
-  native Windows runner with MSVC is expected to pass that step, and the job's
-  first run is what proves it.
+  for the Windows target. Measured again after `c-static-assert-msvc`: `-p
+  daemon --all-targets` still does not, and the reason is this host rather than
+  the repository, because the nix-wrapped clang refuses the target itself
+  (`clang: error: unsupported option '-fPIC' for target
+  'x86_64-pc-windows-msvc'`, with the wrapper's own note that it is not designed
+  for multi-target compilers). Two files show it: `crates/plugin-contract`'s
+  `c/layout_static_asserts.c`, and `libsqlite3-sys`'s vendored `sqlite3.c`, which
+  the daemon pulls in. A native Windows runner with MSVC is expected to pass
+  both, and the job's first run is what proves it.
 
 Gaps, each with the check that would close it. Nothing below was executed on
 Windows in this effort, so the pipe is proven by construction, by compilation
@@ -461,24 +479,28 @@ for the Windows target, and by the platform-independent rules tested on Linux:
 
 `.github/workflows/ci.yml` runs the Rust commands above through the devenv
 shell on push to `main` and on pull requests, followed by the three contract
-commands and the four plugin ABI commands (the C plugin build, the
-authoring-feature-off check, the harness, and the header drift check). The
-frontend commands are not in CI yet; add them when the frontend
+commands and the five plugin ABI commands (the C plugin build, the C layout
+assertion check, the authoring-feature-off check, the harness, and the header
+drift check). The frontend commands are not in CI yet; add them when the frontend
 has behaviour worth gating.
 
 A second job, `windows`, runs on `windows-latest` and compiles the Windows local
-transport for the Windows target with
-`cargo +nightly check -p api-contracts --all-targets`. It executes nothing, so it
-proves the Windows path compiles rather than proving a pipe works; the gaps it
-leaves are listed in the Windows local transport block above, together with the
-check that would close each one. It checks `api-contracts` alone because `daemon`
-reaches `plugin-contract`, whose build script compiles a C file that MSVC's default
-C mode rejects, so the daemon half failed on the plugin line rather than on the
-transport (`docs/bugs/plugin-contract-c-static-assert-msvc.md` records that defect,
-its two candidate fixes and its closing check). Measured on this repository's Linux
-host with the Windows target: `api-contracts` and `client` both check clean and
-`daemon` stops in that C file, so `-p client` joins the job whenever a Windows
-client constructor exists.
+transport and the plugin line for the Windows target with
+`cargo +nightly check -p api-contracts -p daemon --all-targets`. It executes
+nothing, so it proves the Windows path compiles rather than proving a pipe works;
+the gaps it leaves are listed in the Windows local transport block above,
+together with the check that would close each one. The daemon half was excluded
+until `c-static-assert-msvc` because `daemon` reaches `plugin-contract`, whose
+build script compiles a C file MSVC's legacy C mode rejected before any Rust was
+type-checked (`docs/bugs/archive/plugin-contract-c-static-assert-msvc.md` records
+that defect and its fix). The layout assertions are written in the C89 subset
+that mode accepts, and the crate's build script denies warnings on the MSVC
+invocation, so the daemon and the plugin line join the job. That widened job has
+never run on a runner with MSVC, which is what its first run proves. Measured on
+this repository's Linux host with the Windows target: `api-contracts` and
+`client` both check clean, while `daemon` stops in the nix-wrapped clang, which
+refuses the target itself, so `-p client` joins the job whenever a Windows client
+constructor exists.
 
 ## Mock conventions
 

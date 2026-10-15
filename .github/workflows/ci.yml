@@ -70,6 +70,15 @@ jobs:
       - name: C plugin build
         run: devenv shell -- bash scripts/build-c-plugin.sh
 
+      # The contract's layout assertions are compiled by that crate's build
+      # script in this host's default C mode, which is not the mode they are
+      # compiled in on Windows. This step pins the modes a host build cannot:
+      # strict ISO C89 with warnings denied, the closest available bar to the
+      # legacy C mode `cl.exe` compiles `.c` files in, and a deliberately
+      # broken copy of the file, which must still fail the build.
+      - name: C layout assertion check
+        run: devenv shell -- bash scripts/check-c-layout-asserts.sh
+
       # The authoring feature is off by default, and the fixture turns it on,
       # so the workspace build unifies it in and never compiles the feature-off
       # path. This step compiles the crate alone that way, which is the only
@@ -104,12 +113,15 @@ jobs:
         run: rustup toolchain install nightly --profile minimal
 
       - name: Compile the Windows transport
-        # Only `api-contracts` is checked. `daemon` depends on `plugin-runtime`,
-        # which pulls in `plugin-contract`, whose build script compiles
-        # `c/layout_static_asserts.c`; MSVC's C mode rejects that file's
-        # `_Static_assert` message form, so the job failed on the plugin line
-        # rather than on the Windows transport. The daemon joins this job when
-        # `docs/bugs/plugin-contract-c-static-assert-msvc.md` is fixed. Measured
-        # on the effort's Linux host with the Windows target: `api-contracts`
-        # and `client` both check clean, `daemon` stops in that C file.
-        run: cargo +nightly check -p api-contracts --all-targets
+        # `daemon` reaches `plugin-runtime`, which pulls in `plugin-contract`,
+        # whose build script compiles `c/layout_static_asserts.c` with MSVC.
+        # That file used to be rejected there before any Rust was
+        # type-checked, so this job checked `api-contracts` alone. The layout
+        # assertions are now written in the C89 subset MSVC's legacy C mode
+        # accepts, so the daemon and the plugin line join the job. This step's
+        # first run on a runner with MSVC is what proves it, because no local
+        # invocation here can. Measured on the effort's Linux host with the
+        # Windows target: `api-contracts` and `client` both check clean, while
+        # `daemon` stops in that C file, where the nix-wrapped clang cannot
+        # target `x86_64-pc-windows-msvc`.
+        run: cargo +nightly check -p api-contracts -p daemon --all-targets
