@@ -3,8 +3,10 @@ type: ticket
 subtype: feature
 title: The sample plugin loads end to end in CI
 status: stable
-workflow_state: ready
-blocked_by: [callback-sink, teardown-and-release]
+workflow_state: done
+blocked_by:
+- callback-sink
+- teardown-and-release
 size: m
 ---
 
@@ -99,3 +101,23 @@ The effort's `docs/tasks/state.yaml` pointer and the unrelated
 uncommitted: this landing commit stages only this ticket's doc directory and its
 deviation report. The ticket's `workflow_state` and the archive stay with
 `finalize-task`.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `6f6e426`, after `main` was
+merged in, and all thirteen commands pass, including the gate's own command 12
+(`cargo test -p plugin-runtime --test sample_bundle`, 5 passed) and the
+`no-panic` build check. The end-of-effort suite gate ran the same set green at
+`97bccb8`; the end-of-effort workflow recorded that step as failed only because
+the runner's final message began with its fenced acceptance report, which the
+harness strips from output artifacts, so the saved artifact was empty and the
+workflow's marker check could not see the `SUITE: GREEN` line it had printed.
+
+Durable lessons. The gate is the only place the whole path is composed, so a
+criterion that needs a plugin-side callback that the fixture never emits is a
+signal that the fixture is incomplete rather than that the gate should be
+weaker. The packaging step belongs in test support while the signing key lives
+there; a producer-facing packer is the SDK CLI's job, and a consumer that wants
+the sample bundle on disk must call the support module or write its own. The
+gate is Linux-shaped, because it names `libcplugin.so` and the `windows` job
+does not compile `plugin-runtime`'s tests.
