@@ -50,8 +50,12 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
-/// Builds and loads the fixture cdylib.
-pub fn fixture() -> Arc<Loaded> {
+/// Builds the fixture cdylib and returns the path of the library it wrote.
+///
+/// The library is rebuilt before it is used, for the same reason the ABI
+/// harness rebuilds it: a test that read a stale `.so` would report the results
+/// of an older source tree.
+pub fn fixture_path() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("crates/")
@@ -67,12 +71,17 @@ pub fn fixture() -> Arc<Loaded> {
         status.success(),
         "the fixture must build before it is loaded"
     );
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("crates/")
         .join("../target/debug/libplugin_fixture.so")
         .canonicalize()
-        .expect("the fixture library exists beside its build directory");
+        .expect("the fixture library exists beside its build directory")
+}
+
+/// Builds and loads the fixture cdylib.
+pub fn fixture() -> Arc<Loaded> {
+    let path = fixture_path();
     // SAFETY: this test built the library from the tree it is testing.
     Arc::new(unsafe { Loaded::load(&path) }.expect("the fixture loads through the version gate"))
 }

@@ -330,6 +330,19 @@ Plugin host, documented in `crates/plugin-runtime`:
   its own, that a staged file and its directories carry the host's own modes,
   and that the entry count, per-entry size and total declared size limits are
   enforced at their edges.
+- `cargo test -p plugin-runtime --test manifest` -- the manifest step: the
+  manifest a verified, extracted bundle carries, read and validated; this host's
+  library selected from what that manifest declares; and the library mapped from
+  that selection. Every bundle is built inside the test, the fixture cdylib's
+  own bytes beside a manifest the test writes by hand, so the format under test
+  is the one an author writes. The table a mapped library reports is the
+  fixture's own; the version and size refusals the reader answers are driven
+  against a library the test compiles itself
+  (`crates/plugin-runtime/tests/fixtures/patched_table.rs`), which reports an ABI
+  minor, an ABI major and a table size this build did not write. The manifest's
+  fields are also read out of the example in `docs/plugin-contract.md` section
+  17.9 and parsed, so the documented format and the format this build reads
+  cannot drift apart.
 
 Daemon state, documented in `crates/daemon`:
 
