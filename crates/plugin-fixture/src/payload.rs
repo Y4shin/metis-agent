@@ -12,7 +12,21 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use plugin_contract::authoring::{CapabilityDescriptor, CapabilityKind, CapabilityList};
+pub use plugin_contract::authoring::{
+    CapabilityDescriptor, CapabilityKind, CapabilityList, HostContext, Initialisation,
+};
+
+/// The configuration the fixture declares.
+///
+/// The fixture is loaded directly rather than from a bundle, so no manifest
+/// declares a configuration schema for it: this type is the declaration, and a
+/// configuration that does not decode into it, or that was resolved for another
+/// instance, is the "does not match what the plugin declared" class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FixtureConfig {
+    /// The instance name this configuration was resolved for.
+    pub instance: String,
+}
 
 /// The fixture's one request shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

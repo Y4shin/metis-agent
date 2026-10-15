@@ -77,6 +77,9 @@ fn drive_pending(host: &Host, instance: &Arc<Instance>, request_id: u64) {
 #[test]
 fn a_completed_poll_releases_the_reference_the_host_handed_to_it() {
     let (host, instance) = new_instance();
+    // The instance's own initialisation ran on this host and handed out its own
+    // references, so the call below is measured against what that left behind.
+    let (before, _, _) = host.waker_counts();
     let mut call = instance
         .invoke("tool.echo", 11, &request("ready"))
         .expect("the future starts");
@@ -92,7 +95,8 @@ fn a_completed_poll_releases_the_reference_the_host_handed_to_it() {
     // release for each of them.
     let (handed_out, _, _) = host.waker_counts();
     assert_eq!(
-        handed_out, 2,
+        handed_out - before,
+        2,
         "one reference for the poll and one for the bridge's clone"
     );
     // The poll return is the release, so this holds before the future is

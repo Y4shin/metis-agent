@@ -21,7 +21,7 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use plugin_fixture::payload::{EchoRequest, EchoResponse};
+use plugin_fixture::payload::{EchoRequest, EchoResponse, FixtureConfig, HostContext, Initialisation};
 use plugin_runtime::{Host, Loaded};
 
 pub mod signer;
@@ -89,13 +89,33 @@ pub fn decode(bytes: &[u8]) -> EchoResponse {
     serde_json::from_slice(bytes).expect("the response is the fixture's shape")
 }
 
-/// A loaded library, a host, and one instance.
+/// The fixture's declared configuration and host context, as the one
+/// initialisation body the runtime delivers.
+pub fn initialisation_body(instance_name: &str) -> Vec<u8> {
+    Initialisation::new(
+        FixtureConfig {
+            instance: instance_name.to_string(),
+        },
+        HostContext {
+            instance_name: instance_name.to_string(),
+            data_dir: None,
+            capability_version: 1,
+        },
+    )
+    .expect("the fixture's own payload is buildable")
+    .body()
+}
+
+/// A loaded library, a host, and one initialised instance.
 pub fn new_instance() -> (Host, Arc<plugin_runtime::Instance>) {
     let host = Host::new();
     let loaded = fixture();
-    let instance = loaded
-        .create_instance(&host)
-        .expect("the fixture creates an instance");
+    let instance = block_on(
+        loaded
+            .init_plugin(&host, &initialisation_body("fixture"))
+            .expect("the fixture's initialisation entry starts"),
+    )
+    .expect("the fixture initialises with the configuration it declares");
     (host, instance)
 }
 
