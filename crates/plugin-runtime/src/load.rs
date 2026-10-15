@@ -356,7 +356,10 @@ fn cross_check(manifest: &Manifest, instance: &Instance) -> Result<(), LoadError
 /// what the extractor matches literally and what the manifest's `[libraries]`
 /// table declares. A producer spells it the same way, so a second derivation
 /// that disagreed would refuse a bundle carrying the library this host needs.
-fn host_target() -> String {
+/// The start-up policy reads the same string when it re-reads a bundle for a
+/// disabled plugin's placeholder, which is why it is crate-visible rather than
+/// private to this module.
+pub(crate) fn host_target() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 

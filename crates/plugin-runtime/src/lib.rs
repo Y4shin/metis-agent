@@ -41,6 +41,7 @@ pub mod load;
 pub mod manifest;
 pub mod registry;
 pub mod sink;
+pub mod startup;
 
 pub use plugin_contract::capability::{CapabilityDescriptor, CapabilityKind, CapabilityList};
 pub use registry::{Entry, Registry, RegistryError, RouteError};
