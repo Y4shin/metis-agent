@@ -618,3 +618,66 @@ fn the_mapping_step_refuses_a_library_with_no_entry_symbol_for_this_major() {
         other => panic!("a missing entry symbol is a load refusal, and this one is {other:?}"),
     }
 }
+
+#[test]
+fn the_contracts_documented_manifest_parses() {
+    let contract = std::fs::read_to_string(repository_root().join("docs/plugin-contract.md"))
+        .expect("the contract is in the tree this build is tested from");
+    let example = documented_manifest(&contract);
+
+    let manifest = Manifest::parse(&example)
+        .expect("the example the contract shows is a manifest this build reads");
+    assert_eq!(
+        manifest.abi_check(),
+        Ok(()),
+        "the documented example is one this build serves"
+    );
+    assert_eq!(manifest.name(), "dev.metis.example-plugin");
+    assert_eq!(manifest.version(), "1.0.0");
+    assert_eq!(
+        manifest.libraries().keys().collect::<Vec<_>>(),
+        vec!["linux-x86_64"],
+        "the example declares the library path an author writes per target"
+    );
+    assert_eq!(manifest.capabilities().len(), 1);
+    assert_eq!(manifest.capabilities()[0].name, "tool.echo");
+    assert_eq!(manifest.capabilities()[0].kind, "tool");
+    assert_eq!(manifest.capabilities()[0].version, 1);
+    assert_eq!(
+        manifest.capabilities()[0].request_schema,
+        json!({
+            "type": "object",
+            "required": ["echo"],
+            "properties": {"echo": {"type": "string"}},
+        })
+    );
+    assert_eq!(
+        manifest.config_schema(),
+        &json!({
+            "type": "object",
+            "properties": {"instance": {"type": "string"}},
+        })
+    );
+}
+
+/// The manifest example the contract shows, which is the format an author
+/// writes by hand.
+///
+/// It is read out of the contract rather than restated here, so the documented
+/// format and the format this build reads cannot drift: a change to one that is
+/// not made to the other fails this test.
+fn documented_manifest(contract: &str) -> String {
+    let section = contract
+        .split_once("### 17.9 The manifest")
+        .expect("the contract documents the manifest's fields in their own section")
+        .1;
+    let block = section
+        .split_once("```toml\n")
+        .expect("the manifest's section shows one TOML example")
+        .1;
+    block
+        .split_once("\n```")
+        .expect("the example is a fenced block")
+        .0
+        .to_string()
+}
