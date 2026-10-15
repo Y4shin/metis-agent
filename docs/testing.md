@@ -411,6 +411,27 @@ Plugin host, documented in `crates/plugin-runtime`:
   to the sink the caller installed, named as the load registered it. The
   fixture's buffer ledger is process-wide, so every case in that binary takes one
   file-wide lock.
+- `cargo test -p plugin-runtime --test startup` -- the start-up policy over a
+  directory of bundles, at `start_plugins`, where each bundle is written as a file
+  in a directory the test owns, so the name the policy knows a bundle by before
+  its manifest is read and the name the manifest declares can be told apart. The
+  run asserts every outcome the policy decides: a trust failure, an absent
+  manifest, an invalid manifest and a directory that cannot be listed stop
+  start-up; an extraction refusal, a missing target library, a manifest that
+  declares no library for this host, an ABI mismatch and a manifest the library
+  disagrees with disable that one plugin; an unknown container version disables
+  one plugin without its manifest ever being read, which the placeholder's
+  file-derived name and empty capability list prove; and a plugin whose
+  initialisation fails is replaced by its placeholder, which the ordering ledger
+  shows was unloaded. It also asserts that a disabled plugin is listed with its
+  name, its reason and its capabilities when the manifest was readable and with
+  the file's name and no capabilities when it was not; that its capabilities are
+  not offered and that a call for one is answered as the disabled route error
+  carrying the reason; that a plugin whose instance the recovery could not destroy
+  stops start-up, driven by a fault library the test compiles itself from
+  `tests/fixtures/refusing_destroy.rs`; and that one broken bundle among several
+  leaves the others loaded and serving, which a capability called through the
+  started plugin proves.
 - `cargo test --profile no-panic -p plugin-runtime --features no-panic-check
   --no-run` -- the `no-panic` build check, which is command 11 of the protocol
   and runs in a CI step of its own. It is the only place that assertion holds,

@@ -744,3 +744,41 @@ is `invalid_argument`: the plugin is telling the host that what it was handed
 does not match what it declared. Every other terminal status is the plugin's own
 defect. On either, the host drops the future and then calls `destroy_instance` on
 the instance pointer, which must tolerate a failed initialisation.
+
+## 19. Start-up outcomes
+
+A daemon starts from a directory of bundles. Every regular file directly in the
+directory is one bundle, named by its file's stem, and nothing is scanned
+recursively and no discovery file is read. Each bundle is loaded through the one
+host-side load entry, and the refusal that entry answers decides one of three
+outcomes.
+
+| Outcome | The refusals that produce it | What the daemon does |
+| --- | --- | --- |
+| stop | a trust failure, a bundle file that cannot be read, a manifest that is absent, unreadable, invalid, or not the name the bundle's chain carries, and a plugin that could not be unloaded | stop start-up |
+| disable | a container this build cannot read, any extraction refusal, a missing or ambiguous target library, a manifest that declares no library for this host or one the bundle does not carry, an ABI mismatch, a manifest the library disagrees with, and a registration the host refuses | that one plugin does not start, and the daemon runs |
+| disable, as a placeholder | an initialisation that failed, whether the configuration was refused or the plugin itself is defective | that one plugin does not start, its instance is unloaded, and it is listed |
+
+Three rules follow from that table, and they are the policy rather than an
+implementation of it.
+
+**A trust failure stops and a file this build cannot read does not.** The split
+is the predicate of section 17.6, `is_trust_failure`: a signature this daemon does
+not trust is evidence that something is wrong, while a container this build
+cannot parse is one bundle that does not work here. The unknown container version
+is the case that decides the rule, because it degrades before the bundle's
+manifest is ever read.
+
+**A failed initialisation is unloaded, and a refused unload stops start-up.** The
+host drops the plugin's future and then destroys the instance the entry handed
+out, which is the order section 18 fixes. If that destroy refuses, the daemon is
+left holding an instance it cannot describe, so start-up stops rather than
+continuing with part of its plugin set.
+
+**A disabled plugin is listed and not offered.** It appears with its name, the
+refusal that disabled it, and the capabilities its manifest declared. The name is
+the manifest's when a manifest was readable, and the bundle file's stem when none
+was, in which case there are no capabilities to list. Its capabilities are
+excluded from what an agent is offered, and a call for one of them is answered as
+the disabled route error carrying that reason rather than as unknown, so a caller
+tells a plugin that was turned off from one that was never loaded.
