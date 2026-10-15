@@ -188,7 +188,17 @@ CI.
 - The ABI harness, the second host implementation, still owes that release, and
   its `waker_wake` still prints an ordering line for a dead slot. The obligation
   rides with `abi-initialisation-entry`, which rewrites the harness, rather than
-  with a new task.
+  with a new task. That obligation is now closed by that ticket, which releases
+  the reference at all three poll sites and records a wake after a drop as a
+  request id in a list rather than a count.
+- The ABI revision landed: slot 0 is `init_plugin` at `METIS_ABI_MINOR` 2 with
+  the major and the entry symbol unchanged, the counters entry is gone with no
+  compatibility flag, the table stays eight entries at 80 bytes, and contract
+  section 18 fixes the initialisation payload. The authoring `Plugin` trait
+  broke with it (`init` in, `Default` and `started` out, `stopped` kept), and no
+  ticket in this effort owns that migration: `metis-plugin-sdk` inherits the new
+  shape, so that effort's map should record the migration before its tickets are
+  cut.
 
 ## Fog
 
