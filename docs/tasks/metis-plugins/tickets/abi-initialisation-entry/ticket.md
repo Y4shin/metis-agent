@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Replace instance creation with asynchronous initialisation in the plugin table
 status: stable
-workflow_state: ready
-blocked_by: [waker-lifecycle-fix]
+workflow_state: done
+blocked_by:
+- waker-lifecycle-fix
 size: l
 ---
 
@@ -98,3 +99,25 @@ were adapted (`tests/registry.rs` expects ABI `(1, 2)`, `tests/waker.rs` measure
 the call's waker references as a delta after initialisation, still pinning the
 call's own two); and nothing here gates the minor bump at bundle-load time, so
 `manifest-and-library` owns the `min_abi_minor` refusal.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `a9703fb`, after `main` was
+merged in, and passes: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`, `cargo test`, `buf lint`, `buf breaking`, `bash
+scripts/regenerate-contracts.sh --check`, `bash scripts/build-c-plugin.sh`,
+`cargo check -p plugin-contract --no-default-features`, `cargo run -p
+plugin-fixture --bin abi-harness` (82 checks, `[result] PASS`) and `bash
+scripts/regenerate-abi-header.sh --check`.
+
+Durable lessons folded into the project docs. `docs/plugin-contract.md` carries
+the amended table in section 5 and the initialisation payload in section 18, so a
+plugin author and the SDK read one source. `docs/testing.md` records the
+harness's new checks. The effort's arch spec now says the host-side hand-off
+lives in `plugin-runtime` as `Loaded::init_plugin` plus `PluginInit`, not in
+`async-initialisation`, and `docs/tasks/metis-plugins/map.md` records the
+authoring break as SDK-facing work with no owner in this effort, so
+`metis-plugin-sdk` picks the migration up before its tickets are cut. The one
+thing a later chain must not rediscover is that a revision bump reaches past the
+ABI files: the fixture's initialisation consumes waker references, so a foreign
+runtime test that pinned an absolute count had to become a delta.
