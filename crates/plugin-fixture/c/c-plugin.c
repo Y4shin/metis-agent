@@ -24,7 +24,21 @@
  * Its four capabilities are `c.ready` (ready on the first poll), `c.timer` (asks
  * the host for a timer, then answers), `c.cancel` (parks until cancelled), and
  * `c.drop_in_flight` (asks for a timer and is dropped before the answer).
+ *
+ * Initialisation is the `init_plugin` entry: it takes the one payload holding
+ * the plugin's configuration and the host context, hands out the instance and a
+ * future, and the future resolves `Ok` only when the configuration is the one
+ * this plugin declares. `declared_config_matches` is that declaration, and it
+ * is written as the bytes of the configuration object the plugin accepts, which
+ * is what a hand-written C plugin can check without a JSON parser.
  */
+
+/* The configuration this plugin declares: one object naming the instance it was
+ * resolved for. A payload whose `config` part is not these exact bytes is
+ * refused with METIS_STATUS_INVALID_ARGUMENT, which is the "the configuration
+ * does not match what the plugin declared" class. */
+#define CPLUGIN_CONFIG_OBJECT "{\"instance\":\"cplugin\"}"
+#define CPLUGIN_CONFIG_MARKER "\"config\":"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -91,7 +105,8 @@ typedef enum {
     MODE_READY = 0,
     MODE_TIMER = 1,
     MODE_CANCEL = 2,
-    MODE_DROP_IN_FLIGHT = 3
+    MODE_DROP_IN_FLIGHT = 3,
+    MODE_INITIALISING = 4
 } mode_t;
 
 #define MAX_CTX 32
@@ -103,6 +118,7 @@ typedef struct {
     int issued;
     int answered;
     int cancelled;
+    int init_ok;
     MetisStatus answer_status;
     MetisWaker waker;
     int has_waker;
@@ -143,6 +159,11 @@ static ctx_t *ctx_find(instance_t *instance, uint64_t request_id) {
 static MetisStatus c_future_poll(void *ctx, MetisWaker waker, MetisBuffer *out_value);
 static MetisStatus c_future_drop(void *ctx);
 static const MetisFutureVtable FUTURE_VTABLE = {c_future_poll, c_future_drop};
+
+/* Declared here because the initialisation entry, which is defined before the
+ * envelope check and the configuration declaration, uses both. */
+static MetisStatus request_is_valid(MetisBuffer payload);
+static int declared_config_matches(const uint8_t *body, size_t len);
 
 static ctx_t *ctx_take(instance_t *instance) {
     for (size_t index = 0; index < MAX_CTX; index++) {
@@ -223,16 +244,41 @@ static MetisStatus c_release_buffer(MetisBuffer buffer) {
     return METIS_STATUS_OK;
 }
 
-static MetisStatus c_create_instance(const struct MetisHostApiV1 *host, void **out_instance) {
-    if (host == NULL || out_instance == NULL) {
+/* Constructs and initialises one instance, and hands out the future that
+ * completes the initialisation. The instance pointer is valid immediately and
+ * its initialisation is valid exactly when that future resolved `Ok`; on any
+ * other resolution the host drops the future and then destroys the pointer,
+ * which this function tolerates because there is nothing to unwind. */
+static MetisStatus c_init_plugin(const struct MetisHostApiV1 *host, MetisBuffer payload, void **out_instance,
+                                 MetisFutureHandle *out_future) {
+    if (host == NULL || out_instance == NULL || out_future == NULL) {
         return METIS_STATUS_INVALID_ARGUMENT;
+    }
+    MetisStatus status = request_is_valid(payload);
+    if (status != METIS_STATUS_OK) {
+        return status;
     }
     instance_t *instance = calloc(1, sizeof(instance_t));
     if (instance == NULL) {
         return METIS_STATUS_INTERNAL;
     }
     instance->host = host;
+    /* The payload is host-owned and borrowed for this call, so what is read
+     * here is copied into the future's context rather than kept. */
+    int matches = declared_config_matches(payload.ptr + 1, payload.len - 1);
+    ctx_t *ctx = ctx_take(instance);
+    if (ctx == NULL) {
+        free(instance);
+        return METIS_STATUS_INTERNAL;
+    }
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->in_use = 1;
+    ctx->mode = MODE_INITIALISING;
+    ctx->init_ok = matches;
+    ctx->host = host;
     *out_instance = instance;
+    out_future->ctx = ctx;
+    out_future->vtable = &FUTURE_VTABLE;
     return METIS_STATUS_OK;
 }
 
@@ -278,6 +324,27 @@ static MetisStatus request_is_valid(MetisBuffer payload) {
         return METIS_STATUS_UNSUPPORTED;
     }
     return METIS_STATUS_OK;
+}
+
+/* Whether the payload's `config` part is the configuration object this plugin
+ * declares. The body is the JSON after the envelope byte, and the marker is
+ * searched for rather than parsed: a hand-written C plugin has no JSON reader,
+ * and the declaration it checks against is a fixed byte string. */
+static int declared_config_matches(const uint8_t *body, size_t len) {
+    static const char marker[] = CPLUGIN_CONFIG_MARKER;
+    static const char declared[] = CPLUGIN_CONFIG_OBJECT;
+    const size_t marker_len = sizeof(marker) - 1;
+    const size_t declared_len = sizeof(declared) - 1;
+    if (len < marker_len + declared_len) {
+        return 0;
+    }
+    for (size_t at = 0; at + marker_len + declared_len <= len; at++) {
+        if (memcmp(body + at, marker, marker_len) != 0) {
+            continue;
+        }
+        return memcmp(body + at + marker_len, declared, declared_len) == 0;
+    }
+    return 0;
 }
 
 static MetisStatus mode_for(const uint8_t *capability, size_t capability_len, mode_t *mode) {
@@ -371,6 +438,13 @@ static MetisStatus poll_body(ctx_t *ctx, MetisWaker waker, MetisBuffer *out_valu
         }
         ctx_park(ctx, waker);
         return METIS_STATUS_PENDING;
+    }
+    case MODE_INITIALISING: {
+        /* The one poll that completes initialisation. Nothing here blocks or
+         * waits: the configuration is already checked, and this is where the
+         * verdict is handed over. */
+        ctx->answered = 1;
+        return ctx->init_ok ? METIS_STATUS_OK : METIS_STATUS_INVALID_ARGUMENT;
     }
     case MODE_DROP_IN_FLIGHT: {
         if (!ctx->issued) {
@@ -467,7 +541,7 @@ static const MetisPluginTableV1 TABLE = {
     sizeof(MetisPluginTableV1),
     METIS_ABI_MAJOR,
     METIS_ABI_MINOR,
-    c_create_instance,
+    c_init_plugin,
     c_destroy_instance,
     c_list_capabilities,
     c_invoke_future,

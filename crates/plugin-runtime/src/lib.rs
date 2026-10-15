@@ -49,8 +49,10 @@ pub enum CallError {
     /// minor inside the major is accepted, because its extra entries are
     /// appended after the last entry this build reads.
     Version(MetisAbiError),
-    /// The instance could not be created.
-    Create(MetisStatus),
+    /// The initialisation entry refused to start, which is not the same as an
+    /// initialisation that started and then failed: that failure is the
+    /// future's own terminal status.
+    Init(MetisStatus),
     /// The instance has been quarantined: no new future is accepted from it.
     Quarantined,
     /// The plugin reported this status for the call.
@@ -69,8 +71,8 @@ impl std::fmt::Display for CallError {
                 write!(f, "the plugin library could not be loaded: {detail}")
             }
             CallError::Version(error) => write!(f, "{error}"),
-            CallError::Create(status) => {
-                write!(f, "create_instance returned {}", status.as_str())
+            CallError::Init(status) => {
+                write!(f, "init_plugin returned {}", status.as_str())
             }
             CallError::Quarantined => write!(f, "the instance is quarantined"),
             CallError::Status(status) => write!(f, "the call returned {}", status.as_str()),
@@ -169,28 +171,188 @@ impl Loaded {
         metis_plugin_table_has_service_complete(self.table().size)
     }
 
-    /// Creates one instance and reads its capability declaration.
+    /// Starts one instance's initialisation.
     ///
-    /// The declaration is read once, here, so routing and schema validation
-    /// never need a second call into the plugin.
-    pub fn create_instance(self: &Arc<Self>, host: &Host) -> Result<Arc<Instance>, CallError> {
+    /// The entry is the asynchronous one: on `Ok` it hands out the instance and
+    /// the future that must resolve `Ok` before the instance is valid, and the
+    /// capability declaration is read once initialisation has resolved, so
+    /// routing and schema validation never need a second call into the plugin.
+    ///
+    /// The returned [future](PluginInit) is driven by the caller's runtime,
+    /// which is the crate's standing rule: this function starts nothing and
+    /// blocks nothing. `body` is the initialisation payload's JSON body, which
+    /// is the configuration and the host context; the envelope is added here.
+    pub fn init_plugin(
+        self: &Arc<Self>,
+        host: &Host,
+        body: &[u8],
+    ) -> Result<PluginInit, CallError> {
         host.bind_release(self.table().release_buffer);
-        let mut handle: *mut c_void = std::ptr::null_mut();
-        // SAFETY: the function pointer is the table's own, and the host table
-        // lives for as long as the host does.
-        let status = unsafe { (self.table().create_instance)(host.api(), &mut handle) };
-        if status != MetisStatus::Ok || handle.is_null() {
-            return Err(CallError::Create(status));
+        let payload = metis_encode_payload(body);
+        let mut instance: *mut c_void = std::ptr::null_mut();
+        let mut handle = MetisFutureHandle::null();
+        // SAFETY: the function pointer is the table's own, the host table lives
+        // for as long as the host does, and the payload buffer is host-owned and
+        // valid for the call.
+        let status = unsafe {
+            (self.table().init_plugin)(
+                host.api(),
+                MetisBuffer {
+                    ptr: payload.as_ptr() as *mut u8,
+                    len: payload.len(),
+                    cap: payload.len(),
+                    owner: METIS_BUFFER_OWNER_HOST,
+                    reserved: 0,
+                },
+                &mut instance,
+                &mut handle,
+            )
+        };
+        if status != MetisStatus::Ok {
+            return Err(CallError::Init(status));
         }
-        let capabilities = read_capabilities(self.table(), handle)?;
-        Ok(Arc::new(Instance {
+        if handle.is_null() {
+            return Err(CallError::Payload(
+                "init_plugin started no future, so the instance is not initialising".to_string(),
+            ));
+        }
+        self.host_marker(host);
+        Ok(PluginInit {
             loaded: Arc::clone(self),
-            handle,
             host: host.clone(),
-            capabilities,
-            quarantined: AtomicBool::new(false),
-            in_flight: Mutex::new(HashSet::new()),
-        }))
+            instance,
+            handle,
+            resolved: false,
+            state: Arc::new(CallState {
+                waker: Mutex::new(None),
+                dropped: AtomicBool::new(false),
+                counts: Arc::clone(&host.inner),
+                request_id: INITIALISATION_REQUEST_ID,
+            }),
+        })
+    }
+
+    /// Records that initialisation started, which is the step the ordering
+    /// ledger has to show before anything is registered.
+    fn host_marker(&self, host: &Host) {
+        host.order(format!(
+            "initialisation started from {}",
+            self.path.display()
+        ));
+    }
+}
+
+/// The request id an initialisation future carries. There is no request id for
+/// an initialisation, and zero is never handed to a call, so a late wake
+/// recorded against it can only be an initialisation's.
+const INITIALISATION_REQUEST_ID: u64 = 0;
+
+/// One instance's in-progress initialisation, driven by the caller.
+///
+/// It owns the plugin's initialisation future, and dropping it drops that
+/// future. When the future resolved `Ok` the instance is live and the runtime's
+/// [`Instance`] owns the pointer; when it did not, this value destroys the
+/// pointer on drop, which is the order the contract fixes: drop the future,
+/// then destroy.
+pub struct PluginInit {
+    loaded: Arc<Loaded>,
+    host: Host,
+    instance: *mut c_void,
+    handle: MetisFutureHandle,
+    /// Whether the plugin's future resolved `Ok` and the instance is live.
+    resolved: bool,
+    state: Arc<CallState>,
+}
+
+impl Future for PluginInit {
+    type Output = Result<Arc<Instance>, CallError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.state.dropped.load(SeqCst) {
+            return Poll::Ready(Err(CallError::Payload(
+                "a dropped initialisation was polled again".to_string(),
+            )));
+        }
+        let waker = owning_waker(&this.state);
+        let (waker_data, waker_vtable) = (waker.data, waker.vtable);
+        let mut out = MetisBuffer::empty();
+        // SAFETY: the handle came from this table's `init_plugin`, and the waker
+        // is this initialisation's own.
+        let status = unsafe {
+            let vtable = &*this.handle.vtable;
+            (vtable.poll)(this.handle.ctx, waker, &mut out)
+        };
+        // The reference handed to the poll is the host's own, so it is released
+        // as soon as the poll returns, whatever it returned.
+        release_waker(MetisWaker {
+            data: waker_data,
+            vtable: waker_vtable,
+        });
+        match status {
+            MetisStatus::Pending => {
+                *this.state.waker.lock().unwrap() = Some(context.waker().clone());
+                Poll::Pending
+            }
+            MetisStatus::Ok => {
+                match read_capabilities(this.loaded.table(), this.instance) {
+                    Ok(capabilities) => {
+                        this.resolved = true;
+                        this.host
+                            .order("initialisation resolved, so the instance is valid");
+                        let handle = this.instance;
+                        Poll::Ready(Ok(Arc::new(Instance {
+                            loaded: Arc::clone(&this.loaded),
+                            handle,
+                            host: this.host.clone(),
+                            capabilities,
+                            quarantined: AtomicBool::new(false),
+                            in_flight: Mutex::new(HashSet::new()),
+                        })))
+                    }
+                    Err(error) => {
+                        // The initialisation resolved, but the declaration could
+                        // not be read: the instance is not usable, so it is
+                        // destroyed on drop like any other failure.
+                        this.host
+                            .order("the capability declaration could not be read");
+                        Poll::Ready(Err(error))
+                    }
+                }
+            }
+            terminal => Poll::Ready(Err(CallError::Status(terminal))),
+        }
+    }
+}
+
+impl Drop for PluginInit {
+    fn drop(&mut self) {
+        if self.state.dropped.swap(true, SeqCst) {
+            return;
+        }
+        // SAFETY: the handle came from this table's `init_plugin` and this is
+        // its one drop.
+        let dropped = unsafe {
+            let vtable = &*self.handle.vtable;
+            (vtable.drop)(self.handle.ctx)
+        };
+        if self.resolved {
+            self.host.order(format!(
+                "the initialisation future was dropped (drop returned {})",
+                dropped.as_str()
+            ));
+            return;
+        }
+        // A failed initialisation: drop the future first, then destroy what the
+        // entry handed out, which must tolerate a failed initialisation.
+        // SAFETY: the pointer came from this table's `init_plugin`, and it is
+        // destroyed exactly once because this path runs once.
+        let destroyed = unsafe { (self.loaded.table().destroy_instance)(self.instance) };
+        self.host.order(format!(
+            "instance destroyed after a failed initialisation (drop {}, destroy {})",
+            dropped.as_str(),
+            destroyed.as_str()
+        ));
     }
 }
 
@@ -305,7 +467,7 @@ impl Host {
         }
     }
 
-    /// The host table to hand to `create_instance` and `invoke_future`.
+    /// The host table to hand to `init_plugin` and `invoke_future`.
     pub fn api(&self) -> *const MetisHostApiV1 {
         &self.api.0
     }
@@ -633,7 +795,7 @@ impl Instance {
                 "a call still holds the instance".to_string(),
             ));
         }
-        // SAFETY: the instance came from `create_instance`, quiescence has
+        // SAFETY: the instance came from `init_plugin`, quiescence has
         // happened, and every future and waker clone is gone, so no plugin code
         // is running.
         let status = unsafe { (self.loaded.table().destroy_instance)(self.handle) };
@@ -657,7 +819,8 @@ struct CallState {
     /// Whether the plugin's future has been dropped.
     dropped: AtomicBool,
     counts: Arc<HostInner>,
-    /// The id of the call this state belongs to.
+    /// The id of the call this state belongs to, or zero for an initialisation
+    /// future, which has no request id.
     ///
     /// It is here so that a record made after the future was dropped can name
     /// the call it belongs to: the plugin's clone outlives the call, and the id

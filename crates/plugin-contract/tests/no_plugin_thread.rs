@@ -22,15 +22,24 @@ use plugin_contract::abi::{
     MetisStatus, MetisWaker,
 };
 use plugin_contract::authoring::{
-    Call, CapabilityDescriptor, Plugin, PluginError, Request, Response, schema_of, table,
+    Call, CapabilityDescriptor, HostContext, Initialisation, Plugin, PluginError, Request,
+    Response, schema_of, table,
 };
 use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
 
 /// The one capability this probe advertises.
-#[derive(Default)]
 struct Probe;
 
 impl Plugin for Probe {
+    async fn init(
+        _host: plugin_contract::authoring::Host,
+        initialisation: Initialisation,
+    ) -> Result<Self, PluginError> {
+        let context = initialisation.host_context()?;
+        assert_eq!(context.instance_name, "probe");
+        Ok(Probe)
+    }
+
     fn capabilities(&self) -> Vec<CapabilityDescriptor> {
         vec![CapabilityDescriptor::tool(
             "tool.probe",
@@ -172,11 +181,53 @@ fn thread_count() -> usize {
 #[test]
 fn a_capability_completes_with_no_plugin_thread() {
     let host = Host::new(&raw const PROBE);
+    let before_init = thread_count();
     let mut instance = std::ptr::null_mut();
+    let mut init = MetisFutureHandle::null();
+    let payload = Initialisation::new(
+        serde_json::json!({}),
+        HostContext {
+            instance_name: "probe".to_string(),
+            data_dir: None,
+            capability_version: 1,
+        },
+    )
+    .expect("the probe's own payload is buildable")
+    .body();
+    let encoded = metis_encode_payload(&payload);
     // SAFETY: the host table lives in the box and stays valid for the
-    // instance's lifetime.
-    let status = unsafe { (PROBE.create_instance)(host.api(), &mut instance) };
-    assert_eq!(status, MetisStatus::Ok);
+    // instance's lifetime, and the initialisation payload is host-owned.
+    let status = unsafe {
+        (PROBE.init_plugin)(
+            host.api(),
+            MetisBuffer {
+                ptr: encoded.as_ptr() as *mut u8,
+                len: encoded.len(),
+                cap: encoded.len(),
+                owner: METIS_BUFFER_OWNER_HOST,
+                reserved: 0,
+            },
+            &mut instance,
+            &mut init,
+        )
+    };
+    assert_eq!(status, MetisStatus::Ok, "the initialisation entry starts");
+    let mut out = MetisBuffer::empty();
+    // SAFETY: the handle came from this table's `init_plugin`.
+    let status = unsafe { ((*init.vtable).poll)(init.ctx, host.waker(), &mut out) };
+    assert_eq!(
+        status,
+        MetisStatus::Ok,
+        "initialisation resolves before the instance is valid"
+    );
+    assert!(!instance.is_null(), "the entry handed out an instance");
+    assert_eq!(
+        before_init,
+        thread_count(),
+        "initialising the instance starts no thread"
+    );
+    // SAFETY: the handle came from this table's `init_plugin`.
+    assert_eq!(unsafe { ((*init.vtable).drop)(init.ctx) }, MetisStatus::Ok);
 
     let body = serde_json::to_vec(&Body {
         text: "probe".to_string(),
@@ -184,7 +235,6 @@ fn a_capability_completes_with_no_plugin_thread() {
     .unwrap();
     let encoded = metis_encode_payload(&body);
 
-    let before = thread_count();
     let mut handle = MetisFutureHandle::null();
     // SAFETY: the instance is live and the request buffer is host-owned.
     let status = unsafe {
@@ -222,9 +272,9 @@ fn a_capability_completes_with_no_plugin_thread() {
     let after = thread_count();
 
     assert_eq!(
-        before, after,
-        "the authoring path owns no executor, so driving a capability to completion \
-         starts no thread"
+        before_init, after,
+        "the authoring path owns no executor, so initialising an instance and \
+         driving a capability to completion starts no thread"
     );
     assert_eq!(host.released.load(Ordering::SeqCst), 1);
     let body = metis_payload_body(&response).expect("the response carries an envelope");

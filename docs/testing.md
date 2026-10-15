@@ -226,16 +226,23 @@ Plugin ABI, documented in `crates/plugin-contract/src/abi` and
 
 - `cargo run -p plugin-fixture --bin abi-harness` -- loads the fixture `cdylib`
   through `plugin-contract` and drives the revised table: the version gate, the
-  capability declaration, the futures path, the service round trip, cancel, and
-  the hazard set, printing one `[ok]` or `[fail]` line per check, the teardown
-  ordering as it happens, and a `[result] PASS`/`FAIL` line; it exits non-zero on
-  any failure. The harness rebuilds the fixture library first, so a stale `.so`
-  is never loaded. It also carries the compatibility checks: the entry symbol
-  resolved for this major against a library built for another one, the
-  per-capability version gate, a request body carrying a field this build does
-  not know, and, on Linux, tables placed against a page with no access, so a
-  reader that touched an entry past the reported size would fault rather than
-  quietly read it.
+  asynchronous initialisation entry with the one payload carrying the fixture's
+  configuration and the host context (including the configuration that does not
+  match what the plugin declared), the capability declaration, the futures path,
+  the service round trip, cancel, the waker accounting and the hazard set,
+  printing one `[ok]` or `[fail]` line per check, the teardown ordering as it
+  happens, and a `[result] PASS`/`FAIL` line; it exits non-zero on any failure.
+  The harness rebuilds the fixture library first, so a stale `.so` is never
+  loaded. Its waker accounting follows the landed rule: it releases the one
+  owning reference it hands each poll as soon as that poll returns, and a wake
+  that arrives after that call's future was dropped is recorded against the
+  request id of the call it belongs to rather than written to the ordering
+  ledger. It also carries the compatibility checks: the entry symbol resolved
+  for this major against a library built for another one, the per-capability
+  version gate, a request body carrying a field this build does not know, and,
+  on Linux, tables placed against a page with no access, so a reader that
+  touched an entry past the reported size would fault rather than quietly read
+  it.
 - `bash scripts/build-c-plugin.sh` -- compile the C implementer of the table
   (`crates/plugin-fixture/c/c-plugin.c`) with `-std=c11 -Wall -Wextra -Werror`
   under both gcc and clang, and leave the gcc build at
@@ -255,15 +262,19 @@ Plugin ABI, documented in `crates/plugin-contract/src/abi` and
   `cargo clippy` and `cargo test` all carry that check; the numbers it
   measured are compared with Rust's by
   `crates/plugin-contract/tests/c_layout.rs`.
-- The authoring surface (the capability-name-routed `Plugin` trait and the
-  boxed-future helper that replaces `async-ffi`) is behind `plugin-contract`'s
-  `authoring` feature, which is off by default so the host sees the primitives
-  and the payload envelope alone. Its tests live in
-  `crates/plugin-contract/tests/authoring.rs` under that feature, and the
-  fixture turns the feature on, so the workspace `cargo test` build unifies it
-  in and runs them. `cargo test -p plugin-contract --features authoring` runs
-  them on their own, and `cargo test -p plugin-contract` runs the feature-off
-  path (the gate checks in `tests/feature_gate.rs`). The revision added the
+- The authoring surface (the capability-name-routed `Plugin` trait, its
+  fallible asynchronous constructor, and the boxed-future helper that replaces
+  `async-ffi`) is behind `plugin-contract`'s `authoring` feature, which is off by
+  default so the host sees the primitives and the payload envelope alone. Its
+  tests live in `crates/plugin-contract/tests/authoring.rs` under that feature,
+  and the fixture turns the feature on, so the workspace `cargo test` build
+  unifies it in and runs them. They cover the initialisation entry in process: a
+  configuration the plugin can read, a configuration it cannot, an
+  initialisation that fails, and the duplicate-name declaration check that runs
+  once the plugin value exists. `cargo test -p plugin-contract --features
+  authoring` runs them on their own, and `cargo test -p plugin-contract` runs the
+  feature-off path (the gate checks in `tests/feature_gate.rs`). The revision
+  added the
   version gate and the presence rule in `crates/plugin-contract/tests/abi.rs`,
   and the no-executor check in `crates/plugin-contract/tests/no_plugin_thread.rs`,
   which has its own binary so the thread count it takes is not the harness's own

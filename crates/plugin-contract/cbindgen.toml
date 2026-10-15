@@ -26,7 +26,7 @@ include = [
     "MetisTablePrefix",
     "MetisPluginTableV1",
     "MetisHostApiV1",
-    "MetisCreateInstanceFn",
+    "MetisInitPluginFn",
     "MetisDestroyInstanceFn",
     "MetisListCapabilitiesFn",
     "MetisInvokeFutureFn",

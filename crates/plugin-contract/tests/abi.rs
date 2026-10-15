@@ -14,9 +14,11 @@ use plugin_contract::abi::*;
 
 /// A table whose entries are all one harmless function, so a refusal can be
 /// attributed to the gate rather than to a null entry.
-unsafe extern "C" fn noop_create(
+unsafe extern "C" fn noop_init(
     _host: *const MetisHostApiV1,
-    _out: *mut *mut c_void,
+    _payload: MetisBuffer,
+    _out_instance: *mut *mut c_void,
+    _out_future: *mut MetisFutureHandle,
 ) -> MetisStatus {
     MetisStatus::Internal
 }
@@ -76,7 +78,7 @@ fn full_table(size: usize, abi_major: u32, abi_minor: u32) -> MetisPluginTableV1
         size,
         abi_major,
         abi_minor,
-        create_instance: noop_create,
+        init_plugin: noop_init,
         destroy_instance: noop_destroy,
         list_capabilities: noop_list,
         invoke_future: noop_invoke,
@@ -88,18 +90,18 @@ fn full_table(size: usize, abi_major: u32, abi_minor: u32) -> MetisPluginTableV1
 }
 
 #[test]
-fn the_revision_reports_minor_one_and_keeps_the_major_and_symbol() {
+fn the_revision_reports_minor_two_and_keeps_the_major_and_symbol() {
     assert_eq!(METIS_ABI_MAJOR, 1);
-    assert_eq!(METIS_ABI_MINOR, 1);
+    assert_eq!(METIS_ABI_MINOR, 2);
     assert_eq!(METIS_PLUGIN_ENTRY_V1, b"metis_plugin_entry_v1\0");
 }
 
 #[test]
 fn a_current_table_is_accepted() {
-    let table = full_table(size_of::<MetisPluginTableV1>(), 1, 1);
+    let table = full_table(size_of::<MetisPluginTableV1>(), 1, METIS_ABI_MINOR);
     // SAFETY: the table is a live local for the duration of the call.
     let read = unsafe { metis_read_table(&table) }.expect("a current table is accepted");
-    assert_eq!(read.abi_minor, 1);
+    assert_eq!(read.abi_minor, METIS_ABI_MINOR);
     assert_eq!(
         read.size,
         size_of::<MetisPluginTableV1>(),
@@ -193,7 +195,7 @@ struct ExtendedTableV1 {
     size: usize,
     abi_major: u32,
     abi_minor: u32,
-    create_instance: MetisCreateInstanceFn,
+    init_plugin: MetisInitPluginFn,
     destroy_instance: MetisDestroyInstanceFn,
     list_capabilities: MetisListCapabilitiesFn,
     invoke_future: MetisInvokeFutureFn,
@@ -219,7 +221,7 @@ fn an_appended_entry_and_a_newer_minor_still_interoperate() {
         size: size_of::<ExtendedTableV1>(),
         abi_major: METIS_ABI_MAJOR,
         abi_minor: METIS_ABI_MINOR + 1,
-        create_instance: known.create_instance,
+        init_plugin: known.init_plugin,
         destroy_instance: known.destroy_instance,
         list_capabilities: known.list_capabilities,
         invoke_future: known.invoke_future,
@@ -266,7 +268,7 @@ fn an_appended_entry_and_a_newer_minor_still_interoperate() {
     // Every entry this build knows is the plugin's own value, read at its own
     // offset: the reader touches the entries its own layout covers and no
     // further.
-    assert!(ptr::fn_addr_eq(read.create_instance, known.create_instance));
+    assert!(ptr::fn_addr_eq(read.init_plugin, known.init_plugin));
     assert!(ptr::fn_addr_eq(
         read.destroy_instance,
         known.destroy_instance
@@ -296,7 +298,7 @@ fn a_table_too_short_for_an_entry_names_the_entry() {
     // A table that stops just after `shutdown`, which is the shape an older
     // revision would have had.
     let short = size_of::<MetisTablePrefix>() + 7 * size_of::<usize>();
-    let table = full_table(short, 1, 1);
+    let table = full_table(short, 1, METIS_ABI_MINOR);
     // SAFETY: the checks read only the prefix, and the table is a live local
     // whose prefix is intact.
     let error = refused(unsafe { metis_read_table(&table) }); // service_complete is not covered
@@ -309,13 +311,13 @@ fn a_table_too_short_for_an_entry_names_the_entry() {
 
     // A table that is the bare prefix still reads as a table, and names the
     // first entry it does not cover.
-    let table = full_table(size_of::<MetisTablePrefix>(), 1, 1);
+    let table = full_table(size_of::<MetisTablePrefix>(), 1, METIS_ABI_MINOR);
     // SAFETY: as above.
     let error = refused(unsafe { metis_read_table(&table) }); // no entry is covered
     assert_eq!(
         error,
         MetisAbiError::EntryMissing {
-            entry: "create_instance"
+            entry: "init_plugin"
         }
     );
 }
@@ -324,6 +326,7 @@ fn a_table_too_short_for_an_entry_names_the_entry() {
 fn presence_is_decided_by_size() {
     let full_plugin = size_of::<MetisPluginTableV1>();
     let full_host = size_of::<MetisHostApiV1>();
+    assert!(metis_plugin_table_has_init_plugin(full_plugin));
     assert!(metis_plugin_table_has_invoke_future(full_plugin));
     assert!(metis_plugin_table_has_service_complete(full_plugin));
     assert!(metis_host_api_has_service_request(full_host));
@@ -353,14 +356,14 @@ fn presence_is_decided_by_size() {
 
 #[test]
 fn the_prefix_is_read_before_the_entries() {
-    let table = full_table(size_of::<MetisPluginTableV1>(), 1, 1);
+    let table = full_table(size_of::<MetisPluginTableV1>(), 1, METIS_ABI_MINOR);
     // SAFETY: the table is a live local.
     let prefix = unsafe { metis_read_prefix(&table) }.expect("the prefix is covered");
     assert_eq!(prefix.abi_major, 1);
-    assert_eq!(prefix.abi_minor, 1);
+    assert_eq!(prefix.abi_minor, METIS_ABI_MINOR);
 
     let trimmed = size_of::<MetisTablePrefix>() - 1;
-    let table = full_table(trimmed, 1, 1);
+    let table = full_table(trimmed, 1, METIS_ABI_MINOR);
     // SAFETY: the size check is what this exercises.
     assert!(
         unsafe { metis_read_prefix(&table) }.is_none(),
@@ -382,4 +385,123 @@ fn neither_vtable_carries_a_size_field() {
     );
     assert!(MetisFutureHandle::null().is_null());
     assert!(MetisWaker::null().is_null());
+}
+
+// --- the table's description, checked against the table -------------------
+
+/// The repository root, which is where the contract text and the generated
+/// header live.
+fn repo_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|crates| crates.parent())
+        .expect("the repository root")
+        .to_path_buf()
+}
+
+/// The eight entries of the plugin table, in slot order.
+const TABLE_ENTRIES: [&str; 8] = [
+    "init_plugin",
+    "destroy_instance",
+    "list_capabilities",
+    "invoke_future",
+    "cancel",
+    "release_buffer",
+    "shutdown",
+    "service_complete",
+];
+
+/// The generated header, which is the artifact a non-Rust implementer uses.
+fn generated_header() -> String {
+    std::fs::read_to_string(repo_root().join("crates/plugin-contract/include/metis_plugin_abi.h"))
+        .expect("the generated header is committed")
+}
+
+/// The contract text's plugin-table section, which is the table's description.
+fn contract_table_section() -> String {
+    let contract = std::fs::read_to_string(repo_root().join("docs/plugin-contract.md"))
+        .expect("the contract text is committed");
+    contract
+        .split("## 5. The plugin table")
+        .nth(1)
+        .and_then(|rest| rest.split("## 6.").next())
+        .expect("the contract has a plugin table section")
+        .to_string()
+}
+
+#[test]
+fn the_contract_text_and_the_generated_header_agree_with_the_table() {
+    let header = generated_header();
+    let section = contract_table_section();
+
+    // The header carries one slot constant per entry, at the index the layout
+    // asserts, and the table is exactly those slots.
+    assert_eq!(METIS_PLUGIN_TABLE_V1_SLOTS, TABLE_ENTRIES.len());
+    assert_eq!(METIS_PLUGIN_TABLE_V1_SLOTS, 8);
+    for (slot, entry) in TABLE_ENTRIES.iter().enumerate() {
+        let define = format!(
+            "#define METIS_PLUGIN_TABLE_V1_{}_SLOT {slot}",
+            entry.to_uppercase()
+        );
+        assert!(
+            header.contains(&define),
+            "the generated header is missing `{define}`"
+        );
+        assert!(
+            section.contains(&format!("`{entry}`")),
+            "the contract's plugin table has no row for `{entry}`"
+        );
+    }
+    assert!(
+        !section.contains("create_instance"),
+        "the contract still describes the instance-creation entry this revision replaced"
+    );
+    assert_eq!(
+        size_of::<MetisPluginTableV1>(),
+        size_of::<MetisTablePrefix>() + METIS_PLUGIN_TABLE_V1_SLOTS * size_of::<*const c_void>(),
+        "the table is the prefix plus its pointer slots"
+    );
+}
+
+#[test]
+fn no_counter_entry_is_reachable_through_the_table() {
+    let header = generated_header();
+    let section = contract_table_section();
+
+    // Eight entries and no ninth. The table's own struct body and the
+    // description's rows are what the check reads: a slot constant or a member
+    // named after a counter would be a slot the table does not have.
+    assert_eq!(METIS_PLUGIN_TABLE_V1_SLOTS, 8);
+    let body = header
+        .split("typedef struct MetisPluginTableV1 {")
+        .nth(1)
+        .and_then(|rest| rest.split("} MetisPluginTableV1;").next())
+        .expect("the header declares MetisPluginTableV1");
+    assert!(
+        !body.to_lowercase().contains("counter"),
+        "the plugin table carries a counter member"
+    );
+    let slot_defines: String = header
+        .lines()
+        .filter(|line| line.starts_with("#define METIS_PLUGIN_TABLE_V1_"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !slot_defines.to_lowercase().contains("counter"),
+        "the generated header names a counter slot"
+    );
+    let rows: String = section
+        .lines()
+        .filter(|line| line.trim_start().starts_with('|'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !rows.to_lowercase().contains("counter"),
+        "the contract's plugin table has a counter row"
+    );
+    // The first slot is the initialisation entry, and the replaced
+    // instance-creation entry is gone from the header entirely.
+    assert_eq!(METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT, 0);
+    assert!(!header.contains("create_instance"));
+    assert!(header.contains("init_plugin"));
 }

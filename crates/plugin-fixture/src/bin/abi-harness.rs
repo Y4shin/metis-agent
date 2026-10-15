@@ -49,7 +49,8 @@ use libloading::Library;
 use plugin_contract::abi::*;
 use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
 use plugin_fixture::payload::{
-    CapabilityDescriptor, CapabilityKind, CapabilityList, EchoRequest, EchoResponse,
+    CapabilityDescriptor, CapabilityKind, CapabilityList, EchoRequest, EchoResponse, HostContext,
+    Initialisation,
 };
 
 /// How long the harness waits for a call that should finish promptly.
@@ -87,6 +88,11 @@ const REFUSED_CAPABILITY_VERSION: u32 = 2;
 
 /// The highest capability descriptor version this host serves.
 const HOST_CAPABILITY_VERSION: u32 = 1;
+
+/// The waker slot an initialisation future is polled with. There is no request
+/// id for an initialisation, and zero is never handed to a call, so the slot is
+/// unambiguous.
+const INIT_REQUEST_ID: u64 = 0;
 
 /// The capabilities the routing check drives to completion by name alone.
 /// `tool.cancellable` needs a cancel, and the hazard capabilities need their own
@@ -174,7 +180,7 @@ fn main() -> ExitCode {
             );
             checks.check(
                 read.abi_major == METIS_ABI_MAJOR && read.abi_minor == METIS_ABI_MINOR,
-                "table.version_is_1_1",
+                "table.version_is_the_revision",
                 format!(
                     "abi {}.{} (expected {}.{})",
                     read.abi_major, read.abi_minor, METIS_ABI_MAJOR, METIS_ABI_MINOR
@@ -183,7 +189,7 @@ fn main() -> ExitCode {
         }
         Err(err) => {
             checks.check(false, "table.size_matches_layout", err);
-            checks.check(false, "table.version_is_1_1", err);
+            checks.check(false, "table.version_is_the_revision", err);
         }
     }
 
@@ -194,7 +200,10 @@ fn main() -> ExitCode {
     checks.check(
         matches!(
             unsafe { metis_read_table(&probe) },
-            Err(MetisAbiError::MinorMismatch { known: 1, found: 0 })
+            Err(MetisAbiError::MinorMismatch {
+                known: METIS_ABI_MINOR,
+                found: 0
+            })
         ),
         "table.stale_minor_refused",
         "a plugin reporting minor 0 is refused before its entries are read",
@@ -238,26 +247,73 @@ fn main() -> ExitCode {
     let state = HostState::new(table_ptr);
     state.order("library loaded");
 
-    let mut instance: *mut c_void = std::ptr::null_mut();
-    let create_status = unsafe { ((*table_ptr).create_instance)(state.api(), &mut instance) };
-    state.instance.store(instance, SeqCst);
-    checks.check(
-        create_status == MetisStatus::Ok && !instance.is_null(),
-        "instance.create_ok",
-        format!("status={} instance={instance:p}", create_status.as_str()),
+    // The initialisation entry, hand-driven: one payload carrying the plugin's
+    // configuration and the host context, and the future that must resolve
+    // before the instance is valid.
+    let initialised = state.initialise(
+        table_ptr,
+        &init_body(serde_json::json!({ "instance": "fixture" }), "fixture"),
     );
-    if create_status != MetisStatus::Ok || instance.is_null() {
-        return checks.report();
-    }
+    state.instance.store(initialised.instance, SeqCst);
     checks.check(
-        state.saw_log("instance created"),
-        "instance.started_ran",
-        "the lifecycle hook ran and the adapter logged it",
+        initialised.entry == MetisStatus::Ok && !initialised.instance.is_null(),
+        "init.entry_starts",
+        format!(
+            "status={} instance={:p}",
+            initialised.entry.as_str(),
+            initialised.instance
+        ),
+    );
+    checks.check(
+        initialised.future == MetisStatus::Ok,
+        "init.future_resolves",
+        format!(
+            "the future resolved {} after {} polls",
+            initialised.future.as_str(),
+            initialised.polls
+        ),
+    );
+    checks.check(
+        state.saw_log("initialised for fixture"),
+        "init.configuration_delivered",
+        "the plugin read the configuration and the host context the one payload carried",
     );
     checks.check(
         state.saw_event("fixture.ready"),
-        "instance.start_event",
-        "the lifecycle hook reached the host event route",
+        "init.event_from_initialisation",
+        "the initialisation reached the host event route",
+    );
+    let instance = initialised.instance;
+    if initialised.entry != MetisStatus::Ok
+        || initialised.future != MetisStatus::Ok
+        || instance.is_null()
+    {
+        return checks.report();
+    }
+
+    // The same entry with a configuration that does not match what the plugin
+    // declared: the future is where that class is reported, and the host drops
+    // the future and then destroys the instance it was handed.
+    let refused = state.initialise(
+        table_ptr,
+        &init_body(
+            serde_json::json!({ "instance": "somebody-else" }),
+            "fixture",
+        ),
+    );
+    checks.check(
+        refused.entry == MetisStatus::Ok && refused.future == MetisStatus::InvalidArgument,
+        "init.configuration_mismatch_refused",
+        format!(
+            "entry={} future={}",
+            refused.entry.as_str(),
+            refused.future.as_str()
+        ),
+    );
+    checks.check(
+        state.destroy_instance(refused.instance) == MetisStatus::Ok,
+        "init.failed_initialisation_instance_destroyed",
+        "the instance a failed initialisation handed out is destroyed after its future was dropped",
     );
 
     let list = list_capabilities(&mut checks, &state, instance);
@@ -265,6 +321,7 @@ fn main() -> ExitCode {
     drive_capabilities(&mut checks, &state, instance, list.as_ref());
     drive_unknown_field(&mut checks, &state, instance);
     run_hazard_checks(&mut checks, &state, instance);
+    drive_waker_checks(&mut checks, &state, instance);
 
     drive_c_plugin(&mut checks);
     drive_other_major_plugin(&mut checks);
@@ -319,12 +376,12 @@ fn main() -> ExitCode {
         }
     }
     checks.check(
-        state.waker_clones() == state.waker_drops(),
-        "waker.every_clone_released",
+        state.waker_handed_out() == state.waker_released(),
+        "waker.every_reference_released",
         format!(
-            "{} clones, {} releases",
-            state.waker_clones(),
-            state.waker_drops()
+            "{} owning references handed out, {} released",
+            state.waker_handed_out(),
+            state.waker_released()
         ),
     );
 
@@ -1270,17 +1327,49 @@ fn drive_c_plugin(checks: &mut Checks) {
 
     let state = HostState::new(table_ptr);
     state.order("the C library loaded");
-    let mut instance: *mut c_void = std::ptr::null_mut();
-    // SAFETY: the host table lives in the box and stays valid for the
-    // instance's lifetime.
-    let created = unsafe { ((*table_ptr).create_instance)(state.api(), &mut instance) };
+    // The C implementer initialises through the same entry, with the
+    // configuration it declares.
+    let initialised = state.initialise(
+        table_ptr,
+        &init_body(serde_json::json!({ "instance": "cplugin" }), "cplugin"),
+    );
     if !checks.check(
-        created == MetisStatus::Ok && !instance.is_null(),
-        "cplugin.instance_created",
-        format!("status={}", created.as_str()),
+        initialised.entry == MetisStatus::Ok
+            && initialised.future == MetisStatus::Ok
+            && !initialised.instance.is_null(),
+        "cplugin.instance_initialised",
+        format!(
+            "entry={} future={} after {} polls",
+            initialised.entry.as_str(),
+            initialised.future.as_str(),
+            initialised.polls
+        ),
     ) {
         return;
     }
+    let instance = initialised.instance;
+
+    // The same entry with a configuration that does not match what the C plugin
+    // declared: the failure class the contract fixes, in the second
+    // implementation.
+    let refused = state.initialise(
+        table_ptr,
+        &init_body(serde_json::json!({ "instance": "not-this-one" }), "cplugin"),
+    );
+    checks.check(
+        refused.entry == MetisStatus::Ok && refused.future == MetisStatus::InvalidArgument,
+        "cplugin.configuration_mismatch_refused",
+        format!(
+            "entry={} future={}",
+            refused.entry.as_str(),
+            refused.future.as_str()
+        ),
+    );
+    checks.check(
+        state.destroy_instance(refused.instance) == MetisStatus::Ok,
+        "cplugin.failed_initialisation_instance_destroyed",
+        "the C instance handed out for a failed initialisation is destroyed",
+    );
 
     let mut listed = MetisBuffer::empty();
     let status = unsafe { ((*table_ptr).list_capabilities)(instance, &mut listed) };
@@ -1381,12 +1470,12 @@ fn drive_c_plugin(checks: &mut Checks) {
         }
     }
     checks.check(
-        state.waker_clones() == state.waker_drops(),
+        state.waker_handed_out() == state.waker_released(),
         "cplugin.host_waker_count_balanced",
         format!(
-            "{} clones, {} releases",
-            state.waker_clones(),
-            state.waker_drops()
+            "{} owning references handed out, {} released",
+            state.waker_handed_out(),
+            state.waker_released()
         ),
     );
 
@@ -1497,6 +1586,65 @@ struct CallOutcome {
     missed_deadline: bool,
 }
 
+/// One hand-driven initialisation: what the entry returned, what its future
+/// resolved with, and the instance pointer the entry handed out.
+#[derive(Debug, Clone, Copy)]
+struct InitOutcome {
+    entry: MetisStatus,
+    future: MetisStatus,
+    polls: usize,
+    instance: *mut c_void,
+}
+
+/// The initialisation payload body: the plugin's configuration and the host
+/// context, as the two named parts of one body.
+fn init_body(config: serde_json::Value, instance_name: &str) -> Vec<u8> {
+    Initialisation::new(
+        config,
+        HostContext {
+            instance_name: instance_name.to_string(),
+            data_dir: None,
+            capability_version: HOST_CAPABILITY_VERSION,
+        },
+    )
+    .expect("the harness's own initialisation payload is buildable")
+    .body()
+}
+
+/// The wake-after-drop checks: the plugin keeps one clone of the waker it is
+/// polled with, the call is dropped, and a later call wakes that clone.
+fn drive_waker_checks(checks: &mut Checks, state: &HostState, instance: *mut c_void) {
+    let before = state.wakes_after_drop();
+    checks.check(
+        state.wake_after_drop(instance, 310, 311),
+        "waker.deferred_call_parked_and_dropped",
+        "the deferred call parked, its future was dropped, and the later call woke the kept clone",
+    );
+    let after = state.wakes_after_drop();
+    checks.check(
+        before.is_empty() && after == vec![310],
+        "waker.late_wake_names_the_call",
+        format!("{after:?}"),
+    );
+    checks.check(
+        !state
+            .ordering()
+            .iter()
+            .any(|event| event.contains("after the future was dropped")),
+        "waker.late_wake_is_counted_not_ordered",
+        "the late wake is a counted violation, not an ordering-ledger entry",
+    );
+    checks.check(
+        state.waker_handed_out() == state.waker_released(),
+        "waker.every_reference_released_so_far",
+        format!(
+            "{} owning references handed out, {} released",
+            state.waker_handed_out(),
+            state.waker_released()
+        ),
+    );
+}
+
 /// What the watchdog saw.
 #[derive(Debug, Clone)]
 struct WatchdogOutcome {
@@ -1520,9 +1668,9 @@ struct HostState {
     services: Mutex<Vec<(String, u64, String)>>,
     answers: Mutex<Vec<u64>>,
     released: AtomicUsize,
-    waker_clones: AtomicUsize,
-    waker_drops: AtomicUsize,
-    wake_after_drop: AtomicUsize,
+    waker_handed_out: AtomicUsize,
+    waker_released: AtomicUsize,
+    wakes_after_drop: Mutex<Vec<u64>>,
     in_flight: Mutex<HashSet<u64>>,
     wakers: Mutex<HashMap<u64, Box<WakerSlot>>>,
     quarantined: AtomicBool,
@@ -1548,9 +1696,9 @@ impl HostState {
             services: Mutex::new(Vec::new()),
             answers: Mutex::new(Vec::new()),
             released: AtomicUsize::new(0),
-            waker_clones: AtomicUsize::new(0),
-            waker_drops: AtomicUsize::new(0),
-            wake_after_drop: AtomicUsize::new(0),
+            waker_handed_out: AtomicUsize::new(0),
+            waker_released: AtomicUsize::new(0),
+            wakes_after_drop: Mutex::new(Vec::new()),
             in_flight: Mutex::new(HashSet::new()),
             wakers: Mutex::new(HashMap::new()),
             quarantined: AtomicBool::new(false),
@@ -1581,12 +1729,25 @@ impl HostState {
         self.released.load(SeqCst)
     }
 
-    fn waker_clones(&self) -> usize {
-        self.waker_clones.load(SeqCst)
+    /// Every owning waker reference this host handed out: one for each poll it
+    /// ran and one for each clone a plugin took.
+    fn waker_handed_out(&self) -> usize {
+        self.waker_handed_out.load(SeqCst)
     }
 
-    fn waker_drops(&self) -> usize {
-        self.waker_drops.load(SeqCst)
+    /// Every owning waker reference that was consumed by `wake` or `drop`.
+    ///
+    /// The two numbers are equal whenever the host holds no reference and no
+    /// plugin holds a clone, which is what makes a leak visible instead of
+    /// silent.
+    fn waker_released(&self) -> usize {
+        self.waker_released.load(SeqCst)
+    }
+
+    /// The request ids of the wakes that arrived after that call's future was
+    /// dropped, in arrival order.
+    fn wakes_after_drop(&self) -> Vec<u64> {
+        self.wakes_after_drop.lock().unwrap().clone()
     }
 
     fn in_flight(&self) -> HashSet<u64> {
@@ -1643,6 +1804,125 @@ impl HostState {
         );
         self.released.fetch_add(1, SeqCst);
         bytes
+    }
+
+    /// Hand-drives one initialisation through the `init_plugin` entry.
+    ///
+    /// The instance is valid exactly when the future resolved `Ok`, so the
+    /// future is polled here and dropped before this returns: the caller only
+    /// has to destroy the instance when the initialisation failed.
+    fn initialise(&self, table: *const MetisPluginTableV1, body: &[u8]) -> InitOutcome {
+        let payload = metis_encode_payload(body);
+        let mut instance: *mut c_void = std::ptr::null_mut();
+        let mut handle = MetisFutureHandle::null();
+        // SAFETY: the table is the live one this host loaded, the payload buffer
+        // is host-owned and valid for the entry, and both out parameters are
+        // live locals.
+        let entry = unsafe {
+            ((*table).init_plugin)(
+                self.api(),
+                MetisBuffer {
+                    ptr: payload.as_ptr() as *mut u8,
+                    len: payload.len(),
+                    cap: payload.len(),
+                    owner: METIS_BUFFER_OWNER_HOST,
+                    reserved: 0,
+                },
+                &mut instance,
+                &mut handle,
+            )
+        };
+        let mut polls = 0;
+        let mut future = MetisStatus::InvalidArgument;
+        if entry == MetisStatus::Ok && !handle.is_null() {
+            let start = Instant::now();
+            loop {
+                polls += 1;
+                let status = self.poll_init(&handle);
+                if status != MetisStatus::Pending {
+                    future = status;
+                    break;
+                }
+                assert!(
+                    start.elapsed() < POLL_DEADLINE,
+                    "the initialisation future never resolved"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if entry == MetisStatus::Ok && !handle.is_null() {
+            // The host drops the future once, whatever it resolved with.
+            // SAFETY: the handle came from this table's `init_plugin`.
+            let dropped = unsafe { ((*handle.vtable).drop)(handle.ctx) };
+            assert_eq!(
+                dropped,
+                MetisStatus::Ok,
+                "the initialisation future drops once"
+            );
+        }
+        InitOutcome {
+            entry,
+            future,
+            polls,
+            instance,
+        }
+    }
+
+    /// One poll of an initialisation future, with the host's waker for it.
+    fn poll_init(&self, handle: &MetisFutureHandle) -> MetisStatus {
+        let waker = self.waker_for(INIT_REQUEST_ID);
+        // The two fields are read before the poll, because the poll consumes the
+        // value: the release below is the same owning reference.
+        let (waker_data, waker_vtable) = (waker.data, waker.vtable);
+        let mut out = MetisBuffer::empty();
+        // SAFETY: the handle came from this table's `init_plugin`, and the waker
+        // is this host's.
+        let status = unsafe {
+            let vtable = &*handle.vtable;
+            (vtable.poll)(handle.ctx, waker, &mut out)
+        };
+        self.release_poll_waker(waker_data, waker_vtable);
+        status
+    }
+
+    /// Destroys one instance, which the host does after dropping its future.
+    fn destroy_instance(&self, instance: *mut c_void) -> MetisStatus {
+        // SAFETY: the pointer came from this table's `init_plugin`, and its
+        // initialisation future has been dropped by now.
+        unsafe { ((*self.table).destroy_instance)(instance) }
+    }
+
+    /// Releases the one owning waker reference the host handed to a poll, as
+    /// soon as that poll returns, whatever it returned.
+    ///
+    /// The reference is the host's own, so a poll that parks, fails or panics
+    /// cannot leak it. A clone the plugin took is the plugin's to release.
+    fn release_poll_waker(&self, data: *mut c_void, vtable: *const MetisWakerVtable) {
+        if vtable.is_null() {
+            return;
+        }
+        // SAFETY: the two fields are the ones this host handed out for the poll,
+        // and this is that reference's one release.
+        unsafe { ((*vtable).drop)(MetisWaker { data, vtable }) };
+    }
+
+    /// Drives the wake-after-drop case: one call keeps a clone of the waker it
+    /// is polled with and parks, its future is dropped, and a later call wakes
+    /// that kept clone.
+    fn wake_after_drop(&self, instance: *mut c_void, request_id: u64, waking_id: u64) -> bool {
+        let Some(handle) = self.invoke(instance, "tool.deferred", "hold", request_id) else {
+            return false;
+        };
+        let (parked, _) = self.poll(&handle, request_id);
+        let dropped = self.drop_future(&handle, request_id);
+        self.order(format!(
+            "the deferred call {request_id} was dropped; its kept waker clone outlives it"
+        ));
+        // The later call wakes the clone the deferred call left behind.
+        let woken = self.drive(instance, "tool.wake_deferred", "wake", waking_id);
+        parked == MetisStatus::Pending
+            && dropped == MetisStatus::Ok
+            && woken.status == MetisStatus::Ok
     }
 
     /// Starts one call. A quarantined instance refuses a new future, which is
@@ -1713,6 +1993,9 @@ impl HostState {
     /// One poll, with the host's waker for this request.
     fn poll(&self, handle: &MetisFutureHandle, request_id: u64) -> (MetisStatus, String) {
         let waker = self.waker_for(request_id);
+        // The two fields are read before the poll, because the poll consumes the
+        // value: the release below is the same owning reference.
+        let (waker_data, waker_vtable) = (waker.data, waker.vtable);
         let mut out = MetisBuffer::empty();
         // SAFETY: the handle came from this table's `invoke_future`, and the
         // waker is this host's.
@@ -1720,6 +2003,7 @@ impl HostState {
             let vtable = &*handle.vtable;
             (vtable.poll)(handle.ctx, waker, &mut out)
         };
+        self.release_poll_waker(waker_data, waker_vtable);
         let body = if status == MetisStatus::Ok {
             let bytes = self.take_plugin_buffer(out);
             metis_payload_body(&bytes)
@@ -1933,6 +2217,17 @@ impl HostState {
                 let vtable = &*(vtable as *const MetisFutureVtable);
                 (vtable.poll)(ctx as *mut c_void, waker, &mut out)
             };
+            // The host releases the one owning reference it handed to the poll
+            // as soon as the poll returns, whatever it returned.
+            // SAFETY: the two fields are the ones this host handed out for that
+            // poll, and the vtable is a static.
+            unsafe {
+                let vtable = &*(waker_vtable as *const MetisWakerVtable);
+                (vtable.drop)(MetisWaker {
+                    data: waker_data as *mut c_void,
+                    vtable: waker_vtable as *const MetisWakerVtable,
+                })
+            };
             // The buffer travels as plain integers: a `MetisBuffer` holds a raw
             // pointer, so it is not `Send`, while the three numbers that
             // describe it are exactly what the other side needs.
@@ -2073,7 +2368,9 @@ impl HostState {
         first == MetisStatus::Ok && second != MetisStatus::Ok
     }
 
+    /// One owning waker reference for a poll, keyed by the call it belongs to.
     fn waker_for(&self, request_id: u64) -> MetisWaker {
+        self.waker_handed_out.fetch_add(1, SeqCst);
         let mut slots = self.wakers.lock().unwrap();
         let slot = slots.entry(request_id).or_insert_with(|| {
             Box::new(WakerSlot {
@@ -2210,7 +2507,8 @@ unsafe extern "C" fn waker_clone(waker: *const MetisWaker) -> MetisWaker {
     };
     let slot = unsafe { &*(cloned.data as *const WakerSlot) };
     let state = unsafe { &*slot.state };
-    state.waker_clones.fetch_add(1, SeqCst);
+    // One clone is one more owning reference.
+    state.waker_handed_out.fetch_add(1, SeqCst);
     cloned
 }
 
@@ -2218,23 +2516,22 @@ unsafe extern "C" fn waker_wake(waker: MetisWaker) {
     // SAFETY: the data is a slot this host leaked on purpose.
     let slot = unsafe { &*(waker.data as *const WakerSlot) };
     let state = unsafe { &*slot.state };
-    state.waker_drops.fetch_add(1, SeqCst);
+    state.waker_released.fetch_add(1, SeqCst);
     if !slot.live.load(SeqCst) {
-        state.wake_after_drop.fetch_add(1, SeqCst);
-        println!(
-            "[order] a wake for request {} arrived after the future was dropped",
-            slot.request_id
-        );
+        // A wake after the future was dropped is a counted violation that names
+        // the call it belongs to, not a step in the ordering ledger.
+        state.wakes_after_drop.lock().unwrap().push(slot.request_id);
     }
 }
 
 unsafe extern "C" fn waker_wake_by_ref(waker: *const MetisWaker) {
-    // SAFETY: as in `waker_clone`.
+    // SAFETY: as in `waker_clone`. This entry does not consume the reference,
+    // which is why it releases nothing.
     let data = unsafe { (*waker).data };
     let slot = unsafe { &*(data as *const WakerSlot) };
     let state = unsafe { &*slot.state };
     if !slot.live.load(SeqCst) {
-        state.wake_after_drop.fetch_add(1, SeqCst);
+        state.wakes_after_drop.lock().unwrap().push(slot.request_id);
     }
 }
 
@@ -2242,7 +2539,7 @@ unsafe extern "C" fn waker_drop(waker: MetisWaker) {
     // SAFETY: as in `waker_clone`.
     let slot = unsafe { &*(waker.data as *const WakerSlot) };
     let state = unsafe { &*slot.state };
-    state.waker_drops.fetch_add(1, SeqCst);
+    state.waker_released.fetch_add(1, SeqCst);
 }
 
 static WAKER_VTABLE: MetisWakerVtable = MetisWakerVtable {

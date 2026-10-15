@@ -41,7 +41,7 @@ unsafe extern "C" {
     static metis_c_offset_MetisPluginTableV1_size: usize;
     static metis_c_offset_MetisPluginTableV1_abi_major: usize;
     static metis_c_offset_MetisPluginTableV1_abi_minor: usize;
-    static metis_c_offset_MetisPluginTableV1_create_instance: usize;
+    static metis_c_offset_MetisPluginTableV1_init_plugin: usize;
     static metis_c_offset_MetisPluginTableV1_destroy_instance: usize;
     static metis_c_offset_MetisPluginTableV1_list_capabilities: usize;
     static metis_c_offset_MetisPluginTableV1_invoke_future: usize;
@@ -185,8 +185,8 @@ fn c_and_rust_agree_on_every_field_offset() {
         offset_of!(MetisPluginTableV1, abi_minor)
     );
     c_agrees_with_rust!(
-        metis_c_offset_MetisPluginTableV1_create_instance,
-        offset_of!(MetisPluginTableV1, create_instance)
+        metis_c_offset_MetisPluginTableV1_init_plugin,
+        offset_of!(MetisPluginTableV1, init_plugin)
     );
     c_agrees_with_rust!(
         metis_c_offset_MetisPluginTableV1_destroy_instance,

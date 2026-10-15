@@ -2,10 +2,11 @@
 //! `Plugin` trait on the other.
 //!
 //! Everything the ABI forces onto a plugin lives here: the payload envelope,
-//! buffer ownership, panic catching at every exported entry, the cancellation
-//! registry that lets `cancel` reach the call a future is parked on, the
-//! service completion the host answers an awaited service through, and the
-//! check that a plugin's capability declaration has no duplicate names.
+//! buffer ownership, panic catching at every exported entry, the asynchronous
+//! initialisation entry and the instance slot it publishes into, the
+//! cancellation registry that lets `cancel` reach the call a future is parked
+//! on, the service completion the host answers an awaited service through, and
+//! the check that a plugin's capability declaration has no duplicate names.
 //!
 //! There is no executor here and no worker thread. The host polls the future
 //! this adapter hands out, on the host's own runtime, so a plugin needs no
@@ -26,18 +27,29 @@ use crate::abi::{
 };
 use crate::authoring::alloc::{plugin_alloc, release_buffer, violation};
 use crate::authoring::call::{Call, CancellationToken, Host, LogLevel, resolve_service};
-use crate::authoring::future::{ErasedFuture, new_handle};
-use crate::authoring::traits::{Plugin, PluginError, Request};
+use crate::authoring::future::{ErasedFuture, FutureOutcome, new_handle};
+use crate::authoring::traits::{Initialisation, Plugin, PluginError, Request};
 use crate::capability::CapabilityList;
 use crate::payload::{metis_encode_payload, metis_payload_body};
 
 /// One live instance.
 ///
-/// The plugin sits behind an `Arc` so a future can own a handle to it, and the
-/// host table is retained because a future may be polled from any host thread.
+/// The plugin sits behind an `Arc` so a future can own a handle to it, the
+/// host table is retained because a future may be polled from any host thread,
+/// and the plugin value itself is published by the initialisation future once
+/// it resolves, which is what makes "an instance that exists has completed
+/// initialisation" true at the boundary.
 struct Instance<P: Plugin> {
-    plugin: Arc<P>,
+    plugin: Arc<OnceLock<Arc<P>>>,
     host: Host,
+}
+
+impl<P: Plugin> Instance<P> {
+    /// The plugin value, which exists exactly when initialisation resolved
+    /// `Ok`.
+    fn plugin(&self) -> Option<Arc<P>> {
+        self.plugin.get().cloned()
+    }
 }
 
 /// Request id to the call, so `cancel` reaches the same token a future is
@@ -66,12 +78,12 @@ fn released_instances() -> &'static Mutex<HashSet<usize>> {
 
 /// The whole plugin side of the translation as one `const fn`, which the plugin
 /// instantiates into a static and exports through `metis_plugin_entry_v1`.
-pub const fn table<P: Plugin + Default>() -> MetisPluginTableV1 {
+pub const fn table<P: Plugin>() -> MetisPluginTableV1 {
     MetisPluginTableV1 {
         size: mem::size_of::<MetisPluginTableV1>(),
         abi_major: METIS_ABI_MAJOR,
         abi_minor: METIS_ABI_MINOR,
-        create_instance: create_instance::<P>,
+        init_plugin: init_plugin::<P>,
         destroy_instance: destroy_instance::<P>,
         list_capabilities: list_capabilities::<P>,
         invoke_future: invoke_future::<P>,
@@ -141,48 +153,81 @@ fn check_declaration<P: Plugin>(plugin: &P) -> Result<(), String> {
 // Every exported function catches panics, so a panic in a plugin becomes a
 // status instead of unwinding across the boundary.
 
-unsafe extern "C" fn create_instance<P: Plugin + Default>(
+/// The release hook the initialisation future carries.
+///
+/// Initialisation has no request id and no cancellation registry entry, so
+/// there is nothing to leave when its context is dropped.
+fn no_init_release(_request_id: u64) {}
+
+unsafe extern "C" fn init_plugin<P: Plugin>(
     host: *const MetisHostApiV1,
+    payload: MetisBuffer,
     out_instance: *mut *mut c_void,
+    out_future: *mut MetisFutureHandle,
 ) -> MetisStatus {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        if host.is_null() || out_instance.is_null() {
+        if host.is_null() || out_instance.is_null() || out_future.is_null() {
             return MetisStatus::InvalidArgument;
         }
         let host = Host::from_raw(host);
-        let plugin = P::default();
-        if let Err(mismatch) = check_declaration::<P>(&plugin) {
-            host.log(LogLevel::Error, &format!("authoring: {mismatch}"));
-            return MetisStatus::InvalidArgument;
-        }
+        let body = match unsafe { read_host_payload(payload) } {
+            Ok(body) => body,
+            Err(status) => return status,
+        };
+        let initialisation = match Initialisation::decode(&body) {
+            Ok(initialisation) => initialisation,
+            Err(error) => {
+                host.log(
+                    LogLevel::Error,
+                    &format!("authoring: initialisation payload refused: {error}"),
+                );
+                return metis_status(&error);
+            }
+        };
+
+        // The instance slot exists before the initialisation future resolves,
+        // because the ABI hands the host a pointer when this entry returns. It
+        // carries no plugin value until initialisation resolved `Ok`, so every
+        // other entry refuses a handle whose initialisation failed.
+        let slot: Arc<OnceLock<Arc<P>>> = Arc::new(OnceLock::new());
         let instance = Box::new(Instance {
-            plugin: Arc::new(plugin),
+            plugin: Arc::clone(&slot),
             host,
         });
-        // `Default` construction cannot fail or take configuration, so this is
-        // where initialisation reports failure. A plugin whose `started` fails
-        // yields no instance.
-        if let Err(error) = instance.plugin.started(&instance.host) {
-            instance.host.log(
-                LogLevel::Error,
-                &format!("authoring: instance start failed: {error}"),
-            );
-            drop(instance);
-            return metis_status(&error);
-        }
-        instance
-            .host
-            .log(LogLevel::Info, "authoring: instance created");
         let raw = Box::into_raw(instance);
         // A released handle's address can be handed to the next instance by the
         // allocator; creating an instance there makes it live again.
         released_instances().lock().unwrap().remove(&(raw as usize));
         // SAFETY: the host owns the out parameter and gets the only handle to
-        // this box, which `destroy_instance` takes back exactly once.
+        // this box, which `destroy_instance` takes back exactly once. A failed
+        // initialisation still leaves the pointer valid, because the host drops
+        // the future and then destroys what it was handed.
         unsafe { *out_instance = raw as *mut c_void };
+
+        let future: ErasedFuture = Box::pin(async move {
+            let plugin = P::init(host, initialisation).await?;
+            if let Err(mismatch) = check_declaration::<P>(&plugin) {
+                host.log(LogLevel::Error, &format!("authoring: {mismatch}"));
+                return Err(PluginError::InvalidArgument(mismatch));
+            }
+            slot.set(Arc::new(plugin)).map_err(|_| {
+                PluginError::Internal("the instance was initialised twice".to_string())
+            })?;
+            host.log(LogLevel::Info, "authoring: instance initialised");
+            Ok(FutureOutcome::Initialised)
+        });
+        // SAFETY: the host owns the out parameter, and the handle it receives
+        // is dropped exactly once through the vtable it carries.
+        unsafe { *out_future = new_handle(future, 0, no_init_release) };
         MetisStatus::Ok
     }));
-    result.unwrap_or(MetisStatus::Internal)
+    match result {
+        Ok(status) => status,
+        Err(_) => {
+            eprintln!("plugin-contract: a panic escaped the initialisation entry");
+            MetisStatus::Internal
+        }
+    }
 }
 
 unsafe extern "C" fn destroy_instance<P: Plugin>(instance: *mut c_void) -> MetisStatus {
@@ -197,7 +242,7 @@ unsafe extern "C" fn destroy_instance<P: Plugin>(instance: *mut c_void) -> Metis
         {
             return MetisStatus::NotFound;
         }
-        // SAFETY: the handle came from `create_instance`, and the insert above
+        // SAFETY: the handle came from `init_plugin`, and the insert above
         // makes this path run exactly once per handle.
         let state = unsafe { Box::from_raw(instance as *mut Instance<P>) };
         state
@@ -207,6 +252,19 @@ unsafe extern "C" fn destroy_instance<P: Plugin>(instance: *mut c_void) -> Metis
         MetisStatus::Ok
     }));
     result.unwrap_or(MetisStatus::Internal)
+}
+
+/// The status an entry reports for a handle whose initialisation never
+/// resolved `Ok`.
+///
+/// The contract makes the instance valid exactly when its initialisation future
+/// resolved `Ok`, so nothing may serve an instance that did not.
+fn uninitialised(host: &Host) -> MetisStatus {
+    host.log(
+        LogLevel::Error,
+        "authoring: the instance has not finished initialising",
+    );
+    MetisStatus::InvalidArgument
 }
 
 unsafe extern "C" fn list_capabilities<P: Plugin>(
@@ -219,8 +277,11 @@ unsafe extern "C" fn list_capabilities<P: Plugin>(
         }
         // SAFETY: the handle is the live instance for this call.
         let state = unsafe { &*(instance as *const Instance<P>) };
+        let Some(plugin) = state.plugin() else {
+            return uninitialised(&state.host);
+        };
         let list = CapabilityList {
-            capabilities: state.plugin.capabilities(),
+            capabilities: plugin.capabilities(),
         };
         let body = match encode(&list) {
             Ok(body) => body,
@@ -271,6 +332,9 @@ unsafe extern "C" fn invoke_future<P: Plugin>(
         };
         // SAFETY: the handle is the live instance this capability belongs to.
         let state = unsafe { &*(instance as *const Instance<P>) };
+        let Some(plugin) = state.plugin() else {
+            return uninitialised(&state.host);
+        };
         let call = Call::new(request_id, host, CancellationToken::new());
 
         // The registry entry exists before the future can be polled, so a
@@ -282,11 +346,11 @@ unsafe extern "C" fn invoke_future<P: Plugin>(
         // The future owns everything it needs, so it is `'static` and the host
         // may poll it from any thread. The request borrows the owned name and
         // body inside the async block, which is why the block exists at all.
-        let plugin = Arc::clone(&state.plugin);
         let capability_name = capability.to_string();
         let future: ErasedFuture = Box::pin(async move {
             let request = Request::new(&capability_name, &body);
-            plugin.call(call, request).await
+            let response = plugin.call(call, request).await?;
+            Ok(FutureOutcome::Response(response.body))
         });
 
         // SAFETY: the host owns the out parameter, and the handle it receives
@@ -310,6 +374,9 @@ unsafe extern "C" fn cancel<P: Plugin>(instance: *mut c_void, request_id: u64) -
         }
         // SAFETY: the handle is the live instance for this call.
         let state = unsafe { &*(instance as *const Instance<P>) };
+        let Some(plugin) = state.plugin() else {
+            return uninitialised(&state.host);
+        };
         let call = match calls().lock().unwrap().get(&request_id) {
             Some(call) => call.clone(),
             None => return MetisStatus::NotFound,
@@ -317,7 +384,7 @@ unsafe extern "C" fn cancel<P: Plugin>(instance: *mut c_void, request_id: u64) -
         // The token fires before the plugin's own cancel method runs, so a
         // future parked on it is woken whether or not the method says anything.
         call.mark_cancelled();
-        match state.plugin.cancel(call) {
+        match plugin.cancel(call) {
             Ok(()) => {
                 state.host.log(
                     LogLevel::Info,
@@ -346,7 +413,10 @@ unsafe extern "C" fn shutdown<P: Plugin>(instance: *mut c_void) -> MetisStatus {
         // SAFETY: the handle is live, and the host drops every future before
         // calling this, so nothing is in flight here.
         let state = unsafe { &*(instance as *const Instance<P>) };
-        state.plugin.stopped(&state.host);
+        let Some(plugin) = state.plugin() else {
+            return uninitialised(&state.host);
+        };
+        plugin.stopped(&state.host);
         MetisStatus::Ok
     }));
     result.unwrap_or(MetisStatus::Internal)

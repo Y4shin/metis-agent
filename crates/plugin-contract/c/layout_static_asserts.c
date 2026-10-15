@@ -51,10 +51,11 @@ _Static_assert(METIS_BUFFER_OWNER_PLUGIN == 2, "owner tag plugin");
 /* --- ABI version ------------------------------------------------------- */
 
 _Static_assert(METIS_ABI_MAJOR == 1, "major 1 is the versioned entry symbol");
-/* The revision changed the entry order under the unchanged symbol and major,
- * so the minor moved to 1. A reader compares the minor additively: this minor
- * and any newer one are accepted, an older one is refused. */
-_Static_assert(METIS_ABI_MINOR == 1, "minor 1 is the revised entry order");
+/* The revision replaced instance creation with the asynchronous initialisation
+ * entry under the unchanged symbol and major, so the minor moved to 2. A reader
+ * compares the minor additively: this minor and any newer one are accepted, an
+ * older one is refused. */
+_Static_assert(METIS_ABI_MINOR == 2, "minor 2 is the asynchronous initialisation entry");
 
 /* --- the payload envelope, now in the header --------------------------- */
 
@@ -124,8 +125,8 @@ _Static_assert(offsetof(MetisPluginTableV1, size) == 0, "table.size offset");
 _Static_assert(offsetof(MetisPluginTableV1, abi_major) == sizeof(size_t), "table.abi_major offset");
 _Static_assert(offsetof(MetisPluginTableV1, abi_minor) == sizeof(size_t) + sizeof(uint32_t),
                "table.abi_minor offset");
-_Static_assert(offsetof(MetisPluginTableV1, create_instance) == sizeof(MetisTablePrefix),
-               "table.create_instance offset");
+_Static_assert(offsetof(MetisPluginTableV1, init_plugin) == sizeof(MetisTablePrefix),
+               "table.init_plugin offset");
 _Static_assert(offsetof(MetisPluginTableV1, destroy_instance) == sizeof(MetisTablePrefix) + sizeof(void *),
                "table.destroy_instance offset");
 _Static_assert(offsetof(MetisPluginTableV1, list_capabilities) == sizeof(MetisTablePrefix) + 2 * sizeof(void *),
@@ -147,6 +148,9 @@ _Static_assert(offsetof(MetisPluginTableV1, service_complete) + sizeof(void *) =
 
 /* The slot constants the header carries are the offsets above divided by the
  * pointer size, which is what makes the C presence predicate possible. */
+_Static_assert(METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT * sizeof(void *) + sizeof(MetisTablePrefix)
+                   == offsetof(MetisPluginTableV1, init_plugin),
+               "init_plugin slot constant");
 _Static_assert(METIS_PLUGIN_TABLE_V1_INVOKE_FUTURE_SLOT * sizeof(void *) + sizeof(MetisTablePrefix)
                    == offsetof(MetisPluginTableV1, invoke_future),
                "invoke_future slot constant");
@@ -185,7 +189,7 @@ _Static_assert(METIS_PLUGIN_TABLE_COVERS(sizeof(MetisPluginTableV1), METIS_PLUGI
                "the full plugin table covers every slot");
 _Static_assert(METIS_HOST_API_COVERS(sizeof(MetisHostApiV1), METIS_HOST_API_V1_SERVICE_REQUEST_SLOT),
                "the full host table covers every slot");
-_Static_assert(!METIS_PLUGIN_TABLE_COVERS(sizeof(MetisTablePrefix), METIS_PLUGIN_TABLE_V1_CREATE_INSTANCE_SLOT),
+_Static_assert(!METIS_PLUGIN_TABLE_COVERS(sizeof(MetisTablePrefix), METIS_PLUGIN_TABLE_V1_INIT_PLUGIN_SLOT),
                "the bare prefix covers no entry");
 
 /* --- the measurements Rust compares against ---------------------------- */
@@ -241,7 +245,7 @@ METIS_C_MEASURE_ALIGN(MetisPluginTableV1);
 METIS_C_MEASURE_OFFSET(MetisPluginTableV1, size);
 METIS_C_MEASURE_OFFSET(MetisPluginTableV1, abi_major);
 METIS_C_MEASURE_OFFSET(MetisPluginTableV1, abi_minor);
-METIS_C_MEASURE_OFFSET(MetisPluginTableV1, create_instance);
+METIS_C_MEASURE_OFFSET(MetisPluginTableV1, init_plugin);
 METIS_C_MEASURE_OFFSET(MetisPluginTableV1, destroy_instance);
 METIS_C_MEASURE_OFFSET(MetisPluginTableV1, list_capabilities);
 METIS_C_MEASURE_OFFSET(MetisPluginTableV1, invoke_future);
