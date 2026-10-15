@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: One callback sink for progress, events, logs and service requests
 status: stable
-workflow_state: ready
-blocked_by: [async-initialisation]
+workflow_state: done
+blocked_by:
+- async-initialisation
 size: m
 ---
 
@@ -122,3 +123,21 @@ later 0.1.x that changed the attribute's mechanism would change what the CI step
 proves; and `tests/sink.rs` serialises on one file-wide mutex because the
 fixture's buffer ledger is process-wide, so a future leak of that lock would hang
 the file rather than fail one case.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `09d0fe4`, after `main` was
+merged in, and passes: the eleven commands plus the callback feature's own check,
+`cargo test --profile no-panic -p plugin-runtime --features no-panic-check
+--no-run`.
+
+Durable lessons for the tickets that follow. A sink receives the decoded body,
+not the envelope bytes, so a daemon forwarding a payload forwards the body and
+`sample-bundle-ci` observes decoded JSON for an event. `Host::for_instance(name)`
+is the only way to name an instance on the raw path, and the load entry applies
+it with the manifest's name, so a caller that drives `Loaded::init_plugin` by
+hand delivers the empty string as the instance name. A host built with a sink
+records nothing in the accessors, so a test that wants both destinations
+implements its own recording sink. The panic-free assertion belongs in the
+dedicated CI step, which covers the four hand-off frames and is documented as
+proving nothing in a profile that does not link or unwind.
