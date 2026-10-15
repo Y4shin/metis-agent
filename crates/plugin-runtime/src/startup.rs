@@ -60,7 +60,10 @@ const CAPABILITY_VERSION: u32 = 1;
 ///
 /// The returned report carries what started and what was disabled. The outcome
 /// that stops start-up is returned instead of a report, because a daemon that
-/// cannot describe its plugin set must not continue with part of it.
+/// cannot describe its plugin set must not continue with part of it, and it
+/// carries the plugins this pass had already started, so the caller can release
+/// them: the runtime unloads nothing on its own and holds no deadline of its
+/// own.
 pub async fn start_plugins(
     dir: impl AsRef<Path>,
     config: &Map<String, Value>,
@@ -70,6 +73,7 @@ pub async fn start_plugins(
     let files = bundles(dir).map_err(|error| StartupStop {
         path: dir.to_path_buf(),
         error,
+        serving: Vec::new(),
     })?;
     let host = Host::new();
     let mut serving: Vec<Serving> = Vec::new();
@@ -80,7 +84,16 @@ pub async fn start_plugins(
         let context = host_context(&name);
         match load_bundle(&host, &path, &plugin_config, &context, trust).await {
             Ok(started) => serving.push(started),
-            Err(error) if stops_startup(&error) => return Err(StartupStop { path, error }),
+            // The plugins this pass already started stop with it: they are handed
+            // to the caller rather than unloaded here, because the caller owns
+            // the deadline and this pass has none.
+            Err(error) if stops_startup(&error) => {
+                return Err(StartupStop {
+                    path,
+                    error,
+                    serving,
+                });
+            }
             Err(error) => {
                 let placeholder = match describe(&path, trust) {
                     Some((declared, capabilities)) => DisabledPlugin {
@@ -234,11 +247,16 @@ impl DisabledPlugin {
     }
 }
 
-/// Why start-up stopped.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why start-up stopped, and what it had started by then.
+///
+/// A pass that stops holds the plugins it already started, because the runtime
+/// unloads nothing on its own: the caller owns the release and the deadline it
+/// is given. A daemon that stops releases them before it does anything else.
+#[derive(Debug)]
 pub struct StartupStop {
     path: PathBuf,
     error: LoadError,
+    serving: Vec<Serving>,
 }
 
 impl StartupStop {
@@ -250,6 +268,25 @@ impl StartupStop {
     /// The outcome that stopped it.
     pub fn error(&self) -> &LoadError {
         &self.error
+    }
+
+    /// The plugins this pass had already started, in the order they started.
+    ///
+    /// They are handed over rather than released here, because the deadline
+    /// belongs to the caller: a pass has no deadline of its own and the runtime
+    /// holds no timer, so [`Serving::release`](crate::load::Serving::release) is
+    /// the caller's to run. Nothing is unloaded on this path.
+    pub fn serving(&self) -> &[Serving] {
+        &self.serving
+    }
+
+    /// The plugins this pass had already started, taken so the caller can
+    /// release them.
+    ///
+    /// It is the owned form of [`StartupStop::serving`], for the one thing the
+    /// caller does with them: `release` consumes a `Serving`.
+    pub fn into_serving(self) -> Vec<Serving> {
+        self.serving
     }
 }
 

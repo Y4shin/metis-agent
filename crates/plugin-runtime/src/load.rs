@@ -33,8 +33,11 @@
 //! other terminal status is the plugin's own defect. The two are separate
 //! values here rather than one status a caller has to interpret.
 
+use std::future::poll_fn;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::task::Poll;
+use std::time::Instant;
 
 use plugin_contract::abi::MetisStatus;
 use plugin_contract::capability::CapabilityDescriptor;
@@ -43,7 +46,7 @@ use serde_json::{Value, json};
 use crate::bundle::{BundleError, StageError, TrustStore, extract, verify_bundle};
 use crate::manifest::{Manifest, ManifestError};
 use crate::registry::{Registry, RegistryError};
-use crate::{CallError, Host, Instance, Loaded};
+use crate::{CallError, CancelReport, Host, Instance, Loaded};
 
 /// What a bundle load can refuse.
 ///
@@ -205,6 +208,19 @@ pub struct Serving {
     registry: Registry,
 }
 
+impl std::fmt::Debug for Serving {
+    /// The instance is named rather than printed, because what a reader of a
+    /// report needs is which plugin this is and what it declared. A start-up
+    /// stop carries the servings it started, and its refusal is printed with
+    /// them.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Serving")
+            .field("name", &self.name)
+            .field("capabilities", &self.capabilities.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Serving {
     /// The instance name it is registered under, which is the manifest's name.
     pub fn name(&self) -> &str {
@@ -226,6 +242,278 @@ impl Serving {
     pub fn registry(&self) -> &Registry {
         &self.registry
     }
+
+    /// The registry the instance is registered in, mutably.
+    ///
+    /// It is the path to turning this one entry off and on again: a disabled
+    /// entry refuses a new call and leaves the instance, its in-flight calls and
+    /// its library alone, so disable and enable are registry state rather than a
+    /// lifecycle step. The release entry is still the normal way an instance
+    /// leaves the registry.
+    pub fn registry_mut(&mut self) -> &mut Registry {
+        &mut self.registry
+    }
+
+    /// Releases the instance, bounds the wait by the caller's deadline, and
+    /// reports what it did.
+    ///
+    /// One call performs the contract's teardown order: the instance leaves the
+    /// registry, the calls it still holds are cancelled, the caller's own drops
+    /// are waited for up to `deadline`, the plugin's shutdown entry runs, the
+    /// instance is destroyed, and the library is unloaded. Every step and every
+    /// refusal is recorded on the ordering ledger, which the report carries.
+    ///
+    /// The deadline is the same [`Instant`] the landed `Instance::cancel_all`
+    /// takes, and the runtime arms no timer of its own: it is named back in the
+    /// report and it bounds the wait, and no second deadline type is introduced.
+    ///
+    /// An instance that cannot be released is not forced. A quarantined
+    /// instance, a call still in flight at the deadline, a shutdown entry that
+    /// answered a status other than `ok`, and an unload the landed guards
+    /// refuse all leave the library mapped, and the report keeps the library
+    /// reference that keeps it mapped so the caller can read the refusal.
+    ///
+    /// The returned future is driven by the caller, like every other future this
+    /// crate hands back. The runtime holds no handle on the calls the caller
+    /// started, so the caller's own drop is what drains them: this entry cancels
+    /// them and waits.
+    pub async fn release(self, deadline: Instant) -> ReleaseReport {
+        let Serving {
+            name,
+            instance,
+            capabilities: _,
+            mut registry,
+        } = self;
+        let host = instance.host().clone();
+        let from = host.ordering().len();
+
+        // The instance leaves the routing table first, so nothing new can reach
+        // it, and the reference the registry held goes with the entry.
+        let entry = registry.unregister(&name);
+        host.order(format!("instance {name} unregistered from its registry"));
+        drop(entry);
+
+        // Cancel or drain to the caller's deadline. The plugin gets the chance
+        // the contract gives it to resolve each call as cancelled; the caller's
+        // own drop is what removes the future.
+        let cancelled = instance.cancel_all(deadline);
+        if !cancelled.cancelled.is_empty() {
+            host.order(format!(
+                "release cancelled {} call(s) the instance still held: {:?}",
+                cancelled.cancelled.len(),
+                cancelled.cancelled
+            ));
+        }
+        while !instance.in_flight().is_empty() && Instant::now() < deadline {
+            yield_now().await;
+        }
+
+        let mut in_flight: Vec<u64> = instance.in_flight().into_iter().collect();
+        in_flight.sort_unstable();
+        // The library stays mapped until this reference is dropped, so an
+        // instance that cannot be released keeps it and a release that succeeds
+        // drops it: an unload the guards refuse cannot unmap code that may still
+        // be resident by the contract's own rule.
+        let mut library = Some(Arc::clone(instance.loaded()));
+        let mut refusal: Option<ReleaseRefusal> = None;
+        if instance.is_quarantined() {
+            // A poll this instance abandoned may still be running, so nothing
+            // here may unmap its library.
+            host.order("release refused: the instance is quarantined");
+            refusal = Some(ReleaseRefusal::Quarantined);
+        } else if !in_flight.is_empty() {
+            host.order(format!(
+                "release refused: {} call(s) were still in flight at the deadline: {in_flight:?}",
+                in_flight.len()
+            ));
+            refusal = Some(ReleaseRefusal::FuturesInFlight(in_flight));
+        } else {
+            match instance.shutdown() {
+                Err(error) => {
+                    host.order(format!(
+                        "release refused: the shutdown entry answered {error}"
+                    ));
+                    refusal = Some(ReleaseRefusal::Shutdown(error));
+                }
+                Ok(()) => match instance.unload() {
+                    Ok(()) => {
+                        if let Some(last) = library.take() {
+                            let path = last.path().to_path_buf();
+                            drop(last);
+                            host.order(format!("library unloaded: {}", path.display()));
+                        }
+                    }
+                    Err(error) => {
+                        // The guard's own line is already on the ledger; this is
+                        // the release's record of the step it refused.
+                        host.order(format!("release refused: the unload refused: {error}"));
+                        refusal = Some(ReleaseRefusal::Unload(error));
+                    }
+                },
+            }
+        }
+        let ledger = host.ordering()[from..].to_vec();
+        ReleaseReport {
+            name,
+            deadline,
+            cancelled,
+            refusal,
+            resident: library,
+            ledger,
+        }
+    }
+}
+
+/// Why an instance could not be released.
+///
+/// Each variant is one refusal the contract names: a quarantined instance whose
+/// abandoned poll never returns, calls still in flight when the caller's
+/// deadline passed, a shutdown entry that answered a status other than `ok`, and
+/// an unload the landed guards refused. A release that answers one of these
+/// leaves the library mapped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseRefusal {
+    /// A poll this instance abandoned is still running, so its library stays
+    /// resident.
+    Quarantined,
+    /// The caller had not dropped these calls when the deadline passed, so the
+    /// instance could not quiesce.
+    FuturesInFlight(Vec<u64>),
+    /// The plugin's shutdown entry answered a status other than `ok`.
+    Shutdown(CallError),
+    /// The unload refused, and this is the landed guard's own error.
+    Unload(CallError),
+}
+
+impl ReleaseRefusal {
+    /// The teardown step that refused, named as the sequence names it.
+    ///
+    /// A quarantined instance refuses the unload, because nothing may unmap a
+    /// library a poll may still be running; calls still in flight refuse the
+    /// drain, because the instance cannot quiesce while they are alive.
+    pub fn step(&self) -> &'static str {
+        match self {
+            ReleaseRefusal::Quarantined | ReleaseRefusal::Unload(_) => "unload",
+            ReleaseRefusal::FuturesInFlight(_) => "drain",
+            ReleaseRefusal::Shutdown(_) => "shutdown",
+        }
+    }
+}
+
+impl std::fmt::Display for ReleaseRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReleaseRefusal::Quarantined => write!(
+                f,
+                "a poll this instance abandoned may still be running, so its library stays resident"
+            ),
+            ReleaseRefusal::FuturesInFlight(ids) => write!(
+                f,
+                "{} call(s) were still in flight at the deadline: {ids:?}",
+                ids.len()
+            ),
+            ReleaseRefusal::Shutdown(error) => {
+                write!(f, "the shutdown entry answered {error}")
+            }
+            ReleaseRefusal::Unload(error) => write!(f, "the unload refused: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ReleaseRefusal {}
+
+/// What one release entry did, and what it added to the ordering ledger.
+///
+/// It is the caller's record of one instance: the name it was released under,
+/// the deadline it was given, the cancellation pass it ran, the ledger entries
+/// it added, and, when the instance could not be released, the refusal and the
+/// library reference that keeps the library mapped.
+pub struct ReleaseReport {
+    name: String,
+    deadline: Instant,
+    cancelled: CancelReport,
+    refusal: Option<ReleaseRefusal>,
+    resident: Option<Arc<Loaded>>,
+    ledger: Vec<String>,
+}
+
+impl ReleaseReport {
+    /// The instance name the release was for, which is what a shutdown report
+    /// names.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The deadline the caller gave, named back rather than armed.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// The cancellation pass the release ran over the calls it found.
+    pub fn cancelled(&self) -> &CancelReport {
+        &self.cancelled
+    }
+
+    /// Whether the instance was released, which means every future was gone, the
+    /// plugin quiesced, the instance was destroyed and the library was unloaded.
+    pub fn released(&self) -> bool {
+        self.refusal.is_none()
+    }
+
+    /// Why the instance could not be released, or `None` when it was.
+    pub fn refusal(&self) -> Option<&ReleaseRefusal> {
+        self.refusal.as_ref()
+    }
+
+    /// The library reference this release kept, so an instance that could not be
+    /// released stays mapped.
+    ///
+    /// It is `None` exactly when the instance was released: a release that did
+    /// not unload the library drops this reference and lets the platform unmap
+    /// it, and a release that refused keeps it so the library stays resident.
+    pub fn resident(&self) -> Option<&Arc<Loaded>> {
+        self.resident.as_ref()
+    }
+
+    /// The ordering-ledger entries this release added, in the order they were
+    /// added.
+    pub fn ledger(&self) -> &[String] {
+        &self.ledger
+    }
+}
+
+impl std::fmt::Display for ReleaseReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.refusal {
+            None => write!(f, "{} was released", self.name),
+            Some(refusal) => write!(
+                f,
+                "{} could not be released at the {} step: {refusal}",
+                self.name,
+                refusal.step()
+            ),
+        }
+    }
+}
+
+/// Yields once to the caller's runtime.
+///
+/// The runtime owns no timer, so "wait until the deadline" is a yield the
+/// caller's runtime schedules: the future wakes itself and returns `Pending`
+/// once per round, so a single-threaded caller runs other work instead of
+/// spinning on a loop that awaits nothing. The deadline itself is read in the
+/// loop's condition, which is what ends the wait.
+async fn yield_now() {
+    let mut yielded = false;
+    poll_fn(move |context| {
+        if yielded {
+            return Poll::Ready(());
+        }
+        yielded = true;
+        context.waker().wake_by_ref();
+        Poll::Pending
+    })
+    .await
 }
 
 /// The body field carrying the plugin's own configuration, fixed by contract

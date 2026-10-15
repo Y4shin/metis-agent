@@ -14,7 +14,7 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use plugin_contract::abi::{METIS_ABI_MAJOR, MetisAbiError, MetisStatus};
 use plugin_fixture::DEFECTIVE_INITIALISATION;
@@ -1097,4 +1097,83 @@ fn a_manifest_naming_a_library_the_bundle_does_not_carry_disables_that_one_plugi
             "a manifest that names a library the bundle lacks disables one plugin, and this is {other}"
         ),
     }
+}
+
+#[test]
+fn a_stopped_pass_hands_its_started_plugins_back_for_the_caller_to_release() {
+    let mut plugins = Plugins::new();
+    plugins.configure("alpha");
+    plugins.write(
+        "alpha",
+        "alpha",
+        &Bundle::new(Some(manifest("alpha", &bundle::CAPABILITIES))),
+    );
+    plugins.write_untrusted(
+        "forged",
+        "forged",
+        &Bundle::new(Some(manifest("forged", &[]))),
+    );
+
+    let stop = refusal(
+        plugins.start(),
+        "a bundle no configured root signed stops start-up",
+    );
+
+    // The pass started one plugin before it stopped, and it holds no deadline of
+    // its own: what started is handed to the caller to release.
+    let started = stop.into_serving();
+    assert_eq!(
+        started.len(),
+        1,
+        "the one plugin the pass started is handed back: {}",
+        started.len()
+    );
+    let serving = started
+        .into_iter()
+        .next()
+        .expect("the stopped pass started one plugin");
+    assert_eq!(
+        serving.name(),
+        "alpha",
+        "the plugin the pass started is the one handed back"
+    );
+    let host = serving.instance().host().clone();
+    assert!(
+        !host
+            .ordering()
+            .iter()
+            .any(|line| line.contains("library unloaded")),
+        "a stopped pass unloads nothing on its own: {:#?}",
+        host.ordering()
+    );
+
+    // The caller releases it with its own deadline, and the order is on the
+    // ledger of the host the pass built.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let report = block_on(serving.release(deadline));
+
+    assert_eq!(report.name(), "alpha");
+    assert_eq!(report.deadline(), deadline);
+    assert!(
+        report.released(),
+        "the plugin a stopped pass started is released cleanly: {}",
+        report
+            .refusal()
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    );
+    let order = host.ordering();
+    let position = |needle: &str| {
+        order
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("the ledger carries {needle:?}: {order:#?}"))
+    };
+    let quiesced = position("instance quiesced after every future was dropped");
+    let destroyed = position("instance destroyed");
+    let unloaded = position("library unloaded");
+    assert!(
+        quiesced < destroyed && destroyed < unloaded,
+        "the caller's release ran the documented order: {order:#?}"
+    );
 }
