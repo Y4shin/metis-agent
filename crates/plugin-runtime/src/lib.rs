@@ -29,6 +29,7 @@ use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
+use std::time::Instant;
 
 use plugin_contract::abi::*;
 use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
@@ -90,6 +91,32 @@ impl From<MetisAbiError> for CallError {
     fn from(error: MetisAbiError) -> Self {
         CallError::Version(error)
     }
+}
+
+/// What one instance-wide cancel pass did.
+///
+/// The runtime holds no timer and no default deadline, so this is the caller's
+/// record of the pass it asked for: the deadline it handed in, the calls whose
+/// tokens were marked, and the ones the pass could not mark. Nothing here waits,
+/// which is why the report is the whole result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelReport {
+    /// The deadline the caller handed in, named back rather than armed.
+    pub deadline: Instant,
+    /// The request ids whose cancellation token the plugin marked, in ascending
+    /// id order.
+    pub cancelled: Vec<u64>,
+    /// The request ids the pass could not mark, and what each answered.
+    pub refused: Vec<RefusedCancel>,
+}
+
+/// One in-flight call an instance-wide cancel could not mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusedCancel {
+    /// The request id the pass reached.
+    pub request_id: u64,
+    /// The frozen status the cancel answered.
+    pub status: MetisStatus,
 }
 
 // --- loading --------------------------------------------------------------
@@ -800,6 +827,34 @@ impl Instance {
         }
         self.accepted_cancels.lock().unwrap().insert(request_id);
         Ok(())
+    }
+
+    /// Cancels every call on this instance, and reports what it did.
+    ///
+    /// The instance-wide form is a loop over this instance's own in-flight set,
+    /// so the plugin table does not change and another instance's calls are not
+    /// this instance's business. It waits for nothing: the deadline is the
+    /// caller's and is named back rather than armed here, because the runtime
+    /// holds no timer and no default deadline. The caller polls the calls to
+    /// observe the cancellations and drops the ones the plugin does not resolve
+    /// in time, which is what puts an unacknowledged cancel on the ledger.
+    pub fn cancel_all(&self, deadline: Instant) -> CancelReport {
+        let mut in_flight: Vec<u64> = self.in_flight().into_iter().collect();
+        // Ascending id order, so one state yields one report rather than the
+        // hash set's own order.
+        in_flight.sort_unstable();
+        let mut report = CancelReport {
+            deadline,
+            cancelled: Vec::new(),
+            refused: Vec::new(),
+        };
+        for request_id in in_flight {
+            match self.mark_cancel(request_id) {
+                Ok(()) => report.cancelled.push(request_id),
+                Err(status) => report.refused.push(RefusedCancel { request_id, status }),
+            }
+        }
+        report
     }
 
     /// Hands the plugin the host's answer to a service request.

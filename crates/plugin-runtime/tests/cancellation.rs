@@ -15,6 +15,7 @@ mod support;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use plugin_contract::abi::MetisStatus;
 use plugin_runtime::{CallError, Host, PluginCall};
@@ -49,6 +50,79 @@ fn plugin_saw_cancel(host: &Host, request_id: u64) -> bool {
     host.logs()
         .iter()
         .any(|line| line.contains(&format!("cancel accepted for request {request_id}")))
+}
+
+#[test]
+fn the_instance_wide_loop_cancels_every_call_on_one_instance_and_reports_what_it_did() {
+    let (host, instance) = new_instance();
+    let (other_host, other) = new_instance();
+
+    let mut calls: Vec<PluginCall> = [51, 52, 53]
+        .iter()
+        .map(|request_id| {
+            instance
+                .invoke("tool.cancellable", *request_id, &request("cancel"))
+                .expect("the future starts")
+        })
+        .collect();
+    for call in calls.iter_mut() {
+        assert!(matches!(poll_once(call), Poll::Pending));
+    }
+    let mut elsewhere = other
+        .invoke("tool.cancellable", 54, &request("cancel"))
+        .expect("the future starts");
+    assert!(matches!(poll_once(&mut elsewhere), Poll::Pending));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let report = instance.cancel_all(deadline);
+
+    assert_eq!(
+        report.deadline, deadline,
+        "the report names the deadline the caller handed in"
+    );
+    assert_eq!(
+        report.cancelled,
+        vec![51, 52, 53],
+        "every call on this instance was cancelled, in id order"
+    );
+    assert!(
+        report.refused.is_empty(),
+        "a live call on this instance is never refused: {:?}",
+        report.refused
+    );
+    assert_eq!(
+        instance.in_flight().len(),
+        3,
+        "the loop marks tokens and drops nothing"
+    );
+
+    // The other instance's call is not this instance's to cancel.
+    assert!(
+        !plugin_saw_cancel(&other_host, 54),
+        "another instance's call was not cancelled: {:?}",
+        other_host.logs()
+    );
+    assert!(
+        matches!(poll_once(&mut elsewhere), Poll::Pending),
+        "another instance's token is still unmarked"
+    );
+
+    // Every call the report named resolves as cancelled on its next poll.
+    for call in calls.iter_mut() {
+        match poll_once(call) {
+            Poll::Ready(Err(CallError::Status(MetisStatus::Cancelled))) => {}
+            Poll::Ready(Err(error)) => panic!("a cancelled call resolves as cancelled: {error:?}"),
+            Poll::Ready(Ok(_)) => panic!("a cancelled call resolves as cancelled"),
+            Poll::Pending => panic!("a cancelled call resolves on its next poll"),
+        }
+    }
+    drop(calls);
+    drop(elsewhere);
+    assert!(
+        instance.in_flight().is_empty(),
+        "the caller's drops released every call on the instance"
+    );
+    assert_references_balanced(&host, "an instance-wide cancel");
 }
 
 #[test]
