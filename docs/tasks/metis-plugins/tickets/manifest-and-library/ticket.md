@@ -3,8 +3,10 @@ type: ticket
 subtype: feature
 title: Validate the manifest and select this host's library
 status: stable
-workflow_state: ready
-blocked_by: [abi-initialisation-entry, bundle-extraction]
+workflow_state: done
+blocked_by:
+- abi-initialisation-entry
+- bundle-extraction
 size: m
 ---
 
@@ -118,3 +120,39 @@ suite now depends on a `rustc` on `PATH`, because
 patched-table fixture asserts acceptance of a newer-minor table rather than the
 fault-level "stops at this build's layout", which stays measured at the landed
 seams (`plugin-contract/tests/abi.rs` and the ABI harness).
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `5c125b8`, after `main` was
+merged in, and passes: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`, `cargo test`, `buf lint`, `buf breaking`, `bash
+scripts/regenerate-contracts.sh --check`, `bash scripts/build-c-plugin.sh`,
+`bash scripts/check-c-layout-asserts.sh`, `cargo check -p plugin-contract
+--no-default-features`, `cargo run -p plugin-fixture --bin abi-harness` and
+`bash scripts/regenerate-abi-header.sh --check`.
+
+One residual this ticket's landing note reported is wrong, and the harvest
+re-measured it rather than acting on it. The note said contract 17.9's
+dependency pair (84 crates before, 90 after on normal edges; 98 and 104 with dev
+edges) does not reproduce and that the measured pair is 91 and 97. Measured for
+this harvest with the section's own command, `cargo tree -p plugin-runtime
+--edges normal --prefix none | grep -v '(*)' | sort -u | wc -l`, the values are
+84 before and 90 after on normal edges, and 98 before and 104 after with dev
+edges, so the contract is correct and no edit was needed. The before values were
+taken in a throwaway worktree at the landing branch's parent `51879e8`.
+
+Two questions the reconciler left open are answered from the documents rather
+than decided here. The landed ABI demand direction is the parent decision
+`compatibility-policy` C4, whose own text says "the host refuses when its major
+differs or its known minor is lower", so the arch spec and the decision agree.
+And `ManifestError::Unreadable` and `NameMismatch` were not named by the plan;
+`startup-policy` classifies the enum by value, so it owns their mapping to a
+disable reason rather than this ticket inventing one.
+
+Durable lessons for the tickets that follow. The manifest is the only place a
+producer's field names are fixed, so the SDK's generator and the sample bundle's
+hand-written manifest both write contract 17.9's names. `Loaded::open` is unsafe
+and decides the ABI demand before it maps, so `async-initialisation` needs one
+`unsafe` block justified by the verified signature and the staged extraction.
+`Manifest::select_library` does not shape-check the path it resolves, so a
+bundle-load gate on a declared path is still unwritten.
