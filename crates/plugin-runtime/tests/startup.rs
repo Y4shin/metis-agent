@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use plugin_contract::abi::{METIS_ABI_MAJOR, MetisAbiError, MetisStatus};
 use plugin_fixture::DEFECTIVE_INITIALISATION;
 use plugin_runtime::CallError;
+use plugin_runtime::RouteError;
 use plugin_runtime::bundle::{BundleError, CONTAINER_VERSION, StageError, TrustStore};
 use plugin_runtime::load::LoadError;
 use plugin_runtime::manifest::ManifestError;
@@ -874,4 +875,85 @@ fn a_refused_unload_stops_start_up() {
         }
         other => panic!("a refused unload stops start-up, and this outcome is {other}"),
     }
+}
+
+/// A pass with one plugin serving every capability and one disabled with a
+/// manifest that declares two of them.
+fn one_serving_and_one_disabled() -> Plugins {
+    let mut plugins = Plugins::new();
+    plugins.configure("alpha");
+    plugins.write(
+        "alpha",
+        "alpha",
+        &Bundle::new(Some(manifest("alpha", &bundle::CAPABILITIES))),
+    );
+    plugins.write(
+        "beta",
+        "beta",
+        &Bundle::new(Some(manifest("beta", &["tool.echo", "tool.pending"]))),
+    );
+    plugins
+}
+
+#[test]
+fn a_disabled_plugins_capabilities_are_not_offered_to_an_agent() {
+    let plugins = one_serving_and_one_disabled();
+
+    let report = report(&plugins, "one disagrees and one serves");
+    assert_eq!(
+        disabled_plugin(&report, "beta is the disabled one").name(),
+        "beta"
+    );
+
+    let offered = report.offered_capabilities();
+    for capability in bundle::CAPABILITIES {
+        assert!(
+            offered.contains(&format!("alpha.{capability}")),
+            "every capability the serving plugin declares is offered: {offered:?}"
+        );
+    }
+    assert!(
+        !offered.iter().any(|name| name.starts_with("beta.")),
+        "nothing a disabled plugin declares is offered: {offered:?}"
+    );
+}
+
+#[test]
+fn invoking_a_disabled_capability_answers_the_disabled_route_error_with_its_reason() {
+    let plugins = one_serving_and_one_disabled();
+    let report = report(&plugins, "one disagrees and one serves");
+    let disabled = disabled_plugin(&report, "beta is the disabled one");
+
+    let refused = block_on(report.call("beta.tool.echo", &support::request("hello"), 1));
+
+    match refused {
+        Err(RouteError::Disabled { name, reason }) => {
+            assert_eq!(
+                name, "beta.tool.echo",
+                "the refusal names what was asked for"
+            );
+            assert_eq!(
+                reason,
+                disabled.reason().to_string(),
+                "the refusal carries the reason the plugin was disabled for"
+            );
+        }
+        other => {
+            panic!("a disabled plugin's capability is answered as disabled, and this is {other:?}")
+        }
+    }
+
+    // The same call for a capability that is serving is served, and one nothing
+    // declares is unknown, so the disabled answer is neither of those.
+    assert!(
+        block_on(report.call("alpha.tool.echo", &support::request("hello"), 2)).is_ok(),
+        "a serving capability is served through the same entry"
+    );
+    assert!(
+        matches!(
+            block_on(report.call("gamma.tool.echo", &support::request("hello"), 3)),
+            Err(RouteError::Unknown(_))
+        ),
+        "a capability nothing declares stays unknown"
+    );
 }

@@ -116,13 +116,29 @@ pub struct Entry {
     pub enabled: bool,
 }
 
+/// Why a registry entry that the host switched off carries as its reason.
+///
+/// The registry's `enable` is a flag with no policy behind it: the daemon decides
+/// why an entry is off, and this is what a caller reads when the daemon gave no
+/// reason of its own. A plugin that start-up disabled carries its own reason
+/// instead, which is why the refusal holds one.
+const DISABLED_BY_HOST: &str = "the host turned this entry off";
+
 /// What a route lookup can fail with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteError {
     /// Nothing is registered under that name.
     Unknown(String),
     /// The entry exists and is disabled.
-    Disabled(String),
+    ///
+    /// The name is what was asked for and the reason is why nothing served it,
+    /// so a caller can tell "turned off" from "never loaded" and can report why.
+    Disabled {
+        /// The qualified capability name the caller asked for.
+        name: String,
+        /// Why the entry is disabled.
+        reason: String,
+    },
     /// The declaration does not carry a version the caller can accept.
     Version {
         name: String,
@@ -149,7 +165,9 @@ impl std::fmt::Display for RouteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RouteError::Unknown(name) => write!(f, "no capability named {name}"),
-            RouteError::Disabled(name) => write!(f, "the entry for {name} is disabled"),
+            RouteError::Disabled { name, reason } => {
+                write!(f, "the entry for {name} is disabled: {reason}")
+            }
             RouteError::Version {
                 name,
                 required,
@@ -187,7 +205,7 @@ impl RouteError {
     pub fn status(&self) -> MetisStatus {
         match self {
             RouteError::Unknown(_) => MetisStatus::NotFound,
-            RouteError::Disabled(_) => MetisStatus::PermissionDenied,
+            RouteError::Disabled { .. } => MetisStatus::PermissionDenied,
             RouteError::Version { .. } => MetisStatus::Unsupported,
             RouteError::UnknownKind { .. } => MetisStatus::Unsupported,
             RouteError::InvalidArgument(_) => MetisStatus::InvalidArgument,
@@ -340,7 +358,10 @@ impl Registry {
             .get(owner)
             .ok_or_else(|| RouteError::Unknown(qualified.to_string()))?;
         if !entry.enabled {
-            return Err(RouteError::Disabled(qualified.to_string()));
+            return Err(RouteError::Disabled {
+                name: qualified.to_string(),
+                reason: DISABLED_BY_HOST.to_string(),
+            });
         }
         // The owner is the routing map's own answer for this exact key, so the
         // tool half is what follows the owner and its separator. Splitting on

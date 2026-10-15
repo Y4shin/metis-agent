@@ -33,6 +33,7 @@ use crate::Host;
 use crate::bundle::{TrustStore, extract, verify_bundle};
 use crate::load::{LoadError, Serving, host_target, load_bundle};
 use crate::manifest::{Manifest, ManifestError};
+use crate::registry::RouteError;
 
 /// The host-context field naming the plugin's instance, fixed by contract 18.
 const INSTANCE_NAME_FIELD: &str = "instance_name";
@@ -134,6 +135,70 @@ impl StartupReport {
     /// from one that was never configured.
     pub fn disabled(&self) -> &[DisabledPlugin] {
         &self.disabled
+    }
+
+    /// Every capability an agent would be offered, qualified the way a call
+    /// names it.
+    ///
+    /// It is the serving plugins' declarations and nothing else: a disabled
+    /// plugin's capabilities are known, listed on its placeholder, and not
+    /// offered, because a plugin that was disabled cannot serve what it
+    /// declares.
+    pub fn offered_capabilities(&self) -> Vec<String> {
+        let mut offered = Vec::new();
+        for serving in &self.serving {
+            for capability in serving.capabilities() {
+                offered.push(format!("{}.{}", serving.name(), capability.name));
+            }
+        }
+        offered
+    }
+
+    /// Invokes one capability, the way a daemon routes a call.
+    ///
+    /// A capability a serving plugin declares is called through that plugin's own
+    /// registry, which stays the one routing path, and a capability a disabled
+    /// plugin declares is answered as the disabled route error carrying the
+    /// reason its load refused. A name nothing declares is unknown, so a caller
+    /// still tells the three states apart.
+    pub async fn call(
+        &self,
+        qualified: &str,
+        body: &[u8],
+        request_id: u64,
+    ) -> Result<Vec<u8>, RouteError> {
+        if let Some(disabled) = self.disabled_capability(qualified) {
+            return Err(RouteError::Disabled {
+                name: qualified.to_string(),
+                reason: disabled.reason().to_string(),
+            });
+        }
+        for serving in &self.serving {
+            match serving.registry().call(qualified, body, request_id).await {
+                Err(RouteError::Unknown(_)) => continue,
+                outcome => return outcome,
+            }
+        }
+        Err(RouteError::Unknown(qualified.to_string()))
+    }
+
+    /// The disabled plugin that declares a qualified capability name.
+    ///
+    /// The name is matched exactly, as `<plugin>.<capability>`: the plugin's own
+    /// name may carry a dot, so the split is by the prefix the placeholder's name
+    /// matches rather than by the first dot.
+    fn disabled_capability(&self, qualified: &str) -> Option<&DisabledPlugin> {
+        self.disabled.iter().find(|plugin| {
+            qualified
+                .strip_prefix(plugin.name())
+                .and_then(|rest| rest.strip_prefix('.'))
+                .is_some_and(|tool| {
+                    plugin
+                        .capabilities()
+                        .iter()
+                        .any(|capability| capability.name == tool)
+                })
+        })
     }
 }
 
