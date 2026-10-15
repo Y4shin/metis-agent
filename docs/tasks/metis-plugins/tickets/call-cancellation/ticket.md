@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Call cancellation, its unknown ids and its drop rule
 status: stable
-workflow_state: ready
-blocked_by: [async-initialisation]
+workflow_state: done
+blocked_by:
+- async-initialisation
 size: m
 ---
 
@@ -94,3 +95,24 @@ Residual risks carried forward: the `Instant` deadline choice is not yet shared
 with `teardown-and-release`; `cancel_all` cancels a snapshot, so calls started
 after the pass are the caller's loop to own; and the ordering ledger stays an
 unbounded `Vec<String>`, which the two new lines follow.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `66a4ad3` and all eleven commands
+pass, including the contract and plugin commands: `cargo fmt --check`, `cargo
+clippy --all-targets -- -D warnings`, `cargo test`, `buf lint`, `buf breaking`,
+`bash scripts/regenerate-contracts.sh --check`, `bash
+scripts/build-c-plugin.sh`, `bash scripts/check-c-layout-asserts.sh`, `cargo
+check -p plugin-contract --no-default-features`, `cargo run -p plugin-fixture
+--bin abi-harness` (82 checks) and `bash scripts/regenerate-abi-header.sh
+--check`.
+
+Durable lessons for the tickets that follow. The host, not the plugin, is the
+authority on which call an instance holds: the plugin's own call registry is
+process-wide, so a cancel or a service completion for an id this instance does
+not hold is answered `NotFound` before the plugin is entered, and
+`callback-sink` must treat that refusal as expected rather than as an error.
+`teardown-and-release` takes the same `std::time::Instant` deadline type and
+owns the loop that waits. The two new ledger lines are the evidence for an
+unacknowledged cancel and for a reclaimed context, so a test asserts the text
+rather than a counter.
