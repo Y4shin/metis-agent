@@ -230,6 +230,17 @@ impl Serving {
         &self.registry
     }
 
+    /// The registry the instance is registered in, mutably.
+    ///
+    /// It is the path to turning this one entry off and on again: a disabled
+    /// entry refuses a new call and leaves the instance, its in-flight calls and
+    /// its library alone, so disable and enable are registry state rather than a
+    /// lifecycle step. The release entry is still the normal way an instance
+    /// leaves the registry.
+    pub fn registry_mut(&mut self) -> &mut Registry {
+        &mut self.registry
+    }
+
     /// Releases the instance, bounds the wait by the caller's deadline, and
     /// reports what it did.
     ///

@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use plugin_contract::abi::MetisStatus;
 use plugin_runtime::load::{Serving, load_bundle};
-use plugin_runtime::{CallError, Host, PluginCall};
+use plugin_runtime::{CallError, Host, PluginCall, RouteError};
 use serde_json::{Value, json};
 use support::block_on;
 use support::bundle;
@@ -192,5 +192,94 @@ fn a_release_cancels_the_calls_it_finds_then_quiesces_destroys_and_unloads() {
             .any(|line| line.contains("cancel accepted for request 1")),
         "the accepted cancel reached the plugin: {:#?}",
         host.logs()
+    );
+}
+
+#[test]
+fn disabling_refuses_new_calls_and_enabling_accepts_them_with_no_reload() {
+    let host = Host::new();
+    let mut serving = serving(&host);
+    let name = serving.name().to_string();
+    let qualified = format!("{name}.tool.echo");
+    let instance = Arc::clone(serving.instance());
+
+    // One call in flight before the entry is turned off.
+    let mut call = instance
+        .invoke("tool.cancellable", 3, &support::request("off"))
+        .expect("the fixture's cancellable capability starts");
+    assert!(
+        matches!(poll_once(&mut call), Poll::Pending),
+        "the cancellable capability parks on its token"
+    );
+
+    assert!(
+        serving.registry_mut().enable(&name, false),
+        "the entry is registered, so it is there to turn off"
+    );
+    let refusal = serving
+        .registry()
+        .route(&qualified)
+        .err()
+        .unwrap_or_else(|| panic!("{qualified} is still served while the entry is off"));
+    match refusal {
+        RouteError::Disabled {
+            name: refused,
+            reason,
+        } => {
+            assert_eq!(refused, qualified, "the refusal names what was asked for");
+            assert!(
+                !reason.is_empty(),
+                "the refusal carries the reason the entry is off: {reason:?}"
+            );
+        }
+        other => panic!("a disabled entry refuses a new call, and this answered {other}"),
+    }
+
+    // The call in flight is untouched: it still resolves the way the plugin
+    // resolves it, and nothing unloaded the library underneath it.
+    assert!(
+        matches!(poll_once(&mut call), Poll::Pending),
+        "disabling touches no in-flight call"
+    );
+    instance
+        .cancel(3)
+        .expect("the host still holds the call's id");
+    assert!(
+        matches!(
+            poll_once(&mut call),
+            Poll::Ready(Err(CallError::Status(MetisStatus::Cancelled)))
+        ),
+        "the in-flight call reaches the plugin's own cancelled answer"
+    );
+    drop(call);
+
+    // Enabling accepts a call again, on the same instance and the same library:
+    // nothing was reloaded and nothing was unmapped.
+    assert!(
+        serving.registry_mut().enable(&name, true),
+        "the entry is still there to turn on"
+    );
+    let answered = block_on(serving.registry().call(
+        &qualified,
+        &support::request("on again"),
+        4,
+    ))
+    .expect("an enabled entry serves the call again");
+    assert_eq!(
+        support::decode(&answered).echo,
+        "on again",
+        "the same instance answered"
+    );
+    assert!(
+        Arc::ptr_eq(serving.instance(), &instance),
+        "no reload: the instance that served before is the one serving now"
+    );
+    assert!(
+        !host
+            .ordering()
+            .iter()
+            .any(|line| line.contains("library unloaded")),
+        "disabling and enabling touch no library: {:#?}",
+        host.ordering()
     );
 }
