@@ -518,10 +518,11 @@ The refusals, in the order they are decided:
    declared type says so), or any other type that is not a regular file, so a
    hard link, a device, a socket and a FIFO are all refused;
 5. an entry declares permission bits other than `0600`, the mode this host
-   writes. An entry that declares no Unix mode at all is accepted, and so is a
-   declaration of `0600` with or without the regular-file type bit beside it. A
-   producer is not required to declare a mode, and one that does must declare
-   the mode the host itself would write;
+   writes. A declaration of `0600` is accepted with or without the
+   regular-file type bit beside it, and so is an entry whose external
+   attributes are zero, which declares no mode at all. A producer that declares
+   a mode must declare the mode the host itself would write; the `zip` writer
+   declares `0o644` when a producer does not choose one, so a producer sets it;
 6. an entry declares an uncompressed size above 64 MiB, or the entries'
    declared sizes add up to more than 256 MiB between them. The per-entry limit
    is checked first, so the archive total answers for an archive whose entries

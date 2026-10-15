@@ -7,10 +7,6 @@
 //! through the filesystem: a refusal leaves none behind, and a `StagedBundle`
 //! owns its own until it is dropped.
 
-// rule: allow(dead_code): these tests share helpers, and a slice that has not
-// reached one of them yet would otherwise warn.
-#![allow(dead_code)]
-
 mod support;
 
 use std::collections::BTreeSet;
@@ -724,6 +720,41 @@ fn a_hostile_archive_is_refused_at_its_first_hostile_entry() {
         refusal(&archive, TARGET),
         StageError::ParentEntryName {
             name: "../../escape".to_string()
+        }
+    );
+}
+
+#[test]
+fn an_entry_declaring_no_mode_at_all_is_accepted() {
+    // Zero external attributes is how a producer declares no Unix mode: the
+    // host writes its own mode either way, so nothing about the declaration
+    // needs refusing.
+    let _guard = lock();
+    let mut archive = TestArchive::new();
+    archive.file(MANIFEST, MANIFEST_BYTES);
+    archive.file_declaring_attributes(&library_entry(TARGET, LIBRARY_FILE), LIBRARY_BYTES, 0);
+    let staged = extract_archive(&archive.finish(), TARGET).expect("an undeclared mode stages");
+    assert_eq!(
+        std::fs::read(staged.library_path()).expect("the library is staged"),
+        LIBRARY_BYTES
+    );
+}
+
+#[test]
+fn an_entry_declaring_a_wider_mode_is_refused() {
+    // The default a producer gets from the `zip` writer when it does not choose
+    // a mode: 0o644, which is wider than the 0o600 this host writes.
+    let archive = archive_then(TARGET, |archive| {
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .external_attributes((0o100000 | 0o644) << 16);
+        archive.entry(&library_entry(TARGET, "default.so"), b"x", options);
+    });
+    assert_eq!(
+        refusal(&archive, TARGET),
+        StageError::EntryModeRefused {
+            name: library_entry(TARGET, "default.so"),
+            mode: 0o100644
         }
     );
 }
