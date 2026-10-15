@@ -47,9 +47,16 @@ fn poll_once(call: &mut PluginCall) -> Poll<Result<Vec<u8>, CallError>> {
 /// The authoring adapter logs an accepted cancel through the host callback, so
 /// this is the plugin side of "the host did or did not call the plugin".
 fn plugin_saw_cancel(host: &Host, request_id: u64) -> bool {
+    plugin_cancel_count(host, request_id) > 0
+}
+
+/// How many accepted cancels for one id the plugin recorded.
+fn plugin_cancel_count(host: &Host, request_id: u64) -> usize {
+    let line = format!("cancel accepted for request {request_id}");
     host.logs()
         .iter()
-        .any(|line| line.contains(&format!("cancel accepted for request {request_id}")))
+        .filter(|recorded| recorded.contains(&line))
+        .count()
 }
 
 #[test]
@@ -118,10 +125,10 @@ fn cancelling_an_unknown_or_finished_id_answers_not_found_without_calling_the_pl
         CallError::Status(MetisStatus::NotFound),
         "an id another instance holds is not an id this instance holds"
     );
-    assert!(
-        !plugin_saw_cancel(&other_host, 7),
-        "another instance's cancel never reached the plugin: {:?}",
-        other_host.logs()
+    assert_eq!(
+        plugin_cancel_count(&host, 7) + plugin_cancel_count(&other_host, 7),
+        0,
+        "the cancel never entered the plugin through either host"
     );
     assert!(
         matches!(poll_once(&mut live), Poll::Pending),
@@ -145,11 +152,18 @@ fn cancelling_an_unknown_or_finished_id_answers_not_found_without_calling_the_pl
     }
     drop(call);
 
-    // An already finished id: the call is gone, so the host no longer holds it.
+    // An already finished id: the call is gone, so the host no longer holds it,
+    // and the two accepted cancels above are the only ones the plugin saw.
     assert_eq!(
         instance.cancel(12).unwrap_err(),
         CallError::Status(MetisStatus::NotFound),
         "an already finished call is not an id the host holds"
+    );
+    assert_eq!(
+        plugin_cancel_count(&host, 12),
+        2,
+        "the refusal for the finished id never entered the plugin: {:?}",
+        host.logs()
     );
     drop(live);
 }
@@ -320,10 +334,10 @@ fn the_instance_wide_loop_cancels_every_call_on_one_instance_and_reports_what_it
     );
 
     // The other instance's call is not this instance's to cancel.
-    assert!(
-        !plugin_saw_cancel(&other_host, 54),
-        "another instance's call was not cancelled: {:?}",
-        other_host.logs()
+    assert_eq!(
+        plugin_cancel_count(&host, 54) + plugin_cancel_count(&other_host, 54),
+        0,
+        "another instance's call was not cancelled through either host"
     );
     assert!(
         matches!(poll_once(&mut elsewhere), Poll::Pending),
