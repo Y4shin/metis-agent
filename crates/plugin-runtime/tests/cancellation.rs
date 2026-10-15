@@ -19,7 +19,17 @@ use std::task::{Context, Poll, Waker};
 use plugin_contract::abi::MetisStatus;
 use plugin_runtime::{CallError, Host, PluginCall};
 
-use support::{new_instance, request};
+use support::{block_on, decode, new_instance, request};
+
+/// Every owning waker reference the host handed out was released.
+fn assert_references_balanced(host: &Host, what: &str) {
+    let (handed_out, released, _) = host.waker_counts();
+    assert!(handed_out > 0, "{what}: no waker reference was handed out");
+    assert_eq!(
+        handed_out, released,
+        "{what}: every owning reference the host handed out is released"
+    );
+}
 
 /// Polls one call once.
 ///
@@ -39,6 +49,54 @@ fn plugin_saw_cancel(host: &Host, request_id: u64) -> bool {
     host.logs()
         .iter()
         .any(|line| line.contains(&format!("cancel accepted for request {request_id}")))
+}
+
+#[test]
+fn a_cancel_dropped_before_the_plugin_acknowledged_is_recorded_and_the_instance_keeps_serving() {
+    let (host, instance) = new_instance();
+    let mut call = instance
+        .invoke("tool.cancellable", 21, &request("cancel"))
+        .expect("the future starts");
+    assert!(matches!(poll_once(&mut call), Poll::Pending));
+    instance
+        .cancel(21)
+        .expect("the host holds the id, so the plugin marks its token");
+
+    // The caller's deadline passes and the caller drops the call, so the
+    // plugin's future is reclaimed before it ever resolved as cancelled.
+    drop(call);
+
+    let ordering = host.ordering();
+    assert!(
+        ordering
+            .iter()
+            .any(|event| event.contains("call 21") && event.contains("unacknowledged")),
+        "an unacknowledged cancel is recorded on the ledger: {ordering:?}"
+    );
+    assert!(
+        !instance.is_quarantined(),
+        "a slow call is not an unsafe one, so the instance is not quarantined"
+    );
+    assert!(
+        !ordering
+            .iter()
+            .any(|event| event.contains("quarantined")),
+        "nothing quarantines the instance: {ordering:?}"
+    );
+    assert!(
+        instance.in_flight().is_empty(),
+        "the drop is the reclaim, so nothing is still in flight"
+    );
+
+    // The instance keeps serving, which is what the drop path's reclaim buys.
+    let body = block_on(
+        instance
+            .invoke("tool.echo", 22, &request("after"))
+            .expect("the future starts"),
+    )
+    .expect("the next call to the instance succeeds");
+    assert_eq!(decode(&body).echo, "after");
+    assert_references_balanced(&host, "an unacknowledged cancel and the call after it");
 }
 
 #[test]

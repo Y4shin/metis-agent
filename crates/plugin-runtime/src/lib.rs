@@ -334,6 +334,7 @@ impl Future for PluginInit {
                             capabilities,
                             quarantined: AtomicBool::new(false),
                             in_flight: Mutex::new(HashSet::new()),
+                            accepted_cancels: Mutex::new(HashSet::new()),
                         })))
                     }
                     Err(error) => {
@@ -622,6 +623,14 @@ pub struct Instance {
     /// The request ids this instance still holds a future for. Nothing may be
     /// unloaded while this is non-empty.
     in_flight: Mutex<HashSet<u64>>,
+    /// The request ids whose cancellation token the plugin marked and whose
+    /// call is still held here.
+    ///
+    /// A cancel is entered when the plugin accepts it and removed when the
+    /// call's future is dropped. Whether the plugin acknowledged it is the
+    /// call's own fact rather than this set's, because only a poll observes the
+    /// terminal `Cancelled` status.
+    accepted_cancels: Mutex<HashSet<u64>>,
 }
 
 // SAFETY: everything the instance touches is the loaded table, whose entries
@@ -667,6 +676,15 @@ impl Instance {
     /// The request ids this instance still holds a future for.
     pub fn in_flight(&self) -> HashSet<u64> {
         self.in_flight.lock().unwrap().clone()
+    }
+
+    /// Whether the plugin accepted a cancel for this id, clearing the record.
+    ///
+    /// It is the call's drop that asks, because a dropped call can never be
+    /// resolved as cancelled again: what it returns is whether the plugin was
+    /// asked to cancel a call it left unacknowledged.
+    fn take_cancel(&self, request_id: u64) -> bool {
+        self.accepted_cancels.lock().unwrap().remove(&request_id)
     }
 
     /// Starts one call and returns the future the host polls.
@@ -726,6 +744,7 @@ impl Instance {
                 counts: Arc::clone(&self.host.inner),
                 request_id,
             }),
+            acknowledged: false,
         })
     }
 
@@ -756,6 +775,7 @@ impl Instance {
         if status != MetisStatus::Ok {
             return Err(status);
         }
+        self.accepted_cancels.lock().unwrap().insert(request_id);
         Ok(())
     }
 
@@ -881,6 +901,9 @@ pub struct PluginCall {
     handle: MetisFutureHandle,
     request_id: u64,
     state: Arc<CallState>,
+    /// Whether a poll observed the plugin's terminal `Cancelled` status for this
+    /// call, which is what acknowledging a cancel means here.
+    acknowledged: bool,
 }
 
 impl PluginCall {
@@ -944,6 +967,10 @@ impl Future for PluginCall {
                 Poll::Pending
             }
             MetisStatus::Ok => Poll::Ready(this.take_buffer(out)),
+            MetisStatus::Cancelled => {
+                this.acknowledged = true;
+                Poll::Ready(Err(CallError::Status(MetisStatus::Cancelled)))
+            }
             terminal => Poll::Ready(Err(CallError::Status(terminal))),
         }
     }
@@ -953,6 +980,17 @@ impl Drop for PluginCall {
     fn drop(&mut self) {
         if self.state.dropped.swap(true, SeqCst) {
             return;
+        }
+        // A cancel the plugin accepted and never resolved as cancelled is the
+        // caller's deadline having passed. It is recorded on the ledger and the
+        // instance keeps serving, because the drop below reclaims the plugin's
+        // context: a slow call is not an unsafe one, so this is not a
+        // quarantine.
+        if self.instance.take_cancel(self.request_id) && !self.acknowledged {
+            self.instance.host.order(format!(
+                "call {} cancel unacknowledged: the plugin never resolved it as cancelled",
+                self.request_id
+            ));
         }
         // SAFETY: the handle came from this table's `invoke_future` and this is
         // its one drop.
