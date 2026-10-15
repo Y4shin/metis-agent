@@ -48,6 +48,21 @@ not a requirement.
   feature gate. This effort re-exports them and owns the waker bridge, the
   boxed-future helper, the typed facades and schema derivation, serialisation
   helpers, core plugins, and the CLI.
+- The authoring trait this effort re-exports changed underneath it, and no
+  `metis-plugins` ticket owns the migration. `abi-initialisation-entry` (working
+  tip `c6666ff`, merge `9c9fd2a`) replaced instance creation with asynchronous
+  initialisation: `Plugin` now requires `fn init(host: Host, initialisation:
+  Initialisation) -> impl Future<Output = Result<Self, PluginError>>`, `Default`
+  is gone, `started` is gone, and `stopped` stays. `Initialisation` and
+  `HostContext` are public in `plugin_contract::authoring` behind the
+  `authoring` feature, the initialisation body is the `{"config",
+  "host_context"}` object `docs/plugin-contract.md` section 18 fixes, and the
+  table's slot 0 is `init_plugin` at ABI minor 2 with the major and
+  `metis_plugin_entry_v1` unchanged. The old shape is not reachable behind a
+  flag, so the SDK's re-export, its waker bridge and boxed-future helper, its
+  typed facades and the CLI's scaffold are all written against the new trait,
+  and the fixture's `FixtureConfig` is the landed pattern for a plugin declaring
+  its own configuration.
 - The bootstrap deliberately left `plugin-sdk` uncreated; this effort creates
   it when the boundary proves useful.
 
