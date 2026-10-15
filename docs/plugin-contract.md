@@ -476,9 +476,11 @@ feature-enabled beyond what these checks need, so the path that reads untrusted
 bytes adds no build step. Measured at `plugin-runtime` for the `bundle`
 verification ticket:
 
-- `cargo tree -p plugin-runtime --edges normal --prefix none | sort -u | wc -l`:
-  66 crates before, 85 after, so the parse path adds 19 including its four direct
-  ones.
+- `cargo tree -p plugin-runtime --edges normal --prefix none | grep -v '(*)' |
+  sort -u | wc -l`: 66 crates before, 85 after, so the parse path adds 19
+  including its four direct ones. The `grep -v '(*)'` drops the marker lines
+  `cargo tree` prints for a repeated subtree, which `sort -u` would otherwise
+  count a second time; run without it the same pipe prints 77 and 101.
 - The same pipe without `--edges normal`, which includes the test-only signer:
   76 crates before, 101 after.
 - The only added crate with a build script is `curve25519-dalek`, whose script

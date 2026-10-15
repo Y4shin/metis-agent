@@ -3,7 +3,7 @@ type: ticket
 subtype: feature
 title: Verify a bundle's container, chain and payload signature
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 size: l
 ---
@@ -117,3 +117,29 @@ landing.
   figures are the correct counts of distinct crates (85 - 66 = 19 added, which
   verify reproduced), so the substantive claim holds; the pipeline needs
   `| grep -v '(*)'` before the numbers are quoted.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `de43743`, after `main` was
+merged in, and passes: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`, `cargo test`, `buf lint`, `buf breaking`, `bash
+scripts/regenerate-contracts.sh --check`, `bash scripts/build-c-plugin.sh`,
+`cargo check -p plugin-contract --no-default-features`, `cargo run -p
+plugin-fixture --bin abi-harness` and `bash scripts/regenerate-abi-header.sh
+--check`.
+
+The one documentation defect the landing carried is fixed in this harvest:
+`docs/plugin-contract.md` section 17.7's two `cargo tree` pipelines now filter
+`cargo tree`'s repeated-subtree marker with `| grep -v '(*)'`, and the section
+records both the filtered and the unfiltered figures, so a later reader cannot
+quote an over-count. `docs/testing.md` already describes the vectors, the
+regeneration command and the verifier's test file, so it needed no change.
+
+Durable lessons for the tickets that follow. The container format is committed
+byte for byte, so `bundle-extraction`, `sample-bundle-ci` and the SDK signing
+CLI must sign `DOMAIN_TAG || header || chain || archive` and must carry the
+root's own certificate as the chain's last link. `VerifiedBundle` deliberately
+exposes only `header()`, `archive()` and `leaf_common_name()`, so a dependent
+that needs another chain detail adds an accessor first. `startup-policy`
+classifies through `BundleError::is_trust_failure()` rather than matching the
+26 error variants, because the predicate is the stable seam.
