@@ -3,7 +3,7 @@ type: ticket
 subtype: bug
 title: A capability name routes by its owner, not by the first dot
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 size: s
 ---
