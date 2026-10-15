@@ -24,8 +24,12 @@
 //! - `tool.newer`, whose descriptor version is one a host of this revision does
 //!   not support, so the host refuses that one capability and keeps the rest of
 //!   the plugin.
+//! - `tool.deferred`, which keeps one clone of the waker it is polled with and
+//!   stays pending, so that clone outlives the call.
+//! - `tool.wake_deferred`, which wakes that kept clone; when it is called after
+//!   the deferred call was dropped, it is the wake-after-drop case.
 //!
-//! Eight capabilities, not four: the routed `call` has no ceiling, and the
+//! Ten capabilities, not four: the routed `call` has no ceiling, and the
 //! harness drives every one by name.
 //!
 //! The wiring at the bottom is the whole ABI footprint: one `const fn` table and
@@ -33,8 +37,11 @@
 
 pub mod payload;
 
+use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Once;
+use std::pin::Pin;
+use std::sync::{Mutex, Once};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use plugin_contract::abi::MetisPluginTableV1;
@@ -82,7 +89,7 @@ fn descriptor(name: &str) -> CapabilityDescriptor {
 }
 
 /// The capability names, in the order the plugin declares them.
-pub const CAPABILITIES: [&str; 8] = [
+pub const CAPABILITIES: [&str; 10] = [
     "tool.echo",
     "tool.pending",
     "tool.cancellable",
@@ -90,8 +97,37 @@ pub const CAPABILITIES: [&str; 8] = [
     "tool.panic",
     "tool.panic_drop",
     "tool.blocking",
+    DEFERRED_CAPABILITY,
+    WAKE_DEFERRED_CAPABILITY,
     NEWER_CAPABILITY,
 ];
+
+/// The capability that keeps one clone of the waker it is polled with.
+pub const DEFERRED_CAPABILITY: &str = "tool.deferred";
+
+/// The capability that wakes the clone [`DEFERRED_CAPABILITY`] kept.
+pub const WAKE_DEFERRED_CAPABILITY: &str = "tool.wake_deferred";
+
+/// One clone of a poll's waker, kept by the plugin rather than by the call.
+///
+/// It lives here and not in the future on purpose: a clone the future holds is
+/// released when the future is dropped, while a clone the plugin keeps outlives
+/// the call. Waking it afterwards is the wake-after-drop case the host has to
+/// record rather than crash on.
+static DEFERRED_WAKER: Mutex<Option<Waker>> = Mutex::new(None);
+
+/// The future `tool.deferred` parks: it keeps one clone of the waker it is
+/// polled with and never resolves on its own.
+struct Deferred;
+
+impl Future for Deferred {
+    type Output = Result<Response, PluginError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        *DEFERRED_WAKER.lock().unwrap() = Some(context.waker().clone());
+        Poll::Pending
+    }
+}
 
 /// The guard whose destructor panics, so the panic lands in the host's `drop`
 /// call rather than in a poll.
@@ -127,6 +163,18 @@ impl Plugin for Fixture {
                     bytes: 0,
                 })
             }
+            // The kept clone is woken here. When this capability runs after the
+            // deferred call was dropped, that wake is the late one.
+            WAKE_DEFERRED_CAPABILITY => {
+                if let Some(waker) = DEFERRED_WAKER.lock().unwrap().take() {
+                    waker.wake();
+                }
+                Response::json(&EchoResponse {
+                    echo: "woke the deferred call".to_string(),
+                    bytes: "woke the deferred call".len(),
+                })
+            }
+            DEFERRED_CAPABILITY => Deferred.await,
             // The gated capability still serves when it is called: the refusal
             // belongs to the host's version gate, and this arm is what lets the
             // harness prove the plugin was never the refusing party.

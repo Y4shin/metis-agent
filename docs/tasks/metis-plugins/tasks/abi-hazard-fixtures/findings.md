@@ -73,6 +73,14 @@ devenv shell -- "$CARGO_TARGET_DIR/debug/probe"
 
 `Host::waker_counts()` is `(cloned, released, wakes_after_drop)`.
 
+> Post-fix note, 2026-10-14, `waker-lifecycle-fix` (merge `dd7e1bf`): the first
+> element now counts every owning waker reference the host handed out, which is
+> one per poll plus one per clone, so the numbers below describe the prototype's
+> pre-fix meaning. The measurements are unchanged and stay valid. The late wake
+> is now recorded by `Host::wakes_after_drop()`, which names the request ids in
+> arrival order, and that record stays a counter rather than an ordering-ledger
+> line.
+
 Hazard one, variant A (plugin clones the waker, stores the clone, leaks the base
 the way the shipped SDK does):
 

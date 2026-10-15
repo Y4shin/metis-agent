@@ -64,7 +64,7 @@ const WATCHDOG: Duration = Duration::from_millis(80);
 const CANCEL_WINDOW: Duration = Duration::from_millis(150);
 
 /// The capabilities the fixture advertises, in declaration order.
-const EXPECTED_CAPABILITIES: [&str; 8] = [
+const EXPECTED_CAPABILITIES: [&str; 10] = [
     "tool.echo",
     "tool.pending",
     "tool.cancellable",
@@ -72,6 +72,8 @@ const EXPECTED_CAPABILITIES: [&str; 8] = [
     "tool.panic",
     "tool.panic_drop",
     "tool.blocking",
+    "tool.deferred",
+    "tool.wake_deferred",
     REFUSED_CAPABILITY,
 ];
 
