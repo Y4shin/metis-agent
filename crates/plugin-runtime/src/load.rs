@@ -117,6 +117,22 @@ pub enum LoadError {
     },
     /// The registry refused the instance's declaration.
     Registration(RegistryError),
+    /// A plugin whose initialisation failed could not be unloaded, so start-up
+    /// has to stop.
+    ///
+    /// It is the recovery's own refusal and not the initialisation's: the
+    /// plugin's future was dropped and the instance pointer the entry handed out
+    /// was then passed to `destroy_instance`, which refused. Continuing would
+    /// leave the daemon holding an instance it cannot describe, so this is the
+    /// one cleanup failure a caller must act on rather than record.
+    UnloadRefused {
+        /// The plugin's name, as its manifest declares it.
+        plugin: String,
+        /// The teardown entry that refused, named as the table names it.
+        step: String,
+        /// The status that entry answered.
+        status: MetisStatus,
+    },
 }
 
 impl std::fmt::Display for LoadError {
@@ -148,6 +164,15 @@ impl std::fmt::Display for LoadError {
                 "the manifest and the library disagree about the capability list: {capability} {detail}"
             ),
             LoadError::Registration(error) => write!(f, "{error}"),
+            LoadError::UnloadRefused {
+                plugin,
+                step,
+                status,
+            } => write!(
+                f,
+                "{plugin} could not be unloaded, because {step} answered {}",
+                status.as_str()
+            ),
         }
     }
 }
@@ -258,9 +283,21 @@ pub async fn load_bundle(
     let init = loaded
         .init_plugin(&instance_host, &body)
         .map_err(|error| initialisation_refusal(&name, error))?;
-    let instance = init
-        .await
-        .map_err(|error| initialisation_refusal(&name, error))?;
+    let outcome = init.await;
+    // The initialisation future has been dropped by the end of the statement
+    // above, so a teardown step of that recovery which refused is recorded by
+    // now. It is read before the failure is classified, because it is the more
+    // severe fact: a plugin that could not be unloaded is not the same outcome as
+    // one that failed and was unloaded cleanly, and only the caller can decide to
+    // stop.
+    if let Some(refused) = host.take_refused_unload() {
+        return Err(LoadError::UnloadRefused {
+            plugin: name,
+            step: refused.step.to_string(),
+            status: refused.status,
+        });
+    }
+    let instance = outcome.map_err(|error| initialisation_refusal(&name, error))?;
     cross_check(&manifest, &instance)?;
     let capabilities = instance.capabilities().to_vec();
     let mut registry = Registry::new();

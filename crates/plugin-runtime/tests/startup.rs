@@ -195,6 +195,12 @@ impl Bundle {
         self
     }
 
+    /// The same bundle carrying another library under `file`.
+    fn with_library(mut self, file: &str, bytes: &[u8]) -> Bundle {
+        self.library = Some((file.to_string(), bytes.to_vec()));
+        self
+    }
+
     /// The same bundle with one more archive entry.
     fn with_entry(mut self, name: &str, bytes: &[u8]) -> Bundle {
         self.extra.push((name.to_string(), bytes.to_vec()));
@@ -816,4 +822,56 @@ fn one_broken_bundle_among_several_leaves_the_others_loaded_and_serving() {
         "hello",
         "the response is the started plugin's own"
     );
+}
+
+/// The library file a bundle carries, inside this host's target directory.
+const FAULT_LIBRARY: &str = "librefusing_destroy.so";
+
+#[test]
+fn a_refused_unload_stops_start_up() {
+    let mut plugins = Plugins::new();
+    // A library whose initialisation fails and whose instance is not destroyed
+    // when the host recovers from that failure: no library in this tree refuses
+    // `destroy_instance`, so the test compiles one that does.
+    let built = support::compiled_fixture("refusing_destroy");
+    let bytes =
+        std::fs::read(&built).unwrap_or_else(|error| panic!("{} reads: {error}", built.display()));
+    plugins.write(
+        "refusing",
+        "refusing",
+        &Bundle::new(Some(manifest_declaring(
+            "refusing",
+            &[],
+            &support::bundle::host_target(),
+            FAULT_LIBRARY,
+            1,
+            2,
+        )))
+        .with_library(FAULT_LIBRARY, &bytes),
+    );
+
+    let stop = refusal(plugins.start(), "a refused unload stops start-up");
+
+    match stop.error() {
+        LoadError::UnloadRefused {
+            plugin,
+            step,
+            status,
+        } => {
+            assert_eq!(
+                plugin, "refusing",
+                "the refusal names the plugin that could not be unloaded"
+            );
+            assert_eq!(
+                step, "destroy_instance",
+                "the refusal names the step that refused"
+            );
+            assert_eq!(
+                status,
+                &MetisStatus::Internal,
+                "the refusal carries the status the step answered"
+            );
+        }
+        other => panic!("a refused unload stops start-up, and this outcome is {other}"),
+    }
 }

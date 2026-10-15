@@ -283,7 +283,7 @@ fn describe(path: &Path, trust: &TrustStore) -> Option<(String, Vec<CapabilityDe
 fn stops_startup(error: &LoadError) -> bool {
     match error {
         LoadError::Trust(failure) => failure.is_trust_failure(),
-        LoadError::Unreadable { .. } => true,
+        LoadError::Unreadable { .. } | LoadError::UnloadRefused { .. } => true,
         LoadError::Manifest(
             ManifestError::Absent { .. }
             | ManifestError::Unreadable { .. }

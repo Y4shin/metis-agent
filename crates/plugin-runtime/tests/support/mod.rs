@@ -13,8 +13,9 @@
 //! runtime hands back a `Future`; polling it is the caller's business, and these
 //! tests are the caller.
 
+use std::ffi::OsString;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -78,6 +79,70 @@ pub fn fixture_path() -> PathBuf {
         .join("../target/debug/libplugin_fixture.so")
         .canonicalize()
         .expect("the fixture library exists beside its build directory")
+}
+
+/// Compiles one of the `tests/fixtures/` sources into a cdylib, once per name.
+///
+/// A fixture is a library this tree did not write: it restates the contract's
+/// shapes itself, so a rule that only holds for the fixture cannot be shown to
+/// it. The library is rebuilt whenever its source is newer than it, so a run
+/// never loads a stale one.
+pub fn compiled_fixture(name: &str) -> PathBuf {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(format!("{name}.rs"));
+    let directory = repository_root().join("target/fixture-tests");
+    std::fs::create_dir_all(&directory).expect("the test's scratch directory is creatable");
+    let library = directory.join(format!("lib{name}{}", std::env::consts::DLL_SUFFIX));
+    if built_after(&library, &source) {
+        return library;
+    }
+    // The compiler writes beside the library and the result is moved into
+    // place, so a run that is killed mid-compile leaves no partial library.
+    let building = directory.join(format!(
+        "lib{name}.building{}",
+        std::env::consts::DLL_SUFFIX
+    ));
+    let status = Command::new(rustc())
+        .arg("--crate-type=cdylib")
+        .arg("--edition=2024")
+        .arg("-o")
+        .arg(&building)
+        .arg(&source)
+        .status()
+        .expect("rustc is runnable from a test, as the fixture build already assumes");
+    assert!(status.success(), "the fixture {} builds", source.display());
+    std::fs::rename(&building, &library).expect("the built library is moved into place");
+    library
+}
+
+/// The repository root, which is two levels above this crate.
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .parent()
+        .expect("the repository root")
+        .to_path_buf()
+}
+
+/// The `rustc` a fixture is compiled with.
+///
+/// Every command of this effort runs inside the devenv shell, which is where the
+/// toolchain's `rustc` is on `PATH`; `RUSTC` names it when a caller set that.
+fn rustc() -> OsString {
+    std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into())
+}
+
+/// Whether a built fixture is at least as new as the source it came from.
+fn built_after(library: &Path, source: &Path) -> bool {
+    let built = library.metadata().and_then(|metadata| metadata.modified());
+    let written = source.metadata().and_then(|metadata| metadata.modified());
+    match (built, written) {
+        (Ok(built), Ok(written)) => built >= written,
+        _ => false,
+    }
 }
 
 /// Builds and loads the fixture cdylib.
