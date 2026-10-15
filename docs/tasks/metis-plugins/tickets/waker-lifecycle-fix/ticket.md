@@ -3,7 +3,7 @@ type: ticket
 subtype: bug
 title: Fix the waker lifecycle defects the hazard prototype measured
 status: stable
-workflow_state: ready
+workflow_state: done
 blocked_by: []
 size: m
 ---
