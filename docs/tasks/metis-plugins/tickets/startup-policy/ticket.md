@@ -3,8 +3,9 @@ type: ticket
 subtype: feature
 title: Start-up outcomes and the disabled placeholder
 status: stable
-workflow_state: ready
-blocked_by: [async-initialisation]
+workflow_state: done
+blocked_by:
+- async-initialisation
 size: m
 ---
 
@@ -114,3 +115,30 @@ stay mapped; the disabled placeholder's second read of its bundle repeats
 `verify_bundle`, `extract` and the manifest read, which is the cost the resolution
 accepted and never runs for a bundle that started; and `start_plugins`'s
 configuration key remains a caller contract only until the arch spec names it.
+
+### Knowledge harvest
+
+The CI gate was re-run on the landing branch at `cbd8b6d`, after `main` was
+merged in, and all eleven commands pass. The two unreachable criteria this
+ticket stopped on are closed by the operator's recorded resolution, which is
+committed at `.work/resolution.md`: criterion 4 by the tenth `LoadError` variant
+and a fault library, criterion 2 by the placeholder path's second read. The
+three minor decisions were taken as the resolution directs and are visible in
+the landed code.
+
+Durable lessons for `teardown-and-release` and `sample-bundle-ci`. A stop is a
+`Result` rather than a report, so a caller must handle `StartupStop` and read the
+`Serving` values the report carries; a stop mid-pass drops already-started
+`Serving` values without unloading them, which is the release ticket's work. Each
+`Serving` carries its own registry, so a daemon that wants one registry registers
+each `Serving` into its own through `Registry::register`. A disabled plugin is
+answered by the report rather than by the registry, and its capabilities never
+appear in `offered_capabilities()`. The configuration map is keyed by the bundle
+file's stem, which is a caller contract until a contract sentence names it.
+
+One disagreement is left open rather than settled here. The resolution said the
+host context would be built from the name the load reports, but the payload is
+built before the manifest is read, so the landed policy builds it from the file
+stem while the instance is registered under the manifest's name. The arch spec
+records the landed rule and the disagreement; a bundle whose stem and manifest
+name differ therefore tells its plugin the stem.
