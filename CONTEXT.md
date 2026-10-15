@@ -21,8 +21,63 @@ _Avoid_: server (that is a deployment target, not the process), backend
 **Plugin**:
 An add-on that supplies a capability to the daemon. Plugin-based
 customization is how Metis stays minimal: the core is small, and optional
-complexity is added through plugins. The set of plugin types is not settled.
+complexity is added through plugins. A plugin supplies tools through
+capabilities; it does not export workflow steps.
 _Avoid_: extension, integration
+
+**Bundle**:
+The one file a plugin is installed as: a `.metis` archive holding the manifest
+and one library per target, inside a signed and versioned container. Signing
+covers everything a user installs, so there is no second artifact to keep in
+step.
+_Avoid_: package, plugin file, archive (for the shipped artifact)
+
+**Manifest**:
+The plain-text file at a bundle's root. It declares the plugin's identity and
+version, the ABI major and the minimum minor it needs, its library path per
+target, its capabilities with their schemas, and its configuration schema. It is
+written by hand or generated from the same source as the plugin's own
+declaration, and the host cross-checks the two.
+_Avoid_: metadata, descriptor (for the file)
+
+**Capability**:
+One named thing a plugin offers, qualified as `<instance>.<tool>` and carrying a
+kind, a version, and request and response schemas. A plugin advertises its
+capabilities before it serves anything, and the host refuses a call to one the
+plugin does not declare.
+_Avoid_: endpoint, command, tool (alone)
+
+**Target**:
+An operating system and architecture pair, spelled `<os>-<arch>`, such as
+`linux-x86_64`. A bundle carries one library per target it supports, and the host
+loads the one that matches it.
+_Avoid_: platform (alone), build
+
+**Host context**:
+What the host tells a plugin about itself when it initialises it, delivered in the
+same payload as the plugin's configuration. It names the instance by the identity
+the host resolved that configuration under, and is permissive so a host may add a
+field.
+_Avoid_: environment, settings
+
+**Disabled plugin**:
+A plugin the host refused to start. It is still listed, with its name, the reason
+and its capabilities when a manifest was readable, and invoking one answers the
+disabled route error with that reason. A disabled plugin whose manifest could not
+be read is named by its bundle's file stem.
+_Avoid_: failed plugin, broken plugin
+
+**Sink**:
+The single destination for everything a plugin says outside its response:
+progress, events, logs and service requests. It cannot fail and must not block,
+and a host with no sink is legal.
+_Avoid_: callback handler, output stream
+
+**Ordering ledger**:
+The host's ordered record of the lifecycle steps it took for an instance, from
+load through call, cancellation and teardown. It is what makes unloading safe to
+check: an instance is unloaded only when nothing is inside plugin code.
+_Avoid_: log, history, audit trail
 
 **Chat session**:
 A conversation with the assistant. Supported, with a deliberately simple

@@ -762,6 +762,14 @@ outcomes.
 Three rules follow from that table, and they are the policy rather than an
 implementation of it.
 
+**A bundle's identity before its manifest is read is its file's stem.** The
+daemon resolves the configuration for a bundle by the name it found the file
+under, and a placeholder whose manifest could not be read is named by that stem,
+so a plugin is always told the identity its configuration was resolved under.
+Once the manifest is readable, the name the manifest declares is the registration
+and routing identity, which is why the load entry rejects a manifest whose name
+disagrees with the name the bundle's chain carries.
+
 **A trust failure stops and a file this build cannot read does not.** The split
 is the predicate of section 17.6, `is_trust_failure`: a signature this daemon does
 not trust is evidence that something is wrong, while a container this build
