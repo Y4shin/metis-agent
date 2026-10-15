@@ -29,6 +29,7 @@ use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
+use std::time::Instant;
 
 use plugin_contract::abi::*;
 use plugin_contract::payload::{metis_encode_payload, metis_payload_body};
@@ -90,6 +91,32 @@ impl From<MetisAbiError> for CallError {
     fn from(error: MetisAbiError) -> Self {
         CallError::Version(error)
     }
+}
+
+/// What one instance-wide cancel pass did.
+///
+/// The runtime holds no timer and no default deadline, so this is the caller's
+/// record of the pass it asked for: the deadline it handed in, the calls whose
+/// tokens were marked, and the ones the pass could not mark. Nothing here waits,
+/// which is why the report is the whole result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelReport {
+    /// The deadline the caller handed in, named back rather than armed.
+    pub deadline: Instant,
+    /// The request ids whose cancellation token the plugin marked, in ascending
+    /// id order.
+    pub cancelled: Vec<u64>,
+    /// The request ids the pass could not mark, and what each answered.
+    pub refused: Vec<RefusedCancel>,
+}
+
+/// One in-flight call an instance-wide cancel could not mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusedCancel {
+    /// The request id the pass reached.
+    pub request_id: u64,
+    /// The frozen status the cancel answered.
+    pub status: MetisStatus,
 }
 
 // --- loading --------------------------------------------------------------
@@ -334,6 +361,7 @@ impl Future for PluginInit {
                             capabilities,
                             quarantined: AtomicBool::new(false),
                             in_flight: Mutex::new(HashSet::new()),
+                            accepted_cancels: Mutex::new(HashSet::new()),
                         })))
                     }
                     Err(error) => {
@@ -539,6 +567,30 @@ impl Host {
         Some(services.remove(index))
     }
 
+    /// Cancels every service request the host still holds for one call, and
+    /// returns what it released.
+    ///
+    /// A service request is a plugin-owned buffer, and what the host keeps of
+    /// it is the copy it took at the callback, so this is the buffer the host
+    /// still holds for the call. Dropping that copy is what makes "no
+    /// completion is ever delivered into a released context" true: after it,
+    /// the id is not in the pending set, so [`Instance::complete_service`]
+    /// refuses a later answer instead of handing it into a context that is
+    /// gone. The call's own drop is what calls this, so it is not part of the
+    /// seam a daemon drives.
+    pub(crate) fn cancel_services(&self, request_id: u64) -> Vec<PendingService> {
+        let mut services = self.inner.services.lock().unwrap();
+        let mut released = Vec::new();
+        services.retain(|service| {
+            let mine = service.request_id == request_id;
+            if mine {
+                released.push(service.clone());
+            }
+            !mine
+        });
+        released
+    }
+
     /// The ordering ledger: the steps unload safety depends on.
     pub fn ordering(&self) -> Vec<String> {
         self.inner.order.lock().unwrap().clone()
@@ -622,6 +674,14 @@ pub struct Instance {
     /// The request ids this instance still holds a future for. Nothing may be
     /// unloaded while this is non-empty.
     in_flight: Mutex<HashSet<u64>>,
+    /// The request ids whose cancellation token the plugin marked and whose
+    /// call is still held here.
+    ///
+    /// A cancel is entered when the plugin accepts it and removed when the
+    /// call's future is dropped. Whether the plugin acknowledged it is the
+    /// call's own fact rather than this set's, because only a poll observes the
+    /// terminal `Cancelled` status.
+    accepted_cancels: Mutex<HashSet<u64>>,
 }
 
 // SAFETY: everything the instance touches is the loaded table, whose entries
@@ -667,6 +727,15 @@ impl Instance {
     /// The request ids this instance still holds a future for.
     pub fn in_flight(&self) -> HashSet<u64> {
         self.in_flight.lock().unwrap().clone()
+    }
+
+    /// Whether the plugin accepted a cancel for this id, clearing the record.
+    ///
+    /// It is the call's drop that asks, because a dropped call can never be
+    /// resolved as cancelled again: what it returns is whether the plugin was
+    /// asked to cancel a call it left unacknowledged.
+    fn take_cancel(&self, request_id: u64) -> bool {
+        self.accepted_cancels.lock().unwrap().remove(&request_id)
     }
 
     /// Starts one call and returns the future the host polls.
@@ -726,31 +795,87 @@ impl Instance {
                 counts: Arc::clone(&self.host.inner),
                 request_id,
             }),
+            acknowledged: false,
         })
     }
 
     /// Marks a call's cancellation token. The plugin's future is expected to
     /// resolve as `Cancelled` on its next poll.
+    ///
+    /// An id this instance does not hold is answered as the frozen `NotFound`
+    /// status and the plugin is not called: the in-flight set is the host's own
+    /// record of what it holds, and the plugin's call registry is process-wide,
+    /// so entering the plugin with an id that belongs elsewhere would mark
+    /// another instance's call.
     pub fn cancel(&self, request_id: u64) -> Result<(), CallError> {
+        self.mark_cancel(request_id).map_err(CallError::Status)
+    }
+
+    /// The token-marking step, typed as the frozen status.
+    ///
+    /// The instance-wide form loops over this rather than over [`Instance::cancel`],
+    /// because the loop has no error variant of this crate's own to invent: an
+    /// id that left the in-flight set between the loop reading it and the token
+    /// being marked is the frozen `NotFound`.
+    fn mark_cancel(&self, request_id: u64) -> Result<(), MetisStatus> {
+        if !self.in_flight.lock().unwrap().contains(&request_id) {
+            return Err(MetisStatus::NotFound);
+        }
         // SAFETY: the instance is live and the function pointer is its own.
         let status = unsafe { (self.loaded.table().cancel)(self.handle, request_id) };
-        if status == MetisStatus::Ok {
-            Ok(())
-        } else {
-            Err(CallError::Status(status))
+        if status != MetisStatus::Ok {
+            return Err(status);
         }
+        self.accepted_cancels.lock().unwrap().insert(request_id);
+        Ok(())
+    }
+
+    /// Cancels every call on this instance, and reports what it did.
+    ///
+    /// The instance-wide form is a loop over this instance's own in-flight set,
+    /// so the plugin table does not change and another instance's calls are not
+    /// this instance's business. It waits for nothing: the deadline is the
+    /// caller's and is named back rather than armed here, because the runtime
+    /// holds no timer and no default deadline. The caller polls the calls to
+    /// observe the cancellations and drops the ones the plugin does not resolve
+    /// in time, which is what puts an unacknowledged cancel on the ledger.
+    pub fn cancel_all(&self, deadline: Instant) -> CancelReport {
+        let mut in_flight: Vec<u64> = self.in_flight().into_iter().collect();
+        // Ascending id order, so one state yields one report rather than the
+        // hash set's own order.
+        in_flight.sort_unstable();
+        let mut report = CancelReport {
+            deadline,
+            cancelled: Vec::new(),
+            refused: Vec::new(),
+        };
+        for request_id in in_flight {
+            match self.mark_cancel(request_id) {
+                Ok(()) => report.cancelled.push(request_id),
+                Err(status) => report.refused.push(RefusedCancel { request_id, status }),
+            }
+        }
+        report
     }
 
     /// Hands the plugin the host's answer to a service request.
     ///
     /// The answer payload is host-owned and borrowed for the call, so the host
     /// frees it when this returns.
+    ///
+    /// A completion for an id this instance no longer holds is answered as the
+    /// frozen `NotFound` status and the plugin is not called: the call's future
+    /// was dropped and its outstanding service requests were cancelled with it,
+    /// so there is no context left for the answer to reach.
     pub fn complete_service(
         &self,
         request_id: u64,
         status: MetisStatus,
         body: &[u8],
     ) -> Result<(), CallError> {
+        if !self.in_flight.lock().unwrap().contains(&request_id) {
+            return Err(CallError::Status(MetisStatus::NotFound));
+        }
         let encoded = if status == MetisStatus::Ok {
             metis_encode_payload(body)
         } else {
@@ -863,6 +988,9 @@ pub struct PluginCall {
     handle: MetisFutureHandle,
     request_id: u64,
     state: Arc<CallState>,
+    /// Whether a poll observed the plugin's terminal `Cancelled` status for this
+    /// call, which is what acknowledging a cancel means here.
+    acknowledged: bool,
 }
 
 impl PluginCall {
@@ -926,6 +1054,10 @@ impl Future for PluginCall {
                 Poll::Pending
             }
             MetisStatus::Ok => Poll::Ready(this.take_buffer(out)),
+            MetisStatus::Cancelled => {
+                this.acknowledged = true;
+                Poll::Ready(Err(CallError::Status(MetisStatus::Cancelled)))
+            }
             terminal => Poll::Ready(Err(CallError::Status(terminal))),
         }
     }
@@ -935,6 +1067,29 @@ impl Drop for PluginCall {
     fn drop(&mut self) {
         if self.state.dropped.swap(true, SeqCst) {
             return;
+        }
+        // Every buffer the host still holds for this call is released, and its
+        // outstanding service requests are cancelled with it, before the
+        // context is reclaimed: that is what keeps a completion from being
+        // delivered into a released context.
+        let released = self.instance.host.cancel_services(self.request_id);
+        if !released.is_empty() {
+            self.instance.host.order(format!(
+                "call {} released {} service request(s) the host still held",
+                self.request_id,
+                released.len()
+            ));
+        }
+        // A cancel the plugin accepted and never resolved as cancelled is the
+        // caller's deadline having passed. It is recorded on the ledger and the
+        // instance keeps serving, because the drop below reclaims the plugin's
+        // context: a slow call is not an unsafe one, so this is not a
+        // quarantine.
+        if self.instance.take_cancel(self.request_id) && !self.acknowledged {
+            self.instance.host.order(format!(
+                "call {} cancel unacknowledged: the plugin never resolved it as cancelled",
+                self.request_id
+            ));
         }
         // SAFETY: the handle came from this table's `invoke_future` and this is
         // its one drop.
