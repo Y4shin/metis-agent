@@ -66,6 +66,28 @@ not a requirement.
 - The bootstrap deliberately left `plugin-sdk` uncreated; this effort creates
   it when the boundary proves useful.
 
+## Tool disclosure responsibilities
+
+`docs/tool_disclosure_proposal.md` assigns plugin-authoring support for
+disclosure metadata to this effort:
+
+- Provide ergonomic Rust declarations for a tool capability's discovery
+  metadata and for reusable named toolsets with a concise use case, member
+  capabilities, and optional related toolsets or supporting capabilities.
+- Validate at build or package time that every toolset member names a
+  capability the plugin declares.
+- Generate the agreed backward-compatible bundle or manifest representation
+  and document the equivalent hand-authored form for plugins that implement
+  the C ABI directly.
+- Keep toolset membership separate from authorization. Declaring a toolset
+  grants no permission and changes no dispatch behavior.
+- Re-export shared descriptor types rather than defining a second SDK-only
+  shape.
+
+This effort does not implement catalog search, ranking, profile policy, the
+disclosure oracle, or active tool-view state. Those belong to `metis-daemon`
+and `metis-agent-core`.
+
 ## Fog
 
 - Error taxonomy, partly implemented: `CallError`, `RouteError` and
