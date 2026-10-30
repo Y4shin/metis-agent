@@ -59,6 +59,34 @@ and fan-in Lua step.
   belongs to an agent context; workflows inherit permissions but not the
   system prompt.
 
+## Tool disclosure responsibilities
+
+`docs/tool_disclosure_proposal.md` defines progressive tool disclosure for
+model-driven conversations and agent tasks. This effort owns the reusable,
+provider-neutral mechanism:
+
+- Define the active tool view and the disclosure request, decision, and
+  persistence-event types.
+- Support starter-selected tools plus an agent-requested disclosure oracle
+  that may replace or add to the non-pinned view.
+- Keep the assistant response that requests disclosure provisional, run the
+  side-effect-free oracle branch from the last committed state, exclude that
+  branch from model-visible chat history, persist the resulting view change,
+  and repeat the original model request with the selected structured schemas.
+- Change a tool view only at an idle boundary. A disclosure request cannot
+  share a provisional response with ordinary tool calls or user-visible text.
+- Preserve exact reconstruction of the ordered tool view through stable
+  schema identities and catalog and permission revisions.
+- Accept consumer-provided catalog, starter-selection, oracle-model, and
+  persistence interfaces. The harness does not depend on plugin metadata,
+  embeddings, daemon configuration, or one provider's native tool search.
+- Keep Lua workflow steps on exact declared dependencies. They do not use the
+  disclosure oracle or unrestricted dynamic lookup.
+
+Tool visibility never grants permission. The consumer supplies an
+authorization-filtered catalog, and dispatch still enforces the enclosing
+agent context's permissions.
+
 ## Fog
 
 - The exact Rust interfaces of the loop, provider contract, tool contract,
