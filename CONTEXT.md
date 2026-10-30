@@ -91,6 +91,27 @@ relative to hosted frontier models. Metis is designed to work well with
 these, which is why efficient prompt and context usage matters.
 _Avoid_: tiny model, weak model
 
+**Toolset**:
+A named discovery grouping of tool capabilities that are useful together for a
+task or workflow. It carries a concise use case and may name related toolsets or
+supporting capabilities. Membership grants no permission; the agent context
+remains the authorization boundary.
+_Avoid_: tool group, permission set
+
+**Tool view**:
+The exact ordered set of permitted tool schemas visible to one model request.
+It may contain pinned intrinsic tools, starter-selected tools, and tools chosen
+through the disclosure oracle. It is reconstructable session state rather than
+part of the agent context's system prompt.
+_Avoid_: tool permissions, tool registry
+
+**Disclosure oracle**:
+The side-effect-free selection path an agent can request when it needs a
+different tool view. It searches only permitted toolsets and capabilities,
+records the resulting tool-view change, and leaves its selection transcript out
+of model-visible chat history.
+_Avoid_: tool agent, planner
+
 ## Still open
 
 This vocabulary is young. Whether concepts such as sessions and tasks exist
