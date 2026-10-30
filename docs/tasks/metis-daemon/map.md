@@ -87,6 +87,34 @@ end and work can land as vertical slices rather than as an untested layer.
   secret, including listener keys, provider credentials, and plugin
   configuration.
 
+## Tool disclosure responsibilities
+
+`docs/tool_disclosure_proposal.md` assigns the concrete Metis disclosure policy
+to this effort:
+
+- Build a searchable catalog from registered plugin capabilities, plugin or
+  local toolset declarations, and stable schema identities.
+- Filter the catalog through the agent context's permissions before starter
+  selection, oracle search, inspection, or activation. Dispatch performs the
+  independent final permission check.
+- Implement cheap starter selection from structured metadata, lexical search,
+  embeddings, or a small selector model, with pinned tools as the low-confidence
+  fallback.
+- Implement the side-effect-free disclosure oracle and its read-only catalog
+  operations, schema budgets, attempt limits, deterministic ordering, and
+  `replace` and `add` behavior.
+- Resolve profile disclosure policy, including pinned intrinsic tools, oracle
+  availability, starter behavior, and active-schema budgets.
+- Use native provider tool search only when its adapter preserves the harness
+  contract. Otherwise provide the resolved structured tool list directly.
+- Persist tool-view-change events through the daemon's `SessionStore` and fail
+  loudly or follow an explicit compatibility path when a saved catalog or
+  schema revision is unavailable.
+
+The daemon owns ranking and indexing choices. `agent-harness` owns the
+provider-neutral control flow, rollback, lifecycle events, and reconstruction
+semantics.
+
 ## Fog
 
 - Error taxonomy, partly implemented: the errors a plugin produces reach the
